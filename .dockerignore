@@ -9,6 +9,8 @@
 !packages/**
 !apps/
 !apps/**
+!patches/
+!patches/**
 **/node_modules
 **/dist
 **/*.tsbuildinfo
