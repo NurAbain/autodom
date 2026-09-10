@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "autodom"
 version = "0.1.0"
-description = "Free Telegram car search and monitoring for Kyrgyzstan"
+description = "Free Telegram car search with permission-gated international sources"
 requires-python = ">=3.12"
 dependencies = [
   "aiogram>=3.13,<4",

@@ -12,6 +12,7 @@ from pathlib import Path
 from autodom.config import Settings, load_token
 from autodom.proxy import load_proxy_routes
 from autodom.runtime import run_bot, sync_pages
+from autodom.sources import source_status
 from autodom.storage import Store
 
 
@@ -44,9 +45,10 @@ def writer_lock(database: Path):
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="autodom",
-        description="Local car search and free Telegram monitoring. Configuration: .env.example.",
+        description="Car search and free Telegram monitoring. Configuration: .env.example.",
         epilog="Setup: uv sync --dev; export settings; uv run autodom sync --pages 3; uv run autodom run. "
         "Scraping requires both Domcom SMARTPROXY tiers. No direct scraping is allowed. "
+        "Foreign sources require explicit permission and AUTODOM_APPROVED_SOURCES opt-in. "
         "Restore into a NEW directory with autodom restore SNAPSHOT --destination NEW_DIRECTORY/autodom.sqlite3; "
         "never replace a running database. Backups are local, retained seven days, not off-site protection.",
     )
@@ -134,8 +136,7 @@ def main() -> None:
                     {
                         **store.stats(),
                         "healthy": healthy,
-                        "last_sync": store.get_meta("last_sync_at"),
-                        "source_error": store.get_meta("source_error", ""),
+                        "sources": source_status(store),
                         "telegram_error": store.get_meta("telegram_error", ""),
                         "last_backup_at": store.get_meta("last_backup_at"),
                     },

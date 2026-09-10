@@ -1,6 +1,7 @@
 import re
 
-from .models import Listing, Profile
+from .config import approved_sources
+from .models import MARKETS, Listing, Profile
 
 _ALIASES = {
     "тойота": "toyota",
@@ -8,6 +9,7 @@ _ALIASES = {
     "хонда": "honda",
     "хендай": "hyundai",
     "хундай": "hyundai",
+    "хёндай": "hyundai",
     "киа": "kia",
     "бмв": "bmw",
     "мерседес": "mercedes",
@@ -39,6 +41,8 @@ def searchable_text(listing: Listing) -> str:
                     listing.transmission,
                     listing.city,
                     listing.mileage,
+                    listing.trim,
+                    listing.search_aliases,
                     str(listing.year) if listing.year is not None else "",
                 )
             )
@@ -48,14 +52,22 @@ def searchable_text(listing: Listing) -> str:
 
 
 def matches(profile: Profile, listing: Listing) -> bool:
-    if profile.currency not in ("USD", "KGS"):
+    if (
+        profile.currency not in ("USD", "KGS")
+        or profile.market not in MARKETS
+        or listing.source not in approved_sources()
+        or (profile.market != "ALL" and listing.market != profile.market)
+    ):
         return False
     price = listing.price(profile.currency)
     if (
         price is None
         or price <= 0
         or not profile.budget_min_minor <= price <= profile.budget_max_minor
-        or normalize(listing.availability) != "в наличии"
+        or (
+            normalize(listing.availability) != "в наличии"
+            and not (listing.market != "KG" and normalize(listing.availability) == "опубликовано")
+        )
     ):
         return False
     groups = query_groups(profile.query)

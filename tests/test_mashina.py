@@ -1,8 +1,9 @@
 import json
 import unittest
 
-from autodom.mashina import SourceError, parse_page
+from autodom.mashina import parse_page
 from autodom.models import Profile
+from autodom.source_http import SourceError
 from autodom.storage import Store
 
 

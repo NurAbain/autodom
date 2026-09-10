@@ -1,7 +1,6 @@
 """Mashina's public catalog, transported as a React Flight stream."""
 
 import json
-import logging
 from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -10,24 +9,11 @@ import aiohttp
 
 from .models import Listing, SourcePage
 from .proxy import ProxyRoute
-
-logger = logging.getLogger(__name__)
-
+from .source_http import SourceError, fetch_document, require_source_access
 
 CATALOG_URL = "https://mashina.kg/catalog/passenger"
-_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 _CATALOG_KEYS = {"items", "total", "page", "size", "pages"}
 _ATTRIBUTE_SLUGS = {"year", "mileage", "gearbox", "body_type", "city"}
-
-
-class SourceError(Exception):
-    """The public source could not provide a trustworthy catalog page."""
-
-
-class SourceRateLimited(SourceError):
-    def __init__(self, retry_after: int) -> None:
-        self.retry_after = retry_after
-        super().__init__(f"Mashina rate limit; collection paused for {retry_after} seconds")
 
 
 def _listing_shape(item: Any) -> bool:
@@ -215,52 +201,14 @@ def parse_page(text: str, page: int = 1) -> SourcePage:
 async def fetch_page(
     session: aiohttp.ClientSession, page: int = 1, *, proxies: tuple[ProxyRoute, ...]
 ) -> SourcePage:
-    if type(page) is not int or page < 1:
-        raise SourceError("Catalog page must be a positive integer")
-    if not proxies:
-        raise SourceError("Scraping requires configured proxies; direct access is disabled")
-    failures = []
-    for route in proxies:
-        try:
-            async with session.get(
-                CATALOG_URL,
-                params={"page": page},
-                headers={"RSC": "1", "User-Agent": "AutodomBot/0.1", "Accept": "text/x-component"},
-                proxy=route.url_for(page),
-                proxy_headers={"Proxy-Authorization": route.authorization},
-                timeout=aiohttp.ClientTimeout(total=30),
-                allow_redirects=False,
-            ) as response:
-                if response.status == 429:
-                    retry_after = response.headers.get("Retry-After", "")
-                    seconds = (
-                        int(retry_after)
-                        if retry_after.isdecimal() and len(retry_after) < 9
-                        else 300
-                    )
-                    raise SourceRateLimited(max(60, seconds))
-                if response.status != 200:
-                    raise SourceError(f"Mashina catalog returned HTTP {response.status}")
-                body = bytearray()
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    body.extend(chunk)
-                    if len(body) > _MAX_RESPONSE_BYTES:
-                        raise SourceError("Mashina catalog response exceeds size limit")
-                result = parse_page(body.decode("utf-8"), page)
-                logger.info(
-                    "Catalog page %s collected via %s proxy: %s listings",
-                    page,
-                    route.tier,
-                    len(result.listings),
-                )
-                return result
-        except SourceRateLimited:
-            # A site rate limit applies to the crawler, not just one proxy IP.
-            raise
-        except (TimeoutError, SourceError, aiohttp.ClientError, UnicodeDecodeError) as error:
-            reason = str(error) if isinstance(error, SourceError) else type(error).__name__
-            if isinstance(error, aiohttp.ClientResponseError):
-                reason += f" HTTP {error.status}"
-            failures.append(f"{route.tier}: {reason}")
-            logger.warning("Catalog proxy route unavailable: %s (%s)", route.tier, reason)
-    raise SourceError("All configured proxy routes failed: " + "; ".join(failures))
+    require_source_access("mashina.kg")
+    return await fetch_document(
+        session,
+        CATALOG_URL,
+        lambda text: parse_page(text, page),
+        source="mashina.kg",
+        proxies=proxies,
+        page=page,
+        params={"page": page},
+        headers={"RSC": "1", "Accept": "text/x-component"},
+    )

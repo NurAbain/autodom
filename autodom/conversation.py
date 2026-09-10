@@ -7,7 +7,8 @@ from html import escape
 
 from autodom.budget import money, parse_budget
 from autodom.matching import normalize
-from autodom.models import Listing, Profile
+from autodom.models import MARKETS, Listing, Profile
+from autodom.sources import enabled_markets, enabled_sources, listing_url_allowed, source_status
 from autodom.storage import Store
 
 Button = tuple[str, str]
@@ -28,13 +29,15 @@ _QUIET = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])-([01][0-9]|2[0-3]):([0-5][
 
 
 def privacy_text() -> str:
+    sources = ", ".join(source.name for source in enabled_sources())
     return (
         "<b>Autodom — помощник при покупке автомобиля</b>\n\n"
-        "Бесплатный поиск по бюджету и пожеланиям: только местные автомобили Mashina.kg "
-        "с пометкой «В наличии» в Кыргызстане. Другие площадки, США, Корея, машины на заказ "
-        "и платные услуги пока не подключены.\n\n"
+        f"Бесплатный поиск по бюджету и пожеланиям. Включённые источники: {sources}. "
+        "Иностранные адаптеры без согласованного доступа не собирают и не показывают объявления. "
+        "Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; "
+        "доступность экспорта не подтверждена. Платные услуги не подключены.\n\n"
         "После вашего согласия сохраняю на сервере проекта Telegram ID, ID личного чата, "
-        "черновик бюджета и пожеланий, затем профиль и настройки уведомлений. "
+        "черновик рынка, бюджета и пожеланий, затем профиль и настройки уведомлений. "
         "Это нужно для поиска и бесплатного мониторинга. Бюджет и контакты партнёрам не передаются; "
         "профиль и уведомления доступны только в личном чате. Данные хранятся до удаления: "
         "/delete удаляет профиль и незавершённый ввод из рабочей базы. "
@@ -56,6 +59,7 @@ def profile_text(profile: Profile) -> str:
         start, end = profile.quiet_start_minute, profile.quiet_end_minute
         quiet = f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
     return (
+        f"Рынок: <b>{MARKETS[profile.market]}</b>\n"
         f"Бюджет: <b>{budget}</b>\nАвтомобили: {query}\n"
         f"Мониторинг: {'включён' if profile.monitoring else 'на паузе'}\n"
         f"Тихие часы (Бишкек, UTC+6): {quiet}. /quiet — настройка."
@@ -78,13 +82,28 @@ def menu(profile: Profile) -> Buttons:
 
 def listing_text(listing: Listing, currency: str) -> str:
     title = escape(listing.title[:140])
-    if listing.url.startswith("https://mashina.kg/details/") and len(listing.url) <= 600:
+    if listing_url_allowed(listing.source, listing.url):
         title = f'<a href="{escape(listing.url, quote=True)}">{title}</a>'
     price = listing.price(currency)
+    original = listing.original_price_minor
+    if original is not None and listing.original_currency:
+        price_text = "Цена объявления: " + money(original, listing.original_currency)
+        if listing.original_currency != currency:
+            price_text += (
+                f" (≈ {money(price, currency)} по НБКР)"
+                if price is not None
+                else " (свежий пересчёт в валюту бюджета недоступен)"
+            )
+    else:
+        price_text = money(price, currency) if price is not None else "цена не указана"
     parts = [str(listing.year) if listing.year else "год не указан"]
     parts.extend(
-        value[:60] for value in (listing.mileage, listing.transmission, listing.body_type) if value
+        value[:80]
+        for value in (listing.mileage, listing.transmission, listing.body_type, listing.trim)
+        if value
     )
+    if listing.registration_month:
+        parts.append("регистрация: " + listing.registration_month[:10])
     city = escape(listing.city[:80]) if listing.city else "город не указан"
     observed = (
         datetime.fromtimestamp(listing.observed_at, _BISHKEK).strftime("%d.%m.%Y %H:%M")
@@ -92,13 +111,25 @@ def listing_text(listing: Listing, currency: str) -> str:
         if listing.observed_at is not None
         else "время наблюдения неизвестно"
     )
-    return (
+    text = (
         f"<b>{title}</b>\n"
-        f"{money(price, currency) if price is not None else 'цена не указана'} · {city}\n"
+        f"{price_text} · {city} · {MARKETS[listing.market]}\n"
         f"{escape(' · '.join(parts))}\n"
-        f"Наличие на сайте: {escape(listing.availability[:50]) or 'не указано'}. Источник: Mashina.kg.\n"
+        f"Статус на сайте: {escape(listing.availability[:50]) or 'не указан'}. "
+        f"Источник: {escape(listing.source)}.\n"
         f"Последнее наблюдение: {observed}. Цену и наличие подтвердите у продавца."
     )
+    if listing.market != "KG":
+        text += "\nДоставка, таможня, оформление и ремонт не включены. Экспорт не подтверждён."
+        text += (
+            "\n" + escape(listing.condition[:600])
+            if listing.condition
+            else "\nИстория ДТП и документов неизвестна."
+        )
+        text += " Независимая проверка не выполнена."
+        if listing.fx_date and price is not None and listing.original_currency != currency:
+            text += f"\nДаты курсов НБКР: {escape(listing.fx_date)}."
+    return text
 
 
 def pack_replies(header: str, sections: list[str], buttons: Buttons = ()) -> list[Reply]:
@@ -139,35 +170,72 @@ class Conversation:
     def _begin(self, user_id: int, profile: Profile | None) -> list[Reply]:
         if profile:
             self.store.set_monitoring(user_id, False)
-        self.store.set_draft(user_id, "currency", {"consent": True})
+        markets = enabled_markets()
+        if len(markets) == 1:
+            self.store.set_draft(user_id, "currency", {"consent": True, "market": markets[0]})
+            return self._currency_prompt()
+        self.store.set_draft(user_id, "market", {"consent": True})
+        return [
+            Reply(
+                "На каком рынке искать автомобиль? Зарубежная цена — только цена объявления, "
+                "без доставки, таможни, оформления и ремонта. На время изменений мониторинг приостановлен.",
+                self._market_buttons(),
+            )
+        ]
+
+    @staticmethod
+    def _market_buttons() -> Buttons:
+        markets = enabled_markets()
+        choices = (*markets, "ALL") if len(markets) > 1 else markets
+        return tuple(((MARKETS[market], f"market:{market}"),) for market in choices)
+
+    @staticmethod
+    def _currency_prompt() -> list[Reply]:
         return [
             Reply(
                 "В какой валюте удобнее задать бюджет?\n"
-                "Это бюджет цены автомобиля в объявлении; проверку, оформление и обслуживание стоит учитывать отдельно. "
-                "На время изменения поиска мониторинг приостановлен. /cancel — отменить ввод.",
+                "Это бюджет цены автомобиля в объявлении, не полной стоимости ввоза. "
+                "Дополнительные расходы учитываются отдельно. /cancel — отменить ввод.",
                 CURRENCIES,
             )
         ]
 
-    def _catalog_note(self) -> str:
-        count = self.store.stats()["listings"]
-        total = self.store.get_meta("catalog_total")
-        error = (
-            "\nИсточник сейчас отвечает с ошибкой. Собранная часть каталога может быть неполной "
-            "или устаревать; новые наблюдения появятся после восстановления."
-            if self.store.get_meta("source_error")
-            else ""
+    def _catalog_note(self, profile: Profile | None = None) -> str:
+        lines = []
+        for source in source_status(self.store):
+            if not source["enabled"]:
+                if profile is None:
+                    lines.append(
+                        f"{source['name']}: выключен до согласования доступа; сбор и показ запрещены."
+                    )
+                continue
+            if profile is not None and profile.market not in ("ALL", source["market"]):
+                continue
+            lines.append(
+                f"{source['name']} · {MARKETS[source['market']]}: "
+                f"{source['listings']:,} сохранённых объявлений.".replace(",", " ")
+            )
+            if source["last_sync"]:
+                lines.append(f"Последняя успешная страница: {escape(source['last_sync'])}.")
+            if source["total"] is not None:
+                lines.append(f"Последний запрос источника: {escape(source['total'])} объявлений.")
+            if source["scope"]:
+                lines.append("Охват запроса: " + escape(source["scope"][:400]))
+            if source["error"]:
+                lines.append(
+                    "Ошибка этого источника; его данные могут быть неполными или устаревшими."
+                )
+        if not lines:
+            lines.append("Рынок поиска сейчас выключен. Выберите доступный рынок через /edit.")
+        lines.append(
+            "Это не весь рынок. В выдаче — наблюдения за последние 48 часов; "
+            "зарубежные объявления означают публикацию на сайте, а не подтверждённое наличие."
         )
-        if not count:
-            return "Свежие данные каталога пока недоступны. Попробуйте /search позже." + error
-        suffix = (
-            f" из примерно {int(total):,}".replace(",", " ") if total and total.isdigit() else ""
-        )
-        return (
-            f"В собранной части каталога {count:,}{suffix} объявлений Mashina.kg. "
-            "Это не весь рынок; поиск показывает только свежие наблюдения местных машин «В наличии». "
-            "Другие площадки, импорт на заказ и платные услуги пока не подключены."
-        ).replace(",", " ") + error
+        if profile is not None and profile.market in ("KR", "ALL"):
+            lines.append(
+                "Для цен KRW нужен свежий курс НБКР; без него сравнение по бюджету не выполняется."
+            )
+        return "\n".join(lines)
 
     def search(self, profile: Profile, offset: int = 0) -> list[Reply]:
         count = self.store.count_matches(profile)
@@ -180,7 +248,7 @@ class Conversation:
                     "Совпадений в свежей собранной части каталога нет. Это не означает, что таких машин нет на всём рынке.\n\n"
                     + profile_text(profile)
                     + "\n\n"
-                    + self._catalog_note()
+                    + self._catalog_note(profile)
                     + "\n\nМожно изменить пожелания или включить бесплатный мониторинг.",
                     menu(profile),
                 )
@@ -188,8 +256,9 @@ class Conversation:
         heading = (
             f"<b>Подходящие автомобили · {offset + 1}–{offset + len(listings)} из {count}</b>\n"
             + profile_text(profile)
-            + "\n\nСовпадают с выбранными словами и входят в бюджет. Сначала — недавно найденные варианты.\n"
-            + self._catalog_note()
+            + "\n\nСовпадают с выбранными словами; цена объявления в пределах бюджета. "
+            "Это не обещание полной стоимости с ввозом. Сначала — недавно найденные варианты.\n"
+            + self._catalog_note(profile)
         )
         buttons = menu(profile)
         if offset + len(listings) < count:
@@ -217,6 +286,10 @@ class Conversation:
                     )
                 ]
             return self._begin(user_id, None)
+        if text.startswith("market:") and (not draft or draft[0] != "market"):
+            return [
+                Reply("Рынок выбирается только на соответствующем шаге. /edit — изменить поиск.")
+            ]
         if text.startswith("currency:") and (not draft or draft[0] != "currency"):
             return [
                 Reply(
@@ -289,11 +362,7 @@ class Conversation:
                 )
             ]
         if command == "/status":
-            last = self.store.get_meta("last_sync_at")
-            note = self._catalog_note()
-            if last:
-                note += f"\nПоследний успешный сбор страницы: {escape(last)}."
-            return [Reply(note, menu(profile) if profile else START_BUTTONS)]
+            return [Reply(self._catalog_note(), menu(profile) if profile else START_BUTTONS)]
         if command == "/delete":
             if not profile and not draft:
                 return [Reply("Сохранённых данных нет.", START_BUTTONS)]
@@ -432,12 +501,20 @@ class Conversation:
             ]
         if not profile and data.get("consent") is not True:
             return self._privacy(user_id, None)
+        if state == "market":
+            market = text.removeprefix("market:").upper()
+            markets = enabled_markets()
+            allowed = (*markets, "ALL") if len(markets) > 1 else markets
+            if market not in allowed:
+                return [Reply("Выберите включённый рынок кнопкой.", self._market_buttons())]
+            self.store.set_draft(user_id, "currency", {**data, "market": market})
+            return self._currency_prompt()
         if state == "currency":
             currency = text.removeprefix("currency:").upper()
             currency = {"СОМ": "KGS", "СОМЫ": "KGS", "$": "USD"}.get(currency, currency)
             if currency not in {"USD", "KGS"}:
                 return [Reply("Выберите валюту кнопкой: USD или KGS.", CURRENCIES)]
-            self.store.set_draft(user_id, "budget", {"currency": currency, "consent": True})
+            self.store.set_draft(user_id, "budget", {**data, "currency": currency, "consent": True})
             return [
                 Reply(
                     f"Какой бюджет в {'долларах' if currency == 'USD' else 'сомах'}?\nНапример: 15000, 15к или диапазон 10000–15000. Без обозначения валюты."
@@ -489,6 +566,7 @@ class Conversation:
                     budget_min_minor=data["minimum"],
                     budget_max_minor=data["maximum"],
                     query=text,
+                    market=data.get("market", "KG"),
                     quiet_start_minute=profile.quiet_start_minute if profile else None,
                     quiet_end_minute=profile.quiet_end_minute if profile else None,
                 )

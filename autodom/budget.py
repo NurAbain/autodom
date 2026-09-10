@@ -35,8 +35,11 @@ def parse_budget(text: str) -> tuple[int, int]:
 
 
 def money(minor: int, currency: str) -> str:
-    whole, fractional = divmod(minor, 100)
+    if currency not in ("USD", "KGS", "KRW"):
+        raise ValueError("Unsupported currency")
+    whole, fractional = divmod(minor, 1 if currency == "KRW" else 100)
     amount = f"{whole:,}".replace(",", " ")
     if fractional:
         amount += f",{fractional:02d}"
-    return f"{amount} {'$' if currency == 'USD' else 'сом'}"
+    suffix = {"USD": "$", "KGS": "сом", "KRW": "KRW"}[currency]
+    return f"{amount} {suffix}"

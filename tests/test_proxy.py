@@ -8,8 +8,9 @@ import aiohttp
 import pytest
 
 from autodom import mashina
-from autodom.mashina import SourceError, SourceRateLimited, fetch_page
+from autodom.mashina import fetch_page
 from autodom.proxy import ProxyRoute, load_proxy_routes
+from autodom.source_http import SourceError, SourceRateLimited
 
 
 @contextmanager

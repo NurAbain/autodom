@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import aiohttp
@@ -20,10 +21,12 @@ from aiogram.types import (
 
 from autodom.config import Settings
 from autodom.conversation import Conversation, Reply, listing_text, menu, pack_replies
-from autodom.mashina import SourceError, SourceRateLimited, fetch_page
 from autodom.matching import matches
 from autodom.models import ListingEvent, Profile, SourcePage
 from autodom.proxy import ProxyRoute
+from autodom.rates import RateBook
+from autodom.source_http import SourceError, SourceRateLimited
+from autodom.sources import Source, enabled_sources, source_status
 from autodom.storage import Store
 
 logger = logging.getLogger(__name__)
@@ -40,89 +43,142 @@ class UserLocks:
         return self._locks[user_id]
 
 
-def record_page(store: Store, page: SourcePage) -> int:
-    count = store.upsert_listings(page.listings)
-    store.set_meta("catalog_total", str(page.total))
-    store.set_meta("catalog_pages", str(page.pages))
-    store.set_meta("last_sync_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"))
-    store.set_meta("source_error", "")
+def record_page(
+    store: Store, source: Source, page: SourcePage, observed_at: float | None = None
+) -> int:
+    if any(item.source != source.id or item.market != source.market for item in page.listings):
+        raise SourceError("A catalog page contains another source or market")
+    prefix = f"source:{source.id}:"
+    prior_scope = store.get_meta(prefix + "scope", "")
+    if page.page > 1 and prior_scope and page.scope != prior_scope:
+        store.set_meta(prefix + "crawl_next_page", "1")
+        store.set_meta(prefix + "full_scan_completed_at", "0")
+        raise SourceError("Source search scope changed; restart from the first page")
+    count = store.upsert_listings(page.listings, observed_at=observed_at)
+    store.set_meta(prefix + "catalog_total", str(page.total))
+    store.set_meta(prefix + "catalog_pages", str(page.pages))
+    store.set_meta(prefix + "scope", page.scope)
+    store.set_meta(prefix + "last_sync_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"))
+    store.set_meta(prefix + "source_error", "")
     return count
+
+
+async def _collect_page(
+    store: Store,
+    source: Source,
+    page_number: int,
+    session: aiohttp.ClientSession,
+    proxies: tuple[ProxyRoute, ...],
+    rates: RateBook,
+) -> SourcePage:
+    page = await source.fetch_page(session, page_number, proxies=proxies)
+    observed_at = time.time()
+    if source.market != "KG":
+        await rates.refresh(session)
+        page = replace(page, listings=[rates.convert(listing) for listing in page.listings])
+    record_page(store, source, page, observed_at)
+    return page
+
+
+def _source_failed(store: Store, source: Source, error: Exception) -> None:
+    store.set_meta(f"source:{source.id}:source_error", type(error).__name__)
+    reason = str(error) if isinstance(error, SourceError) else type(error).__name__
+    logger.warning("%s collection paused: %s", source.id, reason)
 
 
 async def sync_pages(
     store: Store, pages: int, proxies: tuple[ProxyRoute, ...], delay: float = 2.0
 ) -> dict:
+    if type(pages) is not int or pages < 1:
+        raise ValueError("Page count must be positive")
     async with aiohttp.ClientSession() as session:
-        for page_number in range(1, pages + 1):
-            if page_number > 1:
-                await asyncio.sleep(delay)
-            page = await fetch_page(session, page_number, proxies=proxies)
-            record_page(store, page)
-            next_page = page_number + 1
-            store.set_meta(
-                "crawl_next_page", str(max(next_page, int(store.get_meta("crawl_next_page", "1"))))
-            )
-            logger.info(
-                "Collected page %s/%s: %s listings", page.page, page.pages, len(page.listings)
-            )
-            if page_number >= page.pages:
-                store.set_meta("full_scan_completed_at", str(time.time()))
-                break
-    return store.stats()
+        rates = RateBook(store, proxies)
+
+        async def collect(source: Source) -> bool:
+            prefix = f"source:{source.id}:"
+            try:
+                for page_number in range(1, pages + 1):
+                    if page_number > 1:
+                        await asyncio.sleep(delay)
+                    page = await _collect_page(store, source, page_number, session, proxies, rates)
+                    store.set_meta(
+                        prefix + "crawl_next_page",
+                        str(
+                            max(
+                                page_number + 1,
+                                int(store.get_meta(prefix + "crawl_next_page", "1")),
+                            )
+                        ),
+                    )
+                    if page_number >= page.pages:
+                        store.set_meta(prefix + "full_scan_completed_at", str(time.time()))
+                        break
+                return True
+            except Exception as error:
+                _source_failed(store, source, error)
+                return False
+
+        outcomes = await asyncio.gather(*(collect(source) for source in enabled_sources()))
+        if not any(outcomes):
+            raise SourceError("No enabled source could be updated; inspect per-source status")
+    return {**store.stats(), "sources": source_status(store)}
+
+
+async def _crawl_source(
+    store: Store,
+    settings: Settings,
+    source: Source,
+    session: aiohttp.ClientSession,
+    proxies: tuple[ProxyRoute, ...],
+    rates: RateBook,
+) -> None:
+    prefix = f"source:{source.id}:"
+    next_refresh = 0.0
+    while True:
+        try:
+            if time.monotonic() >= next_refresh:
+                for page_number in range(1, settings.refresh_pages + 1):
+                    page = await _collect_page(store, source, page_number, session, proxies, rates)
+                    await asyncio.sleep(settings.crawl_delay)
+                    if page_number >= page.pages:
+                        break
+                next_refresh = time.monotonic() + settings.refresh_seconds
+            next_page = int(store.get_meta(prefix + "crawl_next_page", "1"))
+            pages = int(store.get_meta(prefix + "catalog_pages", "1"))
+            completed = float(store.get_meta(prefix + "full_scan_completed_at", "0"))
+            if next_page > pages:
+                if not completed:
+                    completed = time.time()
+                    store.set_meta(prefix + "full_scan_completed_at", str(completed))
+                if time.time() - completed >= settings.full_refresh_seconds:
+                    next_page = 1
+                    store.set_meta(prefix + "crawl_next_page", "1")
+                    store.set_meta(prefix + "full_scan_completed_at", "0")
+                else:
+                    await asyncio.sleep(min(30, settings.refresh_seconds))
+                    continue
+            page = await _collect_page(store, source, next_page, session, proxies, rates)
+            store.set_meta(prefix + "crawl_next_page", str(next_page + 1))
+            if next_page >= page.pages:
+                store.set_meta(prefix + "full_scan_completed_at", str(time.time()))
+                logger.info("%s catalog scan complete", source.id)
+            if next_page % 50 == 0:
+                logger.info("%s progress: page %s/%s", source.id, next_page, page.pages)
+            await asyncio.sleep(settings.crawl_delay)
+        except SourceRateLimited as error:
+            _source_failed(store, source, error)
+            await asyncio.sleep(max(settings.refresh_seconds, error.retry_after))
+        except Exception as error:
+            _source_failed(store, source, error)
+            await asyncio.sleep(settings.refresh_seconds)
 
 
 async def crawl(store: Store, settings: Settings, proxies: tuple[ProxyRoute, ...]) -> None:
-    next_refresh = 0.0
     async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                if time.monotonic() >= next_refresh:
-                    for page_number in range(1, settings.refresh_pages + 1):
-                        page = await fetch_page(session, page_number, proxies=proxies)
-                        record_page(store, page)
-                        await asyncio.sleep(settings.crawl_delay)
-                        if page_number >= page.pages:
-                            break
-                    next_refresh = time.monotonic() + settings.refresh_seconds
-                next_page = int(store.get_meta("crawl_next_page", "1"))
-                pages = int(store.get_meta("catalog_pages", "1"))
-                completed = float(store.get_meta("full_scan_completed_at", "0"))
-                if next_page > pages:
-                    if not completed:
-                        completed = time.time()
-                        store.set_meta("full_scan_completed_at", str(completed))
-                        logger.info(
-                            "Initial catalog scan complete: %s listings", store.stats()["listings"]
-                        )
-                    if time.time() - completed >= settings.full_refresh_seconds:
-                        next_page = 1
-                        store.set_meta("crawl_next_page", "1")
-                        store.set_meta("full_scan_completed_at", "0")
-                    else:
-                        await asyncio.sleep(min(30, settings.refresh_seconds))
-                        continue
-                page = await fetch_page(session, next_page, proxies=proxies)
-                record_page(store, page)
-                store.set_meta("crawl_next_page", str(next_page + 1))
-                if next_page >= page.pages:
-                    store.set_meta("full_scan_completed_at", str(time.time()))
-                    logger.info("Catalog scan complete: %s listings", store.stats()["listings"])
-                if next_page % 50 == 0:
-                    logger.info(
-                        "Catalog progress: page %s/%s, %s listings",
-                        next_page,
-                        page.pages,
-                        store.stats()["listings"],
-                    )
-                await asyncio.sleep(settings.crawl_delay)
-            except SourceRateLimited as error:
-                store.set_meta("source_error", type(error).__name__)
-                logger.warning("%s", error)
-                await asyncio.sleep(max(settings.refresh_seconds, error.retry_after))
-            except SourceError as error:
-                store.set_meta("source_error", type(error).__name__)
-                logger.warning("Catalog collection paused: %s", error)
-                await asyncio.sleep(settings.refresh_seconds)
+        rates = RateBook(store, proxies)
+        async with asyncio.TaskGroup() as tasks:
+            for source in enabled_sources():
+                tasks.create_task(_crawl_source(store, settings, source, session, proxies, rates))
 
 
 async def send_replies(bot: Bot, chat_id: int, replies: list[Reply]) -> None:
@@ -179,6 +235,8 @@ async def notify_once(store: Store, locks: UserLocks, send: Send) -> int:
                         previous.kind,
                         previous.previous_usd_minor,
                         previous.previous_kgs_minor,
+                        previous.previous_original_price_minor,
+                        previous.previous_original_currency,
                     )
                 latest[event.listing.id] = event
             sections = []
@@ -188,14 +246,22 @@ async def notify_once(store: Store, locks: UserLocks, send: Send) -> int:
                 current = store.get_listing(event.listing.id, fresh_only=True)
                 if current is None or not matches(profile, current):
                     continue
-                if current.price(profile.currency) != event.listing.price(profile.currency):
+                if current.original_currency:
+                    if (
+                        current.original_currency != event.listing.original_currency
+                        or current.original_price_minor != event.listing.original_price_minor
+                    ):
+                        continue
+                elif current.price(profile.currency) != event.listing.price(profile.currency):
                     continue
                 if event.kind != "new" and not event.is_price_drop(profile.currency):
                     continue
                 count += 1
                 if len(sections) < 5:
                     kind = (
-                        "Новое совпадение в каталоге" if event.kind == "new" else "Цена снизилась"
+                        "Новое совпадение в каталоге"
+                        if event.kind == "new"
+                        else "Цена на сайте снизилась"
                     )
                     section = f"<b>{kind}</b>\n" + listing_text(current, profile.currency)
                     if section_characters + len(section) + 2 <= 3000:

@@ -220,7 +220,6 @@ def test_listing_discloses_actual_observation_not_publication_time():
         observed_at=observed,
     )
     rendered = listing_text(car, "USD")
-    assert "Mashina.kg" in rendered
     assert (
         datetime.fromtimestamp(observed, timezone(timedelta(hours=6))).strftime("%d.%m.%Y %H:%M")
         in rendered

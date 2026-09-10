@@ -4,6 +4,17 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+SOURCE_IDS = ("mashina.kg", "encar.com", "truecar.com")
+
+
+def approved_sources() -> tuple[str, ...]:
+    """An explicit operator allowlist, not a grant of source usage rights."""
+    configured = os.environ.get("AUTODOM_APPROVED_SOURCES", "mashina.kg")
+    selected = tuple(part.strip() for part in configured.split(",") if part.strip())
+    if not selected or len(set(selected)) != len(selected) or set(selected) - set(SOURCE_IDS):
+        raise ValueError("AUTODOM_APPROVED_SOURCES must contain unique known source IDs")
+    return selected
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -17,6 +28,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        approved_sources()
         data_dir = Path(os.environ.get("AUTODOM_DATA_DIR", ".local")).expanduser()
         refresh = int(os.environ.get("AUTODOM_REFRESH_SECONDS", "300"))
         pages = int(os.environ.get("AUTODOM_REFRESH_PAGES", "3"))

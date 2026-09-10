@@ -5,10 +5,11 @@ import time
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from .config import approved_sources
 from .matching import normalize, query_groups, searchable_text
-from .models import Listing, ListingEvent, Profile
+from .models import MARKETS, Listing, ListingEvent, Profile
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _FRESH_SECONDS = 48 * 60 * 60
 _SCHEMA = """
 BEGIN;
@@ -21,8 +22,14 @@ CREATE TABLE IF NOT EXISTS listings (
     normalized_text TEXT NOT NULL,
     first_seen REAL NOT NULL,
     last_seen REAL NOT NULL
+    ,source TEXT NOT NULL DEFAULT 'mashina.kg'
+    ,market TEXT NOT NULL DEFAULT 'KG'
+    ,original_currency TEXT NOT NULL DEFAULT ''
+    ,original_price_minor INTEGER
+    ,fx_expires_at REAL
 );
 CREATE INDEX IF NOT EXISTS listings_recent ON listings(last_seen DESC, first_seen DESC, id);
+CREATE INDEX IF NOT EXISTS listings_source ON listings(source, market, last_seen);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     listing_id TEXT NOT NULL REFERENCES listings(id),
@@ -31,6 +38,8 @@ CREATE TABLE IF NOT EXISTS events (
     previous_usd_minor INTEGER,
     previous_kgs_minor INTEGER,
     observed_at REAL NOT NULL
+    ,previous_original_price_minor INTEGER
+    ,previous_original_currency TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS profiles (
     user_id INTEGER PRIMARY KEY,
@@ -44,6 +53,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     cursor INTEGER NOT NULL,
     quiet_start_minute INTEGER,
     quiet_end_minute INTEGER,
+    market TEXT NOT NULL DEFAULT 'KG' CHECK(market IN ('KG', 'KR', 'US', 'ALL')),
     CHECK((quiet_start_minute IS NULL AND quiet_end_minute IS NULL) OR
           (quiet_start_minute IS NOT NULL AND quiet_end_minute IS NOT NULL AND
            quiet_start_minute BETWEEN 0 AND 1439 AND quiet_end_minute BETWEEN 0 AND 1439 AND
@@ -58,7 +68,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 COMMIT;
 """
 _MIGRATE_V1 = """
@@ -70,6 +80,27 @@ ALTER TABLE profiles ADD COLUMN quiet_end_minute INTEGER
            quiet_start_minute BETWEEN 0 AND 1439 AND quiet_end_minute BETWEEN 0 AND 1439 AND
            quiet_start_minute != quiet_end_minute));
 PRAGMA user_version = 2;
+COMMIT;
+"""
+_MIGRATE_V2 = """
+BEGIN;
+ALTER TABLE listings ADD COLUMN source TEXT NOT NULL DEFAULT 'mashina.kg';
+ALTER TABLE listings ADD COLUMN market TEXT NOT NULL DEFAULT 'KG';
+ALTER TABLE listings ADD COLUMN original_currency TEXT NOT NULL DEFAULT '';
+ALTER TABLE listings ADD COLUMN original_price_minor INTEGER;
+ALTER TABLE listings ADD COLUMN fx_expires_at REAL;
+CREATE INDEX listings_source ON listings(source, market, last_seen);
+ALTER TABLE events ADD COLUMN previous_original_price_minor INTEGER;
+ALTER TABLE events ADD COLUMN previous_original_currency TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN market TEXT NOT NULL DEFAULT 'KG'
+    CHECK(market IN ('KG', 'KR', 'US', 'ALL'));
+INSERT OR IGNORE INTO metadata(key, value)
+    SELECT 'source:mashina.kg:' || key, value FROM metadata
+    WHERE key IN ('catalog_total', 'catalog_pages', 'last_sync_at', 'source_error',
+                  'crawl_next_page', 'full_scan_completed_at');
+DELETE FROM metadata WHERE key IN ('catalog_total', 'catalog_pages', 'last_sync_at',
+    'source_error', 'crawl_next_page', 'full_scan_completed_at');
+PRAGMA user_version = 3;
 COMMIT;
 """
 
@@ -138,10 +169,14 @@ class Store:
             version = self._db.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
                 self._db.executescript(_SCHEMA)
-            elif version == 1:
-                self._db.executescript(_MIGRATE_V1)
-            elif version != _SCHEMA_VERSION:
-                raise ValueError(f"Unsupported database schema version: {version}")
+            else:
+                if version == 1:
+                    self._db.executescript(_MIGRATE_V1)
+                    version = 2
+                if version == 2:
+                    self._db.executescript(_MIGRATE_V2)
+                elif version != _SCHEMA_VERSION:
+                    raise ValueError(f"Unsupported database schema version: {version}")
         except BaseException:
             self._db.close()
             raise
@@ -171,6 +206,8 @@ class Store:
         events = 0
         with self._db:
             for listing in listings:
+                if listing.market not in ("KG", "KR", "US"):
+                    raise ValueError("A listing must identify its actual market")
                 observation = (
                     observed_at
                     if observed_at is not None
@@ -179,42 +216,63 @@ class Store:
                     else ingestion_time
                 )
                 previous = self._db.execute(
-                    "SELECT price_usd_minor, price_kgs_minor, last_seen FROM listings WHERE id = ?",
+                    """SELECT price_usd_minor, price_kgs_minor, last_seen,
+                              original_price_minor, original_currency
+                       FROM listings WHERE id = ?""",
                     (listing.id,),
                 ).fetchone()
                 if previous is not None and observation <= previous["last_seen"]:
                     continue
                 listing = replace(listing, observed_at=observation)
                 data = _json(asdict(listing))
+                prices = (listing.price("USD"), listing.price("KGS"))
                 self._db.execute(
                     """INSERT INTO listings
                        (id, data, price_usd_minor, price_kgs_minor, availability,
-                        normalized_text, first_seen, last_seen)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        normalized_text, first_seen, last_seen, source, market,
+                        original_currency, original_price_minor, fx_expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                          data = excluded.data,
                          price_usd_minor = excluded.price_usd_minor,
                          price_kgs_minor = excluded.price_kgs_minor,
                          availability = excluded.availability,
                          normalized_text = excluded.normalized_text,
-                         last_seen = excluded.last_seen""",
+                         last_seen = excluded.last_seen,
+                         source = excluded.source, market = excluded.market,
+                         original_currency = excluded.original_currency,
+                         original_price_minor = excluded.original_price_minor,
+                         fx_expires_at = excluded.fx_expires_at""",
                     (
                         listing.id,
                         data,
-                        listing.price_usd_minor,
-                        listing.price_kgs_minor,
+                        *prices,
                         normalize(listing.availability),
                         searchable_text(listing),
                         observation,
                         observation,
+                        listing.source,
+                        listing.market,
+                        listing.original_currency,
+                        listing.original_price_minor,
+                        listing.fx_expires_at,
                     ),
                 )
-                prices = (listing.price_usd_minor, listing.price_kgs_minor)
-                if previous is None or (previous[0], previous[1]) != prices:
+                changed = previous is None
+                if previous is not None:
+                    if listing.original_currency or previous["original_currency"]:
+                        changed = (
+                            listing.original_currency != previous["original_currency"]
+                            or listing.original_price_minor != previous["original_price_minor"]
+                        )
+                    else:
+                        changed = (previous[0], previous[1]) != prices
+                if changed:
                     self._db.execute(
                         """INSERT INTO events
-                           (listing_id, kind, data, previous_usd_minor, previous_kgs_minor, observed_at)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
+                           (listing_id, kind, data, previous_usd_minor, previous_kgs_minor,
+                            observed_at, previous_original_price_minor, previous_original_currency)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             listing.id,
                             "new" if previous is None else "price_change",
@@ -222,6 +280,8 @@ class Store:
                             previous[0] if previous is not None else None,
                             previous[1] if previous is not None else None,
                             observation,
+                            previous["original_price_minor"] if previous is not None else None,
+                            previous["original_currency"] if previous is not None else "",
                         ),
                     )
                     events += 1
@@ -245,6 +305,8 @@ class Store:
     def save_profile(self, profile: Profile) -> Profile:
         if profile.currency not in ("USD", "KGS"):
             raise ValueError("Currency must be USD or KGS")
+        if profile.market not in MARKETS:
+            raise ValueError("Unknown search market")
         if (
             type(profile.budget_min_minor) is not int
             or type(profile.budget_max_minor) is not int
@@ -261,11 +323,11 @@ class Store:
             self._db.execute(
                 """INSERT INTO profiles
                    (user_id, chat_id, currency, budget_min_minor, budget_max_minor,
-                    query, monitoring, revision, cursor, quiet_start_minute, quiet_end_minute)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    query, monitoring, revision, cursor, quiet_start_minute, quiet_end_minute, market)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id) DO UPDATE SET
                      chat_id = excluded.chat_id, currency = excluded.currency,
-                     budget_min_minor = excluded.budget_min_minor,
+                     budget_min_minor = excluded.budget_min_minor, market = excluded.market,
                      budget_max_minor = excluded.budget_max_minor,
                      query = excluded.query, monitoring = excluded.monitoring,
                      revision = excluded.revision, cursor = excluded.cursor""",
@@ -281,6 +343,7 @@ class Store:
                     self._max_event(),
                     quiet_start,
                     quiet_end,
+                    profile.market,
                 ),
             )
         saved = self.get_profile(profile.user_id)
@@ -333,6 +396,8 @@ class Store:
                 row["kind"],
                 row["previous_usd_minor"],
                 row["previous_kgs_minor"],
+                row["previous_original_price_minor"],
+                row["previous_original_currency"],
             )
             for row in rows
         ]
@@ -348,16 +413,30 @@ class Store:
 
     @staticmethod
     def _search_where(profile: Profile) -> tuple[str, list]:
-        if profile.currency not in ("USD", "KGS"):
+        if profile.currency not in ("USD", "KGS") or profile.market not in MARKETS:
             return "0", []
         price = "price_usd_minor" if profile.currency == "USD" else "price_kgs_minor"
-        clauses = [f"{price} > 0", f"{price} BETWEEN ? AND ?", "availability = ?", "last_seen >= ?"]
+        sources = approved_sources()
+        clauses = [
+            f"{price} > 0",
+            f"{price} BETWEEN ? AND ?",
+            "(availability = 'в наличии' OR (market != 'KG' AND availability = 'опубликовано'))",
+            "last_seen >= ?",
+            f"source IN ({','.join('?' for _ in sources)})",
+            "(market = 'KG' OR original_currency = ? OR fx_expires_at > ?)",
+        ]
+        now = time.time()
         parameters = [
             profile.budget_min_minor,
             profile.budget_max_minor,
-            "в наличии",
-            time.time() - _FRESH_SECONDS,
+            now - _FRESH_SECONDS,
+            *sources,
+            profile.currency,
+            now,
         ]
+        if profile.market != "ALL":
+            clauses.append("market = ?")
+            parameters.append(profile.market)
         groups = query_groups(profile.query)
         if profile.query.strip() and not groups:
             return "0", []
@@ -434,3 +513,10 @@ class Store:
                       (SELECT MAX(last_seen) FROM listings) AS last_seen""",
             ).fetchone()
         )
+
+    def source_stats(self) -> dict[str, dict]:
+        rows = self._db.execute(
+            """SELECT source, market, COUNT(*) AS listings, MAX(last_seen) AS last_seen
+               FROM listings GROUP BY source, market"""
+        )
+        return {row["source"]: dict(row) for row in rows}
