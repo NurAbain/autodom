@@ -1,0 +1,49 @@
+{
+  "name": "autodom",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "packageManager": "pnpm@10.34.5",
+  "scripts": {
+    "build": "tsup --config tsup.config.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "autodom": "node apps/runtime/dist/cli.js"
+  },
+  "dependencies": {
+    "zod": "4.6.1",
+    "decimal.js": "10.6.0",
+    "fast-xml-parser": "5.11.1",
+    "drizzle-orm": "0.45.2",
+    "pg": "8.23.0",
+    "cheerio": "1.2.0",
+    "domhandler": "5.0.3",
+    "@crawlee/basic": "3.18.1",
+    "@crawlee/core": "3.18.1",
+    "undici": "7.29.1",
+    "grammy": "1.46.0",
+    "@grammyjs/runner": "2.0.3",
+    "abort-controller": "3.0.0",
+    "bullmq": "5.81.4",
+    "ioredis": "5.11.1",
+    "pino": "10.3.1",
+    "p-limit": "7.3.2",
+    "@prometheus-io/client": "0.16.1"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "tsup": "8.5.1",
+    "vitest": "4.1.11",
+    "@biomejs/biome": "2.5.13",
+    "drizzle-kit": "0.31.10",
+    "@types/pg": "8.23.1",
+    "@types/node": "24.13.4",
+    "testcontainers": "12.1.0",
+    "@testcontainers/postgresql": "12.1.0"
+  }
+}

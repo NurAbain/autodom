@@ -1,0 +1,249 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { makeListing } from "../src/models.js";
+import { type MetadataStore, parseQuote, RateBook } from "../src/rates.js";
+import { type DocumentTransport, SourceError, SourceRateLimited } from "../src/transport.js";
+
+const instant = (day: string) =>
+  Date.parse(`${day.includes("T") ? day : `${day}T00:00:00`}+06:00`) / 1000;
+const xml = (currency: string, value: string, date = "10.09.2026", nominal = "1", valid = "7") =>
+  `<CurrencyRates Date="${date}"><Currency ISOCode="${currency}"><Nominal>${nominal}</Nominal>${currency === "KRW" ? `<ValidFor>${valid}</ValidFor>` : ""}<Value>${value}</Value></Currency></CurrencyRates>`;
+const car = (currency = "KRW", amount = 1) =>
+  makeListing({
+    id: "encar:synthetic",
+    title: "Synthetic",
+    url: "https://example.invalid/vehicle",
+    source: "encar.com",
+    market: "KR",
+    original_currency: currency,
+    original_price_minor: amount,
+  });
+function metadata(): MetadataStore {
+  const data = new Map<string, string>();
+  return {
+    async getMeta(key, fallback = null) {
+      return data.get(key) ?? fallback;
+    },
+    async setMeta(key, value) {
+      data.set(key, value);
+    },
+  };
+}
+function transport(fetch: (url: string) => string | Promise<string>): DocumentTransport {
+  return {
+    async fetchDocument(url, parse) {
+      return parse(await fetch(url));
+    },
+    async fetchDocuments(requests) {
+      return Promise.all(requests.map(async (request) => request.parse(await fetch(request.url))));
+    },
+  };
+}
+const unavailable = transport(() => {
+  throw new SourceError("offline");
+});
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(instant("2026-09-10T12:00:00") * 1000);
+});
+afterEach(() => vi.useRealTimers());
+
+it("uses nominal, comma decimals and half-up without double-rounding", () => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.USD = parseQuote(xml("USD", "2,0000"), "USD");
+  book.quotes.KRW = parseQuote(xml("KRW", "0,2500", "10.09.2026", "10"), "KRW");
+  const converted = book.convert(car());
+  expect(converted).toMatchObject({
+    original_price_minor: 1,
+    price_kgs_minor: 3,
+    price_usd_minor: 1,
+    fx_date: "USD:2026-09-10;KRW:2026-09-10",
+    fx_expires_at: instant("2026-09-14"),
+  });
+  expect(book.convert(car("USD", 1)).price_kgs_minor).toBe(2);
+});
+
+it("clears expired conversions but preserves native USD", () => {
+  const book = new RateBook(metadata(), unavailable);
+  const usd = { ...car("USD", 123), price_kgs_minor: 999, fx_date: "old", fx_expires_at: 1 };
+  expect(book.convert(usd)).toMatchObject({ price_usd_minor: 123, price_kgs_minor: null });
+  book.quotes.USD = parseQuote(xml("USD", "87,4500"), "USD");
+  book.quotes.KRW = parseQuote(xml("KRW", "0,0647", "05.09.2026"), "KRW");
+  const converted = book.convert(car("KRW", 18500000));
+  expect(converted).toMatchObject({
+    price_kgs_minor: 119695000,
+    price_usd_minor: 1368725,
+    fx_expires_at: instant("2026-09-12"),
+  });
+  vi.setSystemTime(instant("2026-09-12") * 1000);
+  expect(book.convert(converted)).toMatchObject({
+    price_usd_minor: null,
+    price_kgs_minor: null,
+    original_price_minor: 18500000,
+    fx_date: "",
+    fx_expires_at: null,
+  });
+  expect(book.convert(usd).price_kgs_minor).toBe(10756);
+  vi.setSystemTime(instant("2026-09-14") * 1000);
+  expect(book.convert(usd)).toMatchObject({ price_usd_minor: 123, price_kgs_minor: null });
+});
+
+it("can convert weekly KRW to som independently but cannot normalize lease prices", () => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.KRW = parseQuote(xml("KRW", "0,0647"), "KRW");
+  const converted = book.convert(car("KRW", 1000));
+  expect(converted).toMatchObject({
+    price_kgs_minor: 6470,
+    price_usd_minor: null,
+    fx_date: "KRW:2026-09-10",
+    fx_expires_at: instant("2026-09-17"),
+  });
+  expect(book.convert({ ...converted, price_kind: "lease" })).toMatchObject({
+    price_kgs_minor: null,
+    price_usd_minor: null,
+  });
+});
+
+it.each([
+  xml("KRW", "NaN"),
+  xml("KRW", "0,0647", "10.09.2026", "0"),
+  xml("KRW", "0,0647", "10.09.2026", "1", "30"),
+  xml("KRW", "0,0647", "11.09.2026"),
+  xml("KRW", "0,0647", "03.09.2026"),
+  xml("KRW", "0,0647", "31.02.2026"),
+  xml("KRW", "0,0647", "10.09.2026", "1.1"),
+  xml("KRW", "1e100"),
+  '<!DOCTYPE CurrencyRates [<!ENTITY amount "1">]>' + xml("KRW", "&amount;"),
+  xml("KRW", "1").replace(
+    "</CurrencyRates>",
+    '<Currency ISOCode="KRW"><Nominal>1</Nominal><ValidFor>7</ValidFor><Value>1</Value></Currency></CurrencyRates>',
+  ),
+  xml("KRW", "1").replace("</Value>", "</Wrong>"),
+])("rejects untrustworthy NBKR XML %#", (payload) => {
+  expect(() => parseQuote(payload, "KRW")).toThrow(SourceError);
+});
+
+it("accepts weekend daily quotes and expires at the exact Bishkek four-day boundary", () => {
+  const payload = xml("USD", "87,4500");
+  expect(parseQuote(payload, "USD", instant("2026-09-13T23:59:59")).value.isFinite()).toBe(true);
+  expect(() => parseQuote(payload, "USD", instant("2026-09-14"))).toThrow(SourceError);
+  expect(() => parseQuote(payload, "USD", instant("2026-09-09T23:59:59"))).toThrow(SourceError);
+});
+
+it("hydrates exact persisted quotes before honoring the hourly throttle on reopen", async () => {
+  const store = metadata();
+  const book = new RateBook(
+    store,
+    transport((url) =>
+      url.includes("daily")
+        ? xml("USD", "87,45005", "10.09.2026", "10")
+        : xml("KRW", "0,0647", "05.09.2026"),
+    ),
+  );
+  await book.refresh();
+  const original = book.convert(car("USD", 10000000));
+  expect(original.price_kgs_minor).toBe(87450050);
+  const reloaded = new RateBook(
+    store,
+    transport(() => {
+      throw new Error("must not fetch within one hour");
+    }),
+  );
+  await reloaded.refresh();
+  expect(reloaded.convert(car("USD", 10000000))).toEqual(original);
+  expect(reloaded.convert(car("KRW", 18500000))).toEqual(book.convert(car("KRW", 18500000)));
+});
+
+it("retains weekly cache on feed failure while committing a new daily quote", async () => {
+  const store = metadata();
+  const book = new RateBook(
+    store,
+    transport((url) => {
+      if (url.includes("weekly")) throw new SourceError("weekly unavailable");
+      return xml("USD", "87,4500");
+    }),
+  );
+  book.quotes.KRW = parseQuote(xml("KRW", "0,0647", "05.09.2026"), "KRW");
+  await book.refresh();
+  expect(book.convert(car("USD", 100)).price_kgs_minor).toBe(8745);
+  expect(book.convert(car("KRW", 18500000)).price_usd_minor).toBe(1368725);
+  const reopened = new RateBook(store, unavailable);
+  await reopened.refresh();
+  expect(reopened.convert(car("USD", 100)).price_kgs_minor).toBe(8745);
+});
+
+it("stops both feeds on origin rate limit, while ordinary daily failure allows weekly progress", async () => {
+  const requested: string[] = [];
+  const book = new RateBook(
+    metadata(),
+    transport((url) => {
+      requested.push(url);
+      throw new SourceRateLimited(7200);
+    }),
+  );
+  await book.refresh();
+  expect(requested).toEqual(["https://www.nbkr.kg/XML/daily.xml"]);
+  const independent = new RateBook(
+    metadata(),
+    transport((url) => {
+      if (url.includes("daily")) throw new SourceError("daily unavailable");
+      return xml("KRW", "0,0647");
+    }),
+  );
+  await independent.refresh();
+  expect(independent.convert(car("KRW", 1000))).toMatchObject({
+    price_kgs_minor: 6470,
+    price_usd_minor: null,
+  });
+});
+
+it("does not let a future throttle timestamp block refresh", async () => {
+  const store = metadata();
+  await store.setMeta("nbkr:last_refresh", String(instant("2026-09-11")));
+  const book = new RateBook(
+    store,
+    transport((url) => (url.includes("daily") ? xml("USD", "87,4500") : xml("KRW", "0,0647"))),
+  );
+  await book.refresh();
+  expect(book.convert(car("KRW", 18500000)).price_usd_minor).toBe(1368725);
+});
+
+it.each([
+  { date: "2026-09-10", nominal: "1", value: "NaN", valid_days: 4 },
+  { date: "2026-09-10", nominal: "0", value: "87.45", valid_days: 4 },
+  { date: "2026-09-10", nominal: "1", value: "87.45", valid_days: 30 },
+  { date: "2026-09-11", nominal: "1", value: "87.45", valid_days: 4 },
+  { date: "2026-09-01", nominal: "1", value: "87.45", valid_days: 4 },
+])("cannot consume untrusted persisted quotes during an outage %#", async (data) => {
+  const store = metadata();
+  await store.setMeta("nbkr:USD", JSON.stringify(data));
+  const book = new RateBook(store, unavailable);
+  await book.refresh();
+  expect(book.convert(car("USD", 100))).toMatchObject({
+    price_usd_minor: 100,
+    price_kgs_minor: null,
+    fx_date: "",
+    fx_expires_at: null,
+  });
+});
+
+it("excludes unsafe converted amounts rather than returning rounded integer money", () => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.USD = parseQuote(xml("USD", "87.45"), "USD");
+  expect(book.convert(car("USD", Number.MAX_SAFE_INTEGER))).toMatchObject({
+    price_usd_minor: Number.MAX_SAFE_INTEGER,
+    price_kgs_minor: null,
+    fx_expires_at: null,
+  });
+});
+
+it("never replaces a newer valid quote with an older feed", async () => {
+  const book = new RateBook(
+    metadata(),
+    transport((url) =>
+      url.includes("daily") ? xml("USD", "80", "09.09.2026") : xml("KRW", "0,0647"),
+    ),
+  );
+  book.quotes.USD = parseQuote(xml("USD", "87,4500"), "USD");
+  await book.refresh();
+  expect(book.convert(car("USD", 100)).price_kgs_minor).toBe(8745);
+});

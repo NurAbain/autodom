@@ -15,3 +15,9 @@ dist/
 *.sqlite3-shm
 *.sqlite3-wal
 *.log
+node_modules/
+.tools/
+coverage/
+.vitest/
+/storage/
+*.tsbuildinfo

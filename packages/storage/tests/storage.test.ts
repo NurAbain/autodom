@@ -1,0 +1,507 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { type Listing, makeListing, makeProfile, matches } from "@autodom/core";
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import pg from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { importSqlite } from "../src/import-sqlite.js";
+import { backup, restore } from "../src/snapshots.js";
+import { Store } from "../src/store.js";
+
+const NOW = 2_000_000_000;
+const car = (changes: Partial<Listing> = {}) =>
+  makeListing({
+    id: "1",
+    title: "Toyota Camry",
+    url: "https://www.mashina.kg/1",
+    price_usd_minor: 100,
+    price_kgs_minor: 9000,
+    availability: "В наличии",
+    ...changes,
+  });
+const profile = () =>
+  makeProfile({
+    user_id: 1,
+    chat_id: 10,
+    currency: "USD",
+    budget_min_minor: 100,
+    budget_max_minor: 200,
+    monitoring: true,
+  });
+let container: StartedPostgreSqlContainer | undefined;
+let admin: pg.Pool;
+let baseUrl: string;
+let db: Store;
+let url: string;
+let directory: string;
+const schemas: string[] = [];
+const stores: Store[] = [];
+async function database() {
+  const schema = `storage_test_${randomUUID().replaceAll("-", "")}`;
+  await admin.query(`CREATE SCHEMA "${schema}"`);
+  schemas.push(schema);
+  const parsed = new URL(baseUrl);
+  parsed.searchParams.set("options", `-c search_path=${schema}`);
+  return parsed.toString();
+}
+async function open(address: string) {
+  const store = await Store.open(address);
+  stores.push(store);
+  return store;
+}
+beforeAll(async () => {
+  baseUrl = process.env.AUTODOM_TEST_DATABASE_URL ?? "";
+  if (!baseUrl) {
+    container = await new PostgreSqlContainer("postgres:17-alpine").start();
+    baseUrl = container.getConnectionUri();
+  }
+  admin = new pg.Pool({ connectionString: baseUrl });
+}, 120_000);
+beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW * 1000);
+  vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,encar.com,truecar.com,bid.cars");
+  directory = await mkdtemp(join(tmpdir(), "autodom-storage-"));
+  url = await database();
+  db = await open(url);
+});
+afterEach(async () => {
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+  await Promise.all(stores.splice(0).map((store) => store.close()));
+  for (const schema of schemas.splice(0)) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
+  await rm(directory, { recursive: true, force: true });
+});
+afterAll(async () => {
+  await admin?.end();
+  await container?.stop();
+});
+
+describe("PostgreSQL Store", () => {
+  it("serializes concurrent startup migrations without losing either connection", async () => {
+    const fresh = await database();
+    const [left, right] = await Promise.all([open(fresh), open(fresh)]);
+    await left.setMeta("migrated", "yes");
+    expect(await right.getMeta("migrated")).toBe("yes");
+  });
+  it("isolates concurrent transactions sharing an advisory-lock connection", async () => {
+    await db.withLock("shared", async () => {
+      const results = await Promise.allSettled([
+        db.transaction(async () => {
+          await db.setMeta("rolled-back", "bad");
+          throw new Error("abort");
+        }),
+        db.setMeta("committed", "good"),
+      ]);
+      expect(results.map((result) => result.status)).toEqual(["rejected", "fulfilled"]);
+    });
+    expect(await db.getMeta("rolled-back")).toBeNull();
+    expect(await db.getMeta("committed")).toBe("good");
+  });
+  it("serializes first insertion and price changes across independent pools without duplicate events", async () => {
+    const other = await open(url);
+    expect(
+      await Promise.all([db.upsertListings([car()], NOW), other.upsertListings([car()], NOW)]),
+    ).toEqual(expect.arrayContaining([0, 1]));
+    expect(
+      await Promise.all([
+        db.upsertListings([car({ price_usd_minor: 90 })], NOW + 1),
+        other.upsertListings([car({ price_usd_minor: 90 })], NOW + 1),
+      ]),
+    ).toEqual(expect.arrayContaining([0, 1]));
+    const events = await other.eventsAfter(0);
+    expect(events.map((event) => event.kind)).toEqual(["new", "price_change"]);
+    expect(events[1]?.previous_usd_minor).toBe(100);
+    expect(events[1]?.listing.observed_at).toBe(NOW + 1);
+    expect(await db.upsertListings([car({ title: "Honda", price_usd_minor: 50 })], NOW)).toBe(0);
+    expect((await db.getListing("1"))?.title).toBe("Toyota Camry");
+  });
+  it("rolls back an entire ingestion batch on invalid data", async () => {
+    await expect(db.upsertListings([car(), car({ id: "bad", market: "ALL" })])).rejects.toThrow();
+    expect((await db.stats()).listings).toBe(0);
+    expect(await db.eventsAfter(0)).toEqual([]);
+  });
+  it("guards cursors by revision and preserves pending events when quiet hours change", async () => {
+    await db.upsertListings([car()]);
+    const original = await db.saveProfile(profile());
+    await db.upsertListings([car({ id: "2" })]);
+    const pending = (await db.eventsAfter(original.cursor))[0]!;
+    const quiet = (await db.setQuietHours(1, 1320, 480))!;
+    expect(quiet.cursor).toBe(original.cursor);
+    expect(await db.advanceCursor(1, pending.id, original.revision)).toBe(false);
+    expect(await db.advanceCursor(1, pending.id, quiet.revision)).toBe(true);
+    expect(await db.advanceCursor(1, original.cursor, quiet.revision)).toBe(false);
+    const edited = await db.saveProfile({ ...profile(), query: "honda" });
+    expect([edited.quiet_start_minute, edited.quiet_end_minute]).toEqual([1320, 480]);
+    const paused = (await db.setMonitoring(1, false))!;
+    await db.saveProfile({ ...profile(), user_id: 2, chat_id: 20 });
+    await db.upsertListings([car({ id: "3" })]);
+    const resumed = (await db.setMonitoring(1, true))!;
+    expect(await db.eventsAfter(resumed.cursor)).toEqual([]);
+    expect(BigInt(resumed.revision)).toBe(BigInt(paused.revision) + 1n);
+    await expect(db.setQuietHours(1, 60, 60)).rejects.toThrow();
+    expect(await db.getProfile(1)).toEqual(resumed);
+  });
+  it("rejects invalid profile updates without replacing saved private preferences", async () => {
+    const original = await db.saveProfile(profile());
+    for (const changes of [
+      { currency: "EUR" },
+      { budget_min_minor: 1.5 },
+      { budget_max_minor: 0 },
+      { city: "draft:nonce" },
+      { city: " " },
+      { year_min: 1899 },
+      { allow_import: 0 },
+      { purchase_by: "2026-02-30" },
+    ]) {
+      await expect(
+        db.saveProfile({ ...original, ...changes } as typeof original),
+      ).rejects.toThrow();
+      expect(await db.getProfile(1)).toEqual(original);
+    }
+  });
+  it("filters before pagination with count and notification matching parity", async () => {
+    const good = car({
+      city: "Бишкек",
+      body_type: "седан",
+      transmission: "АКПП",
+      year: 2020,
+      mileage: "0 km",
+    });
+    const cars = [
+      car({ id: "00-old", observed_at: NOW - 49 * 3600 }),
+      { ...good, id: "01-unknown", mileage: "0" },
+      { ...good, id: "02-over", mileage: "0.001 km" },
+      { ...good, id: "03-city", city: "Бишкек область" },
+      { ...good, id: "04-year", year: null },
+      { ...good, id: "05-source", source: "unapproved" },
+      { ...good, id: "06-good" },
+      { ...good, id: "07-good" },
+    ];
+    await db.upsertListings(cars);
+    const selected = {
+      ...profile(),
+      city: "бишкек",
+      body_type: "sedan",
+      transmission: "automatic",
+      year_min: 2020,
+      mileage_max_km: 0,
+    };
+    expect(cars.filter((item) => matches(selected, item)).map((item) => item.id)).toEqual([
+      "06-good",
+      "07-good",
+    ]);
+    expect(await db.countMatches(selected)).toBe(2);
+    expect((await db.search(selected, 1, 1)).map((item) => item.id)).toEqual(["07-good"]);
+    expect(await db.getListing("00-old", true)).toBeNull();
+    for (const query of ["!!!", " , ", "___"])
+      expect(await db.countMatches({ ...profile(), query })).toBe(0);
+    await db.upsertListings([car({ id: "boundary" })], NOW - 48 * 3600);
+    expect(await db.getListing("boundary", true)).not.toBeNull();
+  });
+  it("uses native prices for events and excludes expired FX but keeps native USD", async () => {
+    const kr = car({
+      id: "kr",
+      market: "KR",
+      source: "encar.com",
+      availability: "Опубликовано",
+      original_currency: "KRW",
+      original_price_minor: 10000,
+      fx_expires_at: NOW + 1,
+    });
+    const us = car({
+      id: "us",
+      market: "US",
+      source: "truecar.com",
+      availability: "Опубликовано",
+      original_currency: "USD",
+      original_price_minor: 100,
+      fx_expires_at: NOW + 1,
+    });
+    await db.upsertListings([kr, us], NOW - 10);
+    expect(await db.upsertListings([{ ...kr, price_usd_minor: 120 }], NOW - 9)).toBe(0);
+    expect(
+      await db.upsertListings(
+        [{ ...kr, price_usd_minor: 130, original_price_minor: 9000 }],
+        NOW - 8,
+      ),
+    ).toBe(1);
+    expect((await db.eventsAfter(2))[0]?.previous_original_price_minor).toBe(10000);
+    vi.setSystemTime((NOW + 1) * 1000);
+    expect((await db.search({ ...profile(), market: "ALL" })).map((item) => item.id)).toEqual([
+      "us",
+    ]);
+    expect(
+      await db.countMatches({
+        ...profile(),
+        market: "ALL",
+        currency: "KGS",
+        budget_max_minor: 10000,
+      }),
+    ).toBe(0);
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
+    expect(await db.countMatches({ ...profile(), market: "ALL" })).toBe(0);
+  });
+  it("only creates purchase transitions for buy-now offers and expires them at the auction deadline", async () => {
+    const lot = car({
+      source: "bid.cars",
+      market: "US",
+      original_currency: "USD",
+      original_price_minor: null,
+      price_usd_minor: null,
+      price_kgs_minor: null,
+      availability: "Опубликовано",
+      price_kind: "auction",
+      auction_house: "Copart",
+      auction_status: "active",
+      auction_at: NOW + 1,
+      current_bid_minor: 50,
+    });
+    await db.upsertListings([lot], NOW - 4);
+    expect(await db.upsertListings([{ ...lot, current_bid_minor: 60 }], NOW - 3)).toBe(0);
+    const offer = {
+      ...lot,
+      price_kind: "buy_now",
+      original_price_minor: 150,
+      price_usd_minor: 150,
+      buy_now_minor: 150,
+    };
+    expect(await db.upsertListings([offer], NOW - 2)).toBe(1);
+    expect((await db.eventsAfter(1))[0]?.kind).toBe("new");
+    await db.upsertListings(
+      [{ ...offer, original_price_minor: 120, price_usd_minor: 120 }],
+      NOW - 1,
+    );
+    expect((await db.eventsAfter(2))[0]?.previous_original_price_minor).toBe(150);
+    expect(await db.countMatches({ ...profile(), market: "US" })).toBe(1);
+    vi.setSystemTime((NOW + 1) * 1000);
+    expect(await db.countMatches({ ...profile(), market: "US" })).toBe(0);
+    expect((await db.getListing("1"))?.current_bid_minor).toBe(50);
+  });
+  it("deletes private state without touching inventory or global metadata", async () => {
+    await db.upsertListings([car()]);
+    await db.saveProfile(profile());
+    await db.setDraft(1, "budget", { minimum: 100 });
+    await db.setMeta("monitor_cursor", "1");
+    await db.deleteUser(1);
+    expect(await db.getProfile(1)).toBeNull();
+    expect(await db.getDraft(1)).toBeNull();
+    expect(await db.monitoringProfiles()).toEqual([]);
+    expect(await db.getMeta("monitor_cursor")).toBe("1");
+    expect((await db.stats()).listings).toBe(1);
+    expect((await db.stats()).events).toBe(1);
+  });
+  it("reuses locked connections and releases ownership on callback failure", async () => {
+    const other = await open(url);
+    await expect(
+      db.withLock("owner", async () => {
+        expect(await other.tryWithLock("owner", async () => "acquired")).toBeNull();
+        await db.withLock("nested", async () => {
+          await db.setMeta("nested", "ok");
+        });
+        throw new Error("callback failure");
+      }),
+    ).rejects.toThrow("callback failure");
+    expect(await other.tryWithLock("owner", async () => db.getMeta("nested"))).toBe("ok");
+    await expect(
+      db.transaction(() =>
+        db.withLock("transaction-owner", () => db.setMeta("invalid", null as unknown as string)),
+      ),
+    ).rejects.toThrow();
+    expect(await other.tryWithLock("transaction-owner", async () => "released")).toBe("released");
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        db.withLock(`independent:${i}`, async () => {
+          await db.setMeta(`lock:${i}`, "ok");
+        }),
+      ),
+    );
+  });
+});
+
+describe("portable snapshots and read-only legacy import", () => {
+  it("round trips all committed private/catalog state, uses private exclusive files, and restores sequences", async () => {
+    await db.upsertListings([car()], NOW - 2);
+    const saved = await db.saveProfile({ ...profile(), city: "Бишкек", allow_import: false });
+    const quiet = await db.setQuietHours(1, 1320, 480);
+    await db.setDraft(1, "budget", { query: "тойота", minimum: 100 });
+    await db.setMeta("source:mashina.kg:crawl_next_page", "37");
+    await db.upsertListings([car({ price_usd_minor: 90 })], NOW - 1);
+    const destination = join(directory, "private", "snapshot.ndjson");
+    await backup(db, destination);
+    expect((await stat(destination)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(directory, "private"))).mode & 0o777).toBe(0o700);
+    const original = await readFile(destination);
+    await expect(backup(db, destination)).rejects.toThrow();
+    expect(await readFile(destination)).toEqual(original);
+    const targetUrl = await database();
+    await restore(destination, targetUrl);
+    const target = await open(targetUrl);
+    expect(await target.getProfile(1)).toEqual(quiet);
+    expect(quiet?.cursor).toBe(saved.cursor);
+    expect(await target.getDraft(1)).toEqual(["budget", { query: "тойота", minimum: 100 }]);
+    expect(await target.eventsAfter(0)).toEqual(await db.eventsAfter(0));
+    expect(await target.getListing("1")).toEqual(await db.getListing("1"));
+    expect(await target.getMeta("source:mashina.kg:crawl_next_page")).toBe("37");
+    await expect(restore(destination, targetUrl)).rejects.toThrow();
+    await target.upsertListings([car({ id: "next" })]);
+    expect((await target.eventsAfter(2))[0]?.id).toBe(3);
+  });
+  it("rejects empty, truncated, and altered snapshots without committing rows", async () => {
+    const snapshot = join(directory, "broken.ndjson");
+    await writeFile(snapshot, "");
+    await expect(restore(snapshot, url)).rejects.toThrow();
+    await db.upsertListings([car()]);
+    const good = join(directory, "good.ndjson");
+    await backup(db, good);
+    const text = await readFile(good, "utf8");
+    const targetUrl = await database();
+    await writeFile(snapshot, text.slice(0, text.lastIndexOf("\n", text.length - 2) + 1));
+    await expect(restore(snapshot, targetUrl)).rejects.toThrow();
+    const target = await open(targetUrl);
+    expect((await target.stats()).listings).toBe(0);
+    await writeFile(snapshot, text.replace("Toyota Camry", "Honda Civic"));
+    await expect(restore(snapshot, targetUrl)).rejects.toThrow();
+    expect((await target.stats()).listings).toBe(0);
+  });
+  it.each([1, 2, 3, 4, 5])(
+    "imports SQLite schema v%i read-only with migrated defaults and exact IDs",
+    async (version) => {
+      const path = join(directory, "legacy.sqlite3");
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`CREATE TABLE listings (id TEXT PRIMARY KEY, data TEXT NOT NULL, price_usd_minor INTEGER, price_kgs_minor INTEGER, availability TEXT NOT NULL, normalized_text TEXT NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL);
+      CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, listing_id TEXT NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL, previous_usd_minor INTEGER, previous_kgs_minor INTEGER, observed_at REAL NOT NULL);
+      CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, chat_id INTEGER NOT NULL, currency TEXT NOT NULL, budget_min_minor INTEGER NOT NULL, budget_max_minor INTEGER NOT NULL, query TEXT NOT NULL, monitoring INTEGER NOT NULL, revision INTEGER NOT NULL, cursor INTEGER NOT NULL);
+      CREATE TABLE drafts (user_id INTEGER PRIMARY KEY, state TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+      const listing = car({
+        city: "Бишкек",
+        body_type: "Седан",
+        transmission: "Автомат",
+        year: 2020,
+        mileage: "15,625 miles",
+      });
+      legacy
+        .prepare("INSERT INTO listings VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          "1",
+          JSON.stringify(listing),
+          100,
+          9000,
+          "в наличии",
+          " toyota camry в наличии ",
+          NOW - 72 * 3600,
+          NOW - 49 * 3600,
+        );
+      legacy
+        .prepare("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(7, "1", "new", JSON.stringify(listing), null, null, NOW - 72 * 3600);
+      legacy.exec(
+        "INSERT INTO profiles VALUES (1, 10, 'USD', 100, 200, 'toyota', 1, 4, 6); INSERT INTO drafts VALUES (1, 'budget', '{\"minimum\":100}'); INSERT INTO metadata VALUES ('monitor_cursor','8'); INSERT INTO metadata VALUES ('catalog_total','123');",
+      );
+      if (version >= 2)
+        legacy.exec(
+          "ALTER TABLE profiles ADD COLUMN quiet_start_minute INTEGER; ALTER TABLE profiles ADD COLUMN quiet_end_minute INTEGER; UPDATE profiles SET quiet_start_minute=60, quiet_end_minute=120;",
+        );
+      if (version >= 3) {
+        legacy.exec(
+          "ALTER TABLE profiles ADD COLUMN market TEXT NOT NULL DEFAULT 'KG'; ALTER TABLE events ADD COLUMN previous_original_price_minor INTEGER; ALTER TABLE events ADD COLUMN previous_original_currency TEXT NOT NULL DEFAULT ''; ",
+        );
+        for (const definition of [
+          "source TEXT NOT NULL DEFAULT 'mashina.kg'",
+          "market TEXT NOT NULL DEFAULT 'KG'",
+          "original_currency TEXT NOT NULL DEFAULT ''",
+          "original_price_minor INTEGER",
+          "fx_expires_at REAL",
+        ])
+          legacy.exec(`ALTER TABLE listings ADD COLUMN ${definition}`);
+        legacy.exec(
+          "UPDATE metadata SET key='source:mashina.kg:catalog_total' WHERE key='catalog_total'",
+        );
+      }
+      if (version >= 4) {
+        for (const definition of [
+          "city TEXT NOT NULL DEFAULT ''",
+          "budget_scope TEXT NOT NULL DEFAULT 'car'",
+          "body_type TEXT NOT NULL DEFAULT ''",
+          "year_min INTEGER",
+          "mileage_max_km INTEGER",
+          "transmission TEXT NOT NULL DEFAULT ''",
+          "use_case TEXT NOT NULL DEFAULT ''",
+          "allow_import INTEGER",
+          "purchase_by TEXT NOT NULL DEFAULT ''",
+        ])
+          legacy.exec(`ALTER TABLE profiles ADD COLUMN ${definition}`);
+        for (const definition of [
+          "normalized_city TEXT NOT NULL DEFAULT ''",
+          "normalized_body_type TEXT NOT NULL DEFAULT ''",
+          "normalized_transmission TEXT NOT NULL DEFAULT ''",
+          "vehicle_year INTEGER",
+          "mileage_km INTEGER",
+        ])
+          legacy.exec(`ALTER TABLE listings ADD COLUMN ${definition}`);
+      }
+      if (version >= 5)
+        legacy.exec(
+          "ALTER TABLE listings ADD COLUMN auction_status TEXT NOT NULL DEFAULT ''; ALTER TABLE listings ADD COLUMN auction_at REAL;",
+        );
+      legacy.exec(
+        'UPDATE profiles SET revision=1760000000000000123; UPDATE drafts SET data=\'{"minimum":100,"revision":1760000000000000123,"nested":{"profile_revision":1760000000000000123}}\';',
+      );
+      legacy.exec(`PRAGMA user_version = ${version}`);
+      legacy.close();
+      const before = createHash("sha256")
+        .update(await readFile(path))
+        .digest("hex");
+      expect(await importSqlite(path, db)).toMatchObject({
+        listings: 1,
+        events: 1,
+        profiles: 1,
+        drafts: 1,
+        metadata: 2,
+      });
+      expect(
+        createHash("sha256")
+          .update(await readFile(path))
+          .digest("hex"),
+      ).toBe(before);
+      expect(await db.getProfile(1)).toMatchObject({
+        revision: "1760000000000000123",
+        cursor: 6,
+        city: "",
+        budget_scope: "car",
+        allow_import: null,
+        quiet_start_minute: version >= 2 ? 60 : null,
+      });
+      expect(await db.getMeta("source:mashina.kg:catalog_total")).toBe("123");
+      expect(await db.getDraft(1)).toEqual([
+        "budget",
+        {
+          minimum: 100,
+          revision: "1760000000000000123",
+          nested: { profile_revision: "1760000000000000123" },
+        },
+      ]);
+      expect((await db.eventsAfter(6))[0]?.listing.observed_at).toBe(NOW - 72 * 3600);
+      expect(await db.getListing("1", true)).toBeNull();
+      vi.setSystemTime((NOW - 2 * 3600) * 1000);
+      expect(
+        await db.countMatches({
+          ...profile(),
+          city: "бишкек",
+          body_type: "sedan",
+          transmission: "automatic",
+          year_min: 2020,
+          mileage_max_km: 25146,
+        }),
+      ).toBe(1);
+      expect(await db.countMatches({ ...profile(), mileage_max_km: 25145 })).toBe(0);
+      await expect(importSqlite(path, db)).rejects.toThrow();
+      await db.upsertListings([car({ id: "2" })]);
+      expect((await db.eventsAfter(7))[0]?.id).toBe(8);
+      expect((await db.setQuietHours(1, 120, 180))?.revision).toBe("1760000000000000124");
+    },
+  );
+});

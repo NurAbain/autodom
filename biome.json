@@ -1,0 +1,22 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.13/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    "includes": [
+      "*.config.ts",
+      "package.json",
+      "tsconfig.json",
+      "biome.json",
+      "packages/**/*.ts",
+      "packages/**/*.json",
+      "apps/**/*.ts",
+      "apps/**/*.json",
+      "!!**/dist",
+      "!!packages/storage/migrations/meta"
+    ]
+  },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } }
+}

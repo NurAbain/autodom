@@ -1,0 +1,28 @@
+diff --git a/dist/cjs/classes/worker.js b/dist/cjs/classes/worker.js
+index 602cd0fffa7855f013e3136ae9dd3f2812089fd8..ec44fbfa532ff4ac829c015d039e2e94bfc1298c 100644
+--- a/dist/cjs/classes/worker.js
++++ b/dist/cjs/classes/worker.js
+@@ -894,7 +894,8 @@ class Worker extends queue_base_1.QueueBase {
+             }
+             catch (err) {
+                 (_a = opts.span) === null || _a === void 0 ? void 0 : _a.recordException(err.message);
+-                if ((0, utils_1.isNotConnectionError)(err)) {
++                // Shutdown must not spin forever after its Redis client is disconnected.
++                if ((0, utils_1.isNotConnectionError)(err) || this.closing || this.closed) {
+                     // Emit error when not paused or closing; optionally swallow (no throw) when opts.onlyEmitError is set.
+                     if (!this.paused && !this.closing) {
+                         this.emit('error', err);
+diff --git a/dist/esm/classes/worker.js b/dist/esm/classes/worker.js
+index 2d5e319028457454cb720818a99b7b11415c1750..34428e278000a28076119989e4408cf131913fb6 100644
+--- a/dist/esm/classes/worker.js
++++ b/dist/esm/classes/worker.js
+@@ -891,7 +891,8 @@ export class Worker extends QueueBase {
+             }
+             catch (err) {
+                 (_a = opts.span) === null || _a === void 0 ? void 0 : _a.recordException(err.message);
+-                if (isNotConnectionError(err)) {
++                // Shutdown must not spin forever after its Redis client is disconnected.
++                if (isNotConnectionError(err) || this.closing || this.closed) {
+                     // Emit error when not paused or closing; optionally swallow (no throw) when opts.onlyEmitError is set.
+                     if (!this.paused && !this.closing) {
+                         this.emit('error', err);
