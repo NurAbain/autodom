@@ -9,7 +9,7 @@ import pytest
 
 from autodom import mashina
 from autodom.mashina import SourceError, SourceRateLimited, fetch_page
-from autodom.proxy import ProxyRoute
+from autodom.proxy import ProxyRoute, load_proxy_routes
 
 
 @contextmanager
@@ -114,3 +114,12 @@ def test_rate_limit_pauses_crawler_instead_of_rotating_around_it(monkeypatch):
             )
     assert captured.value.retry_after >= 7200
     assert not fallback
+
+
+def test_missing_second_tier_credentials_fail_before_scraping(monkeypatch):
+    monkeypatch.setenv("SMARTPROXY_USERNAME", "fixture-user")
+    monkeypatch.setenv("SMARTPROXY_PASSWORD", "fixture-password")
+    monkeypatch.delenv("SMARTPROXY_RESIDENTIAL_USERNAME", raising=False)
+    monkeypatch.delenv("SMARTPROXY_RESIDENTIAL_PASSWORD", raising=False)
+    with pytest.raises(ValueError):
+        load_proxy_routes()

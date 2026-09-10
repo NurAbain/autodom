@@ -69,7 +69,7 @@ def load_proxy_routes() -> tuple[ProxyRoute, ProxyRoute]:
     residential = _route(
         "residential",
         os.environ.get("SMARTPROXY_RESIDENTIAL_ENDPOINT") or "gate.decodo.com:7000",
-        os.environ.get("SMARTPROXY_RESIDENTIAL_USERNAME", "").strip() or username,
-        os.environ.get("SMARTPROXY_RESIDENTIAL_PASSWORD", "").strip() or password,
+        os.environ.get("SMARTPROXY_RESIDENTIAL_USERNAME", "").strip(),
+        os.environ.get("SMARTPROXY_RESIDENTIAL_PASSWORD", "").strip(),
     )
     return datacenter, residential
