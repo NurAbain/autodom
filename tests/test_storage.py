@@ -2,6 +2,7 @@ import json
 import sqlite3
 import stat
 from dataclasses import asdict, replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -135,6 +136,27 @@ def test_observation_expiry_and_pagination(store, monkeypatch):
         {"budget_min_minor": 201},
         {"budget_min_minor": 0, "budget_max_minor": 0},
         {"budget_min_minor": 1.5},
+        {"city": "!"},
+        {"city": " "},
+        {"city": "А" * 81},
+        {"city": "draft:nonce:save"},
+        {"city": "Бишкек\nОш"},
+        {"city": None},
+        {"budget_scope": "landed"},
+        {"body_type": "средний"},
+        {"transmission": "any"},
+        {"use_case": "racing"},
+        {"allow_import": 0},
+        {"allow_import": 1},
+        {"year_min": 1899},
+        {"year_min": datetime.now(UTC).year + 2},
+        {"year_min": True},
+        {"mileage_max_km": -1},
+        {"mileage_max_km": 10_000_001},
+        {"mileage_max_km": 0.5},
+        {"mileage_max_km": False},
+        {"purchase_by": "2026-02-30"},
+        {"purchase_by": "20260910"},
     ],
 )
 def test_invalid_profile_never_replaces_existing_profile(store, changes):
@@ -223,7 +245,10 @@ def test_invalid_quiet_hours_leave_profile_unchanged(store, start, end):
     assert store.get_profile(1) == original
 
 
-def test_v1_migration_preserves_legacy_state_and_observation_times(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_version", [1, 2, 3])
+def test_legacy_migration_preserves_state_and_backfills_filters(
+    tmp_path, monkeypatch, legacy_version
+):
     now = 2_000_000_000.0
     monkeypatch.setattr("autodom.storage.time.time", lambda: now)
     path = tmp_path / "legacy.sqlite3"
@@ -250,7 +275,14 @@ def test_v1_migration_preserves_legacy_state_and_observation_times(tmp_path, mon
             CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             PRAGMA user_version = 1;
         """)
-        data = asdict(car())
+        vehicle = car(
+            city="Бишкек",
+            body_type="Седан",
+            transmission="Автомат",
+            year=2020,
+            mileage="15,625 miles",
+        )
+        data = asdict(vehicle)
         data.pop("observed_at")
         payload = json.dumps(data)
         legacy.execute(
@@ -273,13 +305,44 @@ def test_v1_migration_preserves_legacy_state_and_observation_times(tmp_path, mon
         legacy.execute("INSERT INTO profiles VALUES (1, 10, 'USD', 100, 200, 'toyota', 1, 4, 6)")
         legacy.execute("INSERT INTO drafts VALUES (1, 'budget', ?)", ('{"minimum":100}',))
         legacy.execute("INSERT INTO metadata VALUES ('monitor_cursor', '8')")
+        if legacy_version >= 2:
+            legacy.execute("ALTER TABLE profiles ADD COLUMN quiet_start_minute INTEGER")
+            legacy.execute("ALTER TABLE profiles ADD COLUMN quiet_end_minute INTEGER")
+            legacy.execute("UPDATE profiles SET quiet_start_minute = 60, quiet_end_minute = 120")
+        if legacy_version >= 3:
+            for definition in (
+                "source TEXT NOT NULL DEFAULT 'mashina.kg'",
+                "market TEXT NOT NULL DEFAULT 'KG'",
+                "original_currency TEXT NOT NULL DEFAULT ''",
+                "original_price_minor INTEGER",
+                "fx_expires_at REAL",
+            ):
+                legacy.execute(f"ALTER TABLE listings ADD COLUMN {definition}")
+            legacy.execute("ALTER TABLE events ADD COLUMN previous_original_price_minor INTEGER")
+            legacy.execute(
+                "ALTER TABLE events ADD COLUMN previous_original_currency TEXT NOT NULL DEFAULT ''"
+            )
+            legacy.execute("ALTER TABLE profiles ADD COLUMN market TEXT NOT NULL DEFAULT 'KG'")
+        legacy.execute(f"PRAGMA user_version = {legacy_version}")
         legacy.commit()
     finally:
         legacy.close()
     db = Store(path)
     try:
         profile = db.get_profile(1)
-        assert profile == Profile(1, 10, "USD", 100, 200, "toyota", True, 4, 6)
+        assert profile == Profile(
+            1,
+            10,
+            "USD",
+            100,
+            200,
+            "toyota",
+            True,
+            4,
+            6,
+            60 if legacy_version >= 2 else None,
+            120 if legacy_version >= 2 else None,
+        )
         assert db.get_draft(1) == ("budget", {"minimum": 100})
         assert db.get_meta("monitor_cursor") == "8"
         assert db.get_listing("1").observed_at == now - 49 * 3600
@@ -288,6 +351,20 @@ def test_v1_migration_preserves_legacy_state_and_observation_times(tmp_path, mon
         event = db.events_after(profile.cursor)[0]
         assert event.id == 7
         assert event.listing.observed_at == now - 72 * 3600
+        constrained = replace(
+            profile,
+            city="БИШКЕК",
+            body_type="sedan",
+            transmission="automatic",
+            year_min=2020,
+            mileage_max_km=25146,
+        )
+        # Freshness must remain intact; backfilled filters are exercised without re-ingestion.
+        monkeypatch.setattr("autodom.storage.time.time", lambda: now - 2 * 3600)
+        assert [item.id for item in db.search(constrained)] == ["1"]
+        assert db.count_matches(replace(constrained, mileage_max_km=25145)) == 0
+        assert matches(constrained, db.get_listing("1"))
+        monkeypatch.setattr("autodom.storage.time.time", lambda: now)
         quiet = db.set_quiet_hours(1, 0, 60)
         assert quiet.cursor == 6
     finally:
@@ -308,7 +385,25 @@ def test_online_backup_reopens_committed_wal_state_and_refuses_overwrite(tmp_pat
     db = Store(source)
     try:
         db.upsert_listings([car()], observed_at=100.0)
-        db.save_profile(Profile(1, 10, "USD", 50, 200, monitoring=True))
+        db.save_profile(
+            Profile(
+                1,
+                10,
+                "USD",
+                50,
+                200,
+                monitoring=True,
+                city="Бишкек",
+                budget_scope="total",
+                body_type="sedan",
+                year_min=2020,
+                mileage_max_km=0,
+                transmission="automatic",
+                use_case="family",
+                allow_import=False,
+                purchase_by="2000-01-01",
+            )
+        )
         profile = db.set_quiet_hours(1, 1320, 480)
         db.set_draft(1, "budget", {"minimum": 50, "query": "toyota"})
         db.upsert_listings([car(price_usd_minor=90)], observed_at=101.0)
@@ -335,5 +430,112 @@ def test_online_backup_reopens_committed_wal_state_and_refuses_overwrite(tmp_pat
         with pytest.raises(FileExistsError):
             db.backup(source)
         assert db.get_profile(1) == profile
+    finally:
+        db.close()
+
+
+def test_preferences_filter_before_pagination_and_agree_with_notification_matching(
+    store, monkeypatch
+):
+    monkeypatch.setattr("autodom.matching.approved_sources", lambda: ("mashina.kg", "truecar.com"))
+    monkeypatch.setattr("autodom.storage.approved_sources", lambda: ("mashina.kg", "truecar.com"))
+    good = car(city="Бишкек", body_type="седан", transmission="АКПП", year=2020, mileage="0 km")
+    listings = [
+        replace(good, id="01-unknown", mileage="0"),
+        replace(good, id="02-over", mileage="0.001 km"),
+        replace(good, id="03-city", city="Бишкек область"),
+        replace(good, id="04-body", body_type="중형차"),
+        replace(good, id="05-transmission", transmission=""),
+        replace(good, id="06-year", year=None),
+        replace(good, id="07-old", year=2019),
+        replace(
+            good,
+            id="08-foreign",
+            market="US",
+            source="truecar.com",
+            original_currency="USD",
+            availability="Опубликовано",
+        ),
+        replace(
+            good,
+            id="09-unapproved",
+            market="US",
+            source="unapproved",
+            original_currency="USD",
+            availability="Опубликовано",
+        ),
+        replace(good, id="10-good"),
+        replace(good, id="11-good"),
+    ]
+    store.upsert_listings(listings)
+    profile = Profile(
+        1,
+        10,
+        "USD",
+        100,
+        200,
+        market="ALL",
+        city="бишкек",
+        body_type="sedan",
+        year_min=2020,
+        mileage_max_km=0,
+        transmission="automatic",
+        use_case="travel",
+        purchase_by="2000-01-01",
+    )
+    for allow_import, budget_scope, expected in (
+        (None, "car", ["08-foreign", "10-good", "11-good"]),
+        (True, "car", ["08-foreign", "10-good", "11-good"]),
+        (False, "car", ["10-good", "11-good"]),
+        (True, "total", ["10-good", "11-good"]),
+    ):
+        selected = replace(profile, allow_import=allow_import, budget_scope=budget_scope)
+        assert [item.id for item in listings if matches(selected, item)] == expected
+        assert store.count_matches(selected) == len(expected)
+        assert [
+            item.id
+            for offset in range(len(expected) + 1)
+            for item in store.search(selected, limit=1, offset=offset)
+        ] == expected
+
+
+@pytest.mark.parametrize("allow_import", [None, False, True])
+def test_preferences_survive_pause_resume_quiet_hours_and_reopen(tmp_path, allow_import):
+    path = tmp_path / "preferences.sqlite3"
+    db = Store(path)
+    try:
+        original = db.save_profile(
+            Profile(
+                1,
+                10,
+                "USD",
+                100,
+                200,
+                monitoring=True,
+                city="Бишкек",
+                budget_scope="total",
+                body_type="sedan",
+                year_min=2020,
+                mileage_max_km=0,
+                transmission="automatic",
+                use_case="family",
+                allow_import=allow_import,
+                purchase_by="2000-01-01",
+            )
+        )
+        paused = db.set_monitoring(1, False)
+        assert paused == replace(original, monitoring=False, revision=original.revision + 1)
+        quiet = db.set_quiet_hours(1, 1320, 480)
+        assert quiet == replace(
+            paused, quiet_start_minute=1320, quiet_end_minute=480, revision=paused.revision + 1
+        )
+        resumed = db.set_monitoring(1, True)
+        assert resumed == replace(quiet, monitoring=True, revision=quiet.revision + 1)
+    finally:
+        db.close()
+    db = Store(path)
+    try:
+        assert db.get_profile(1) == resumed
+        assert db.get_profile(1).allow_import is allow_import
     finally:
         db.close()

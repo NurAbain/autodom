@@ -30,7 +30,8 @@ def begin(conversation, user=1, currency="USD"):
 def save(conversation, query="Toyota Camry", user=1, currency="USD", budget="15000"):
     begin(conversation, user, currency)
     replies = conversation.handle(user, user, budget)
-    return conversation.handle(user, user, query if query else button(replies, "Пока не знаю"))
+    review = conversation.handle(user, user, query if query else button(replies, "Пока не знаю"))
+    return conversation.handle(user, user, button(review, "Сохранить"))
 
 
 def test_disclosure_requires_explicit_current_consent_before_persistence(buyer):
@@ -73,15 +74,20 @@ def test_stale_currency_and_unknown_buttons_cannot_cross_input_steps(buyer):
     conversation.handle(1, 1, stale_currency)
     assert store.get_profile(1) is None
     assert store.get_draft(1)[1]["currency"] == "USD"
-    conversation.handle(1, 1, "Toyota Camry")
+    review = conversation.handle(1, 1, "Toyota Camry")
+    conversation.handle(1, 1, button(review, "Сохранить"))
     replies = conversation.handle(1, 1, "/edit")
     profile = store.get_profile(1)
+    current_currency_draft = store.get_draft(1)
+    conversation.handle(1, 1, stale_currency)
+    assert store.get_draft(1) == current_currency_draft
     conversation.handle(1, 1, button(replies, "USD"))
     conversation.handle(1, 1, unknown)
     assert store.get_profile(1) == profile
     assert store.get_draft(1)[0] == "budget"
     conversation.handle(1, 1, "10000")
-    conversation.handle(1, 1, "Honda Accord")
+    review = conversation.handle(1, 1, "Honda Accord")
+    conversation.handle(1, 1, button(review, "Сохранить"))
     assert store.get_profile(1).query == "Honda Accord"
 
 
@@ -155,7 +161,8 @@ def test_quiet_hours_preserve_cursor_and_survive_edit(buyer):
     replies = conversation.handle(1, 1, "/edit")
     conversation.handle(1, 1, button(replies, "USD"))
     conversation.handle(1, 1, "12000")
-    conversation.handle(1, 1, "Honda Accord")
+    review = conversation.handle(1, 1, "Honda Accord")
+    conversation.handle(1, 1, button(review, "Сохранить"))
     changed = store.get_profile(1)
     assert (changed.quiet_start_minute, changed.quiet_end_minute) == (1350, 435)
     conversation.handle(1, 1, "/quiet off")
@@ -202,7 +209,8 @@ def test_alternatives_currency_and_pagination_show_matching_records(buyer):
     replies = conversation.handle(1, 1, "/edit")
     conversation.handle(1, 1, button(replies, "USD"))
     conversation.handle(1, 1, "15000")
-    conversation.handle(1, 1, "Kia Rio")
+    review = conversation.handle(1, 1, "Kia Rio")
+    conversation.handle(1, 1, button(review, "Сохранить"))
     stale = conversation.handle(1, 1, next_page)
     assert all("details/" not in reply.text for reply in stale)
     assert store.get_profile(1).query == "Kia Rio"
@@ -267,7 +275,8 @@ def test_cancelling_deletion_preserves_consented_draft(buyer):
     conversation.handle(1, 1, deletion)
     assert store.get_draft(1) == original
     conversation.handle(1, 1, "15000")
-    conversation.handle(1, 1, "Toyota Camry")
+    review = conversation.handle(1, 1, "Toyota Camry")
+    conversation.handle(1, 1, button(review, "Сохранить"))
     assert store.get_profile(1).query == "Toyota Camry"
 
 
@@ -309,3 +318,204 @@ def test_editing_paused_profile_invalidates_prior_monitor_choice(buyer):
     conversation.handle(1, 1, "/cancel")
     conversation.handle(1, 1, old_resume)
     assert not store.get_profile(1).monitoring
+
+
+def test_review_correction_applies_only_after_explicit_save(buyer):
+    store, conversation = buyer
+    store.upsert_listings(
+        [
+            Listing(
+                identity,
+                title,
+                f"https://mashina.kg/details/{identity}",
+                900000,
+                78000000,
+                city=city,
+                availability="В наличии",
+            )
+            for identity, title, city in (
+                ("toyota", "Toyota Camry", "Бишкек"),
+                ("honda-local", "Honda Accord", "Бишкек"),
+                ("honda-other", "Honda Accord", "Ош"),
+            )
+        ]
+    )
+    save(conversation)
+    replies = conversation.handle(1, 1, "/edit")
+    conversation.handle(1, 1, button(replies, "USD"))
+    conversation.handle(1, 1, "10000")
+    review = conversation.handle(1, 1, "Honda Accord")
+    assert [car.id for car in store.search(store.get_profile(1))] == ["toyota"]
+    conversation.handle(1, 1, button(review, "Город"))
+    review = conversation.handle(1, 1, "Бишкек")
+    assert [car.id for car in store.search(store.get_profile(1))] == ["toyota"]
+    conversation.handle(1, 1, button(review, "Сохранить"))
+    assert [car.id for car in store.search(store.get_profile(1))] == ["honda-local"]
+
+
+def test_review_callbacks_are_prompt_bound_user_bound_and_survive_restart(buyer):
+    store, conversation = buyer
+    begin(conversation)
+    conversation.handle(1, 1, "15000")
+    review = conversation.handle(1, 1, "Toyota")
+    old_save = button(review, "Сохранить")
+    old_city = button(review, "Город")
+    city_prompt = conversation.handle(1, 1, old_city)
+    city_draft = store.get_draft(1)
+    for stale in (old_save, old_city, old_city.replace(":review:", ":city:")):
+        conversation.handle(1, 1, stale)
+        assert store.get_draft(1) == city_draft
+        assert store.get_profile(1) is None
+    begin(conversation, user=2)
+    conversation.handle(2, 2, "9000")
+    conversation.handle(2, 2, "Honda")
+    other_draft = store.get_draft(2)
+    conversation.handle(2, 2, button(city_prompt, "пропустить"))
+    assert store.get_draft(2) == other_draft
+    assert store.get_profile(2) is None
+    restarted = Conversation(store)
+    review = restarted.handle(1, 1, button(city_prompt, "Назад"))
+    current_save = button(review, "Сохранить")
+    restarted.handle(1, 1, old_save)
+    assert store.get_profile(1) is None
+    restarted.handle(1, 1, current_save)
+    saved = store.get_profile(1)
+    assert saved.query == "Toyota"
+    restarted.handle(1, 1, current_save)
+    assert store.get_profile(1) == saved
+
+
+def test_unknown_callback_payloads_cannot_become_city_or_model_preferences(buyer):
+    store, conversation = buyer
+    save(conversation)
+    currencies = conversation.handle(1, 1, "/edit")
+    stale_currency = button(currencies, "KGS")
+    conversation.handle(1, 1, button(currencies, "USD"))
+    conversation.handle(1, 1, "10000")
+    query_draft = store.get_draft(1)
+    for payload in ("unexpected:Toyota", "query:any", stale_currency):
+        conversation.handle(1, 1, payload)
+        assert store.get_draft(1) == query_draft
+    review = conversation.handle(1, 1, "Honda")
+    conversation.handle(1, 1, button(review, "Город"))
+    city_draft = store.get_draft(1)
+    for payload in ("unexpected:Бишкек", "city:Ош", stale_currency):
+        conversation.handle(1, 1, payload)
+        assert store.get_draft(1) == city_draft
+    conversation.handle(1, 1, "/cancel")
+    assert store.get_profile(1).query == "Toyota Camry"
+    assert store.get_profile(1).city == ""
+
+
+def test_advanced_preferences_survive_basic_edit_and_back_until_intentionally_cleared(buyer):
+    store, conversation = buyer
+    begin(conversation)
+    conversation.handle(1, 1, "15000")
+    review = conversation.handle(1, 1, "не знаю")
+    values = {
+        "Что входит": "total",
+        "Город": "Бишкек",
+        "Кузов": "suv",
+        "Год от": "2015",
+        "Пробег до": "90 000",
+        "Коробка": "automatic",
+        "Для чего": "family",
+        "Готовность": "no",
+        "Планируемая": "29.02.2024",
+    }
+    for label, value in values.items():
+        conversation.handle(1, 1, button(review, label))
+        review = conversation.handle(1, 1, value)
+    conversation.handle(1, 1, button(review, "Сохранить"))
+    conversation.handle(1, 1, "/quiet 22:00-07:00")
+    conversation.handle(1, 1, "/resume")
+    before = store.get_profile(1)
+    fields = (
+        "budget_scope",
+        "city",
+        "body_type",
+        "year_min",
+        "mileage_max_km",
+        "transmission",
+        "use_case",
+        "allow_import",
+        "purchase_by",
+        "quiet_start_minute",
+        "quiet_end_minute",
+    )
+    replies = conversation.handle(1, 1, "/edit")
+    conversation.handle(1, 1, button(replies, "USD"))
+    conversation.handle(1, 1, "12000")
+    review = conversation.handle(1, 1, "Honda")
+    for label, invalid in (
+        ("Год от", "1899"),
+        ("Пробег до", "-1"),
+        ("Планируемая", "2025-02-29"),
+        ("Город", "123 !!!"),
+    ):
+        conversation.handle(1, 1, button(review, label))
+        prompt = conversation.handle(1, 1, invalid)
+        review = conversation.handle(1, 1, button(prompt, "Назад"))
+    conversation.handle(1, 1, button(review, "Сохранить"))
+    changed = store.get_profile(1)
+    assert changed.query == "Honda"
+    assert changed.budget_max_minor == 1_200_000
+    assert tuple(getattr(changed, field) for field in fields) == tuple(
+        getattr(before, field) for field in fields
+    )
+    assert not changed.monitoring
+    replies = conversation.handle(1, 1, "/edit")
+    conversation.handle(1, 1, button(replies, "USD"))
+    conversation.handle(1, 1, "12000")
+    review = conversation.handle(1, 1, "Honda")
+    prompt = conversation.handle(1, 1, button(review, "Город"))
+    review = conversation.handle(1, 1, button(prompt, "пропустить"))
+    conversation.handle(1, 1, button(review, "Сохранить"))
+    assert store.get_profile(1).city == ""
+    assert store.get_profile(1).body_type == before.body_type
+
+
+def test_free_text_is_escaped_in_review_and_saved_profile(buyer):
+    store, conversation = buyer
+    begin(conversation)
+    conversation.handle(1, 1, "15000")
+    review = conversation.handle(1, 1, "<b>Toyota</b>")
+    conversation.handle(1, 1, button(review, "Город"))
+    review = conversation.handle(1, 1, "<i>Бишкек</i>")
+    for raw, escaped in (
+        ("<b>Toyota</b>", "&lt;b&gt;Toyota&lt;/b&gt;"),
+        ("<i>Бишкек</i>", "&lt;i&gt;Бишкек&lt;/i&gt;"),
+    ):
+        rendered = "\n".join(reply.text for reply in review)
+        assert raw not in rendered
+        assert escaped in rendered
+    conversation.handle(1, 1, button(review, "Сохранить"))
+    rendered = "\n".join(reply.text for reply in conversation.handle(1, 1, "/profile"))
+    assert "<b>Toyota</b>" not in rendered
+    assert "<i>Бишкек</i>" not in rendered
+    assert "&lt;b&gt;Toyota&lt;/b&gt;" in rendered
+    assert "&lt;i&gt;Бишкек&lt;/i&gt;" in rendered
+
+
+def test_currency_correction_requires_a_new_amount_instead_of_relabeling_money(buyer):
+    store, conversation = buyer
+    store.upsert_listings(
+        [
+            Listing(
+                "affordable",
+                "Toyota Camry",
+                "https://mashina.kg/details/affordable",
+                1200000,
+                104400000,
+                availability="В наличии",
+            )
+        ]
+    )
+    begin(conversation)
+    conversation.handle(1, 1, "15000")
+    review = conversation.handle(1, 1, "Toyota")
+    currencies = conversation.handle(1, 1, button(review, "Валюта"))
+    conversation.handle(1, 1, button(currencies, "KGS"))
+    review = conversation.handle(1, 1, "1400000")
+    conversation.handle(1, 1, button(review, "Сохранить"))
+    assert [car.id for car in store.search(store.get_profile(1))] == ["affordable"]

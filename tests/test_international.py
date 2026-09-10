@@ -81,21 +81,39 @@ def test_market_choice_scopes_search_and_edit_invalidates_old_choice(catalog):
     conversation = Conversation(catalog)
     replies = conversation.handle(1, 1, "/start")
     consent = replies[0].buttons[0][0][1]
-    conversation.handle(1, 1, consent)
-    conversation.handle(1, 1, "market:KR")
-    conversation.handle(1, 1, "currency:USD")
+    markets = conversation.handle(1, 1, consent)
+    market_button = next(
+        data for reply in markets for row in reply.buttons for label, data in row if "Коре" in label
+    )
+    currencies = conversation.handle(1, 1, market_button)
+    currency_button = next(
+        data
+        for reply in currencies
+        for row in reply.buttons
+        for label, data in row
+        if "USD" in label
+    )
+    conversation.handle(1, 1, currency_button)
     conversation.handle(1, 1, "2000")
-    replies = conversation.handle(1, 1, "Hyundai")
+    review = conversation.handle(1, 1, "Hyundai")
+    save_button = next(
+        data
+        for reply in review
+        for row in reply.buttons
+        for label, data in row
+        if "Сохранить" in label
+    )
+    replies = conversation.handle(1, 1, save_button)
     profile = catalog.get_profile(1)
     assert profile.market == "KR"
     assert [item.id for item in catalog.search(profile)] == ["encar:1"]
     assert car("KR").url in "\n".join(reply.text for reply in replies)
-    conversation.handle(1, 1, "market:US")
+    conversation.handle(1, 1, market_button)
     assert catalog.get_profile(1) == profile
     conversation.handle(1, 1, "/resume")
     conversation.handle(1, 1, "/edit")
     assert not catalog.get_profile(1).monitoring
-    conversation.handle(1, 1, "currency:KGS")
+    conversation.handle(1, 1, currency_button)
     assert catalog.get_draft(1)[0] == "market"
     conversation.handle(1, 1, "/cancel")
     assert catalog.get_profile(1).market == "KR"

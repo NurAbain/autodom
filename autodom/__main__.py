@@ -49,6 +49,8 @@ def parser() -> argparse.ArgumentParser:
         epilog="Setup: uv sync --dev; export settings; uv run autodom sync --pages 3; uv run autodom run. "
         "Scraping requires both Domcom SMARTPROXY tiers. No direct scraping is allowed. "
         "Foreign sources require explicit permission and AUTODOM_APPROVED_SOURCES opt-in. "
+        "Bot profiles: /edit, optional vehicle filters, review, then explicit Save; "
+        "changing currency requires a new budget amount. Full import costs are not calculated. "
         "Restore into a NEW directory with autodom restore SNAPSHOT --destination NEW_DIRECTORY/autodom.sqlite3; "
         "never replace a running database. Backups are local, retained seven days, not off-site protection.",
     )

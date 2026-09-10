@@ -2,6 +2,25 @@ import time
 from dataclasses import dataclass
 
 MARKETS = {"KG": "Кыргызстан", "KR": "Корея", "US": "США", "ALL": "Все рынки"}
+BUDGET_SCOPES = {"car": "Только автомобиль", "total": "Весь бюджет, включая доставку и оформление"}
+BODY_TYPES = {
+    "sedan": "Седан",
+    "suv": "Внедорожник / кроссовер",
+    "hatchback": "Хэтчбек",
+    "wagon": "Универсал",
+    "minivan": "Минивэн",
+    "pickup": "Пикап",
+    "coupe": "Купе",
+    "convertible": "Кабриолет",
+    "van": "Фургон",
+}
+TRANSMISSIONS = {
+    "manual": "Механика",
+    "automatic": "Автомат",
+    "cvt": "Вариатор",
+    "robot": "Робот",
+}
+USE_CASES = {"city": "Город", "family": "Семья", "work": "Работа", "travel": "Поездки"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +76,15 @@ class Profile:
     quiet_start_minute: int | None = None
     quiet_end_minute: int | None = None
     market: str = "KG"
+    city: str = ""
+    budget_scope: str = "car"
+    body_type: str = ""
+    year_min: int | None = None
+    mileage_max_km: int | None = None
+    transmission: str = ""
+    use_case: str = ""
+    allow_import: bool | None = None
+    purchase_by: str = ""
 
 
 @dataclass(frozen=True, slots=True)

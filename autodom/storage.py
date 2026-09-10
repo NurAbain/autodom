@@ -3,13 +3,31 @@ import os
 import sqlite3
 import time
 from dataclasses import asdict, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from .config import approved_sources
-from .matching import normalize, query_groups, searchable_text
-from .models import MARKETS, Listing, ListingEvent, Profile
+from .matching import (
+    normalize,
+    normalize_body_type,
+    normalize_city,
+    normalize_mileage_km,
+    normalize_transmission,
+    query_groups,
+    searchable_text,
+)
+from .models import (
+    BODY_TYPES,
+    BUDGET_SCOPES,
+    MARKETS,
+    TRANSMISSIONS,
+    USE_CASES,
+    Listing,
+    ListingEvent,
+    Profile,
+)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _FRESH_SECONDS = 48 * 60 * 60
 _SCHEMA = """
 BEGIN;
@@ -27,9 +45,17 @@ CREATE TABLE IF NOT EXISTS listings (
     ,original_currency TEXT NOT NULL DEFAULT ''
     ,original_price_minor INTEGER
     ,fx_expires_at REAL
+    ,normalized_city TEXT NOT NULL DEFAULT ''
+    ,normalized_body_type TEXT NOT NULL DEFAULT ''
+    ,normalized_transmission TEXT NOT NULL DEFAULT ''
+    ,vehicle_year INTEGER
+    ,mileage_km INTEGER
 );
 CREATE INDEX IF NOT EXISTS listings_recent ON listings(last_seen DESC, first_seen DESC, id);
 CREATE INDEX IF NOT EXISTS listings_source ON listings(source, market, last_seen);
+CREATE INDEX IF NOT EXISTS listings_preferences ON listings(
+    normalized_city, normalized_body_type, normalized_transmission, vehicle_year, mileage_km
+);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     listing_id TEXT NOT NULL REFERENCES listings(id),
@@ -54,6 +80,15 @@ CREATE TABLE IF NOT EXISTS profiles (
     quiet_start_minute INTEGER,
     quiet_end_minute INTEGER,
     market TEXT NOT NULL DEFAULT 'KG' CHECK(market IN ('KG', 'KR', 'US', 'ALL')),
+    city TEXT NOT NULL DEFAULT '',
+    budget_scope TEXT NOT NULL DEFAULT 'car' CHECK(budget_scope IN ('car', 'total')),
+    body_type TEXT NOT NULL DEFAULT '',
+    year_min INTEGER,
+    mileage_max_km INTEGER,
+    transmission TEXT NOT NULL DEFAULT '',
+    use_case TEXT NOT NULL DEFAULT '',
+    allow_import INTEGER CHECK(allow_import IS NULL OR allow_import IN (0, 1)),
+    purchase_by TEXT NOT NULL DEFAULT '',
     CHECK((quiet_start_minute IS NULL AND quiet_end_minute IS NULL) OR
           (quiet_start_minute IS NOT NULL AND quiet_end_minute IS NOT NULL AND
            quiet_start_minute BETWEEN 0 AND 1439 AND quiet_end_minute BETWEEN 0 AND 1439 AND
@@ -68,7 +103,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 COMMIT;
 """
 _MIGRATE_V1 = """
@@ -103,6 +138,28 @@ DELETE FROM metadata WHERE key IN ('catalog_total', 'catalog_pages', 'last_sync_
 PRAGMA user_version = 3;
 COMMIT;
 """
+_MIGRATE_V3 = """
+BEGIN;
+ALTER TABLE profiles ADD COLUMN city TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN budget_scope TEXT NOT NULL DEFAULT 'car'
+    CHECK(budget_scope IN ('car', 'total'));
+ALTER TABLE profiles ADD COLUMN body_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN year_min INTEGER;
+ALTER TABLE profiles ADD COLUMN mileage_max_km INTEGER;
+ALTER TABLE profiles ADD COLUMN transmission TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN use_case TEXT NOT NULL DEFAULT '';
+ALTER TABLE profiles ADD COLUMN allow_import INTEGER
+    CHECK(allow_import IS NULL OR allow_import IN (0, 1));
+ALTER TABLE profiles ADD COLUMN purchase_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE listings ADD COLUMN normalized_city TEXT NOT NULL DEFAULT '';
+ALTER TABLE listings ADD COLUMN normalized_body_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE listings ADD COLUMN normalized_transmission TEXT NOT NULL DEFAULT '';
+ALTER TABLE listings ADD COLUMN vehicle_year INTEGER;
+ALTER TABLE listings ADD COLUMN mileage_km INTEGER;
+CREATE INDEX listings_preferences ON listings(
+    normalized_city, normalized_body_type, normalized_transmission, vehicle_year, mileage_km
+);
+"""
 
 
 def _private_parent(path: Path) -> None:
@@ -125,11 +182,23 @@ def _listing(data: str, observed_at: float) -> Listing:
     return Listing(**values)
 
 
+def _listing_filters(listing: Listing) -> tuple:
+    return (
+        normalize_city(listing.city),
+        normalize_body_type(listing.body_type),
+        normalize_transmission(listing.transmission),
+        listing.year if type(listing.year) is int else None,
+        normalize_mileage_km(listing.mileage),
+    )
+
+
 def _profile(row: sqlite3.Row | None) -> Profile | None:
     if row is None:
         return None
     values = dict(row)
     values["monitoring"] = bool(values["monitoring"])
+    if values["allow_import"] is not None:
+        values["allow_import"] = bool(values["allow_import"])
     return Profile(**values)
 
 
@@ -146,6 +215,45 @@ def _validate_quiet_hours(start: int | None, end: int | None) -> None:
         raise ValueError(
             "Quiet hours require distinct integer minutes from 0 through 1439, or both None"
         )
+
+
+def _validate_preferences(profile: Profile) -> None:
+    for value, choices, required in (
+        (profile.budget_scope, BUDGET_SCOPES, True),
+        (profile.body_type, BODY_TYPES, False),
+        (profile.transmission, TRANSMISSIONS, False),
+        (profile.use_case, USE_CASES, False),
+    ):
+        if not isinstance(value, str) or ((required or value) and value not in choices):
+            raise ValueError("Unknown profile preference")
+    if (
+        not isinstance(profile.city, str)
+        or len(profile.city) > 80
+        or ":" in profile.city
+        or any(ord(character) < 32 or ord(character) == 127 for character in profile.city)
+        or (
+            profile.city != ""
+            and not any(character.isalpha() for character in normalize_city(profile.city))
+        )
+    ):
+        raise ValueError("City must contain meaningful words and at most 80 characters")
+    for value, minimum, maximum in (
+        (profile.year_min, 1900, datetime.now(UTC).year + 1),
+        (profile.mileage_max_km, 0, 10_000_000),
+    ):
+        if value is not None and (type(value) is not int or not minimum <= value <= maximum):
+            raise ValueError("Year or mileage is outside the supported integer range")
+    if profile.allow_import is not None and type(profile.allow_import) is not bool:
+        raise ValueError("Import preference must be true, false, or unspecified")
+    if not isinstance(profile.purchase_by, str):
+        raise ValueError("Purchase date must be an ISO calendar date or empty")
+    if profile.purchase_by:
+        try:
+            parsed = date.fromisoformat(profile.purchase_by)
+        except ValueError:
+            raise ValueError("Purchase date must be an ISO calendar date or empty") from None
+        if parsed.isoformat() != profile.purchase_by:
+            raise ValueError("Purchase date must use YYYY-MM-DD")
 
 
 class Store:
@@ -175,6 +283,19 @@ class Store:
                     version = 2
                 if version == 2:
                     self._db.executescript(_MIGRATE_V2)
+                    version = 3
+                if version == 3:
+                    self._db.executescript(_MIGRATE_V3)
+                    with self._db:
+                        for row in self._db.execute("SELECT id, data, last_seen FROM listings"):
+                            listing = _listing(row["data"], row["last_seen"])
+                            self._db.execute(
+                                """UPDATE listings SET normalized_city = ?, normalized_body_type = ?,
+                                   normalized_transmission = ?, vehicle_year = ?, mileage_km = ?
+                                   WHERE id = ?""",
+                                (*_listing_filters(listing), row["id"]),
+                            )
+                        self._db.execute("PRAGMA user_version = 4")
                 elif version != _SCHEMA_VERSION:
                     raise ValueError(f"Unsupported database schema version: {version}")
         except BaseException:
@@ -230,8 +351,9 @@ class Store:
                     """INSERT INTO listings
                        (id, data, price_usd_minor, price_kgs_minor, availability,
                         normalized_text, first_seen, last_seen, source, market,
-                        original_currency, original_price_minor, fx_expires_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        original_currency, original_price_minor, fx_expires_at, normalized_city,
+                        normalized_body_type, normalized_transmission, vehicle_year, mileage_km)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                          data = excluded.data,
                          price_usd_minor = excluded.price_usd_minor,
@@ -242,7 +364,12 @@ class Store:
                          source = excluded.source, market = excluded.market,
                          original_currency = excluded.original_currency,
                          original_price_minor = excluded.original_price_minor,
-                         fx_expires_at = excluded.fx_expires_at""",
+                         fx_expires_at = excluded.fx_expires_at,
+                         normalized_city = excluded.normalized_city,
+                         normalized_body_type = excluded.normalized_body_type,
+                         normalized_transmission = excluded.normalized_transmission,
+                         vehicle_year = excluded.vehicle_year,
+                         mileage_km = excluded.mileage_km""",
                     (
                         listing.id,
                         data,
@@ -256,6 +383,7 @@ class Store:
                         listing.original_currency,
                         listing.original_price_minor,
                         listing.fx_expires_at,
+                        *_listing_filters(listing),
                     ),
                 )
                 changed = previous is None
@@ -315,6 +443,7 @@ class Store:
             or profile.budget_max_minor < profile.budget_min_minor
         ):
             raise ValueError("Budget must use integer minor units with 0 <= minimum <= maximum > 0")
+        _validate_preferences(profile)
         with self._db:
             previous = self.get_profile(profile.user_id)
             quiet_start = previous.quiet_start_minute if previous else profile.quiet_start_minute
@@ -323,14 +452,21 @@ class Store:
             self._db.execute(
                 """INSERT INTO profiles
                    (user_id, chat_id, currency, budget_min_minor, budget_max_minor,
-                    query, monitoring, revision, cursor, quiet_start_minute, quiet_end_minute, market)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    query, monitoring, revision, cursor, quiet_start_minute, quiet_end_minute, market,
+                    city, budget_scope, body_type, year_min, mileage_max_km, transmission,
+                    use_case, allow_import, purchase_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(user_id) DO UPDATE SET
                      chat_id = excluded.chat_id, currency = excluded.currency,
                      budget_min_minor = excluded.budget_min_minor, market = excluded.market,
                      budget_max_minor = excluded.budget_max_minor,
                      query = excluded.query, monitoring = excluded.monitoring,
-                     revision = excluded.revision, cursor = excluded.cursor""",
+                     revision = excluded.revision, cursor = excluded.cursor,
+                     city = excluded.city, budget_scope = excluded.budget_scope,
+                     body_type = excluded.body_type, year_min = excluded.year_min,
+                     mileage_max_km = excluded.mileage_max_km, transmission = excluded.transmission,
+                     use_case = excluded.use_case, allow_import = excluded.allow_import,
+                     purchase_by = excluded.purchase_by""",
                 (
                     profile.user_id,
                     profile.chat_id,
@@ -344,6 +480,15 @@ class Store:
                     quiet_start,
                     quiet_end,
                     profile.market,
+                    profile.city,
+                    profile.budget_scope,
+                    profile.body_type,
+                    profile.year_min,
+                    profile.mileage_max_km,
+                    profile.transmission,
+                    profile.use_case,
+                    None if profile.allow_import is None else int(profile.allow_import),
+                    profile.purchase_by,
                 ),
             )
         saved = self.get_profile(profile.user_id)
@@ -437,6 +582,22 @@ class Store:
         if profile.market != "ALL":
             clauses.append("market = ?")
             parameters.append(profile.market)
+        if profile.allow_import is False or profile.budget_scope == "total":
+            clauses.append("market = 'KG'")
+        for column, value in (
+            ("normalized_city", profile.city),
+            ("normalized_body_type", profile.body_type),
+            ("normalized_transmission", profile.transmission),
+        ):
+            if value:
+                clauses.append(f"{column} = ?")
+                parameters.append(normalize_city(value) if column == "normalized_city" else value)
+        if profile.year_min is not None:
+            clauses.append("vehicle_year >= ?")
+            parameters.append(profile.year_min)
+        if profile.mileage_max_km is not None:
+            clauses.append("mileage_km <= ?")
+            parameters.append(profile.mileage_max_km)
         groups = query_groups(profile.query)
         if profile.query.strip() and not groups:
             return "0", []

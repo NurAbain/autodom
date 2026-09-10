@@ -2,12 +2,20 @@ import re
 import secrets
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from html import escape
 
 from autodom.budget import money, parse_budget
-from autodom.matching import normalize
-from autodom.models import MARKETS, Listing, Profile
+from autodom.matching import normalize, normalize_city
+from autodom.models import (
+    BODY_TYPES,
+    BUDGET_SCOPES,
+    MARKETS,
+    TRANSMISSIONS,
+    USE_CASES,
+    Listing,
+    Profile,
+)
 from autodom.sources import enabled_markets, enabled_sources, listing_url_allowed, source_status
 from autodom.storage import Store
 
@@ -22,10 +30,56 @@ class Reply:
 
 
 START_BUTTONS: Buttons = ((("Начать подбор", "/start"), ("Данные и согласие", "/privacy")),)
-CURRENCIES: Buttons = ((("Доллары США · USD", "currency:USD"), ("Сомы · KGS", "currency:KGS")),)
-ANY_CAR: Buttons = ((("Пока не знаю / любые", "query:any"),),)
 _BISHKEK = timezone(timedelta(hours=6))
 _QUIET = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])-([01][0-9]|2[0-3]):([0-5][0-9])")
+_OPTIONAL_DEFAULTS = {
+    "city": "",
+    "body_type": "",
+    "year_min": None,
+    "mileage_max_km": None,
+    "transmission": "",
+    "use_case": "",
+    "allow_import": None,
+    "purchase_by": "",
+}
+_FIELD_LABELS = {
+    "market": "Рынок",
+    "currency": "Валюта",
+    "budget": "Бюджет",
+    "query": "Марки и модели",
+    "budget_scope": "Что входит в бюджет",
+    "city": "Город объявления",
+    "body_type": "Кузов",
+    "year_min": "Год от",
+    "mileage_max_km": "Пробег до, км",
+    "transmission": "Коробка передач",
+    "use_case": "Для чего автомобиль",
+    "allow_import": "Готовность ждать импорт",
+    "purchase_by": "Планируемая дата покупки",
+}
+_CHOICES = {
+    "budget_scope": BUDGET_SCOPES,
+    "body_type": BODY_TYPES,
+    "transmission": TRANSMISSIONS,
+    "use_case": USE_CASES,
+    "allow_import": {"yes": "Готов ждать импорт", "no": "Без импорта"},
+}
+_FILTER_NOTE = (
+    "Жёсткие фильтры поиска и уведомлений: рынок, цена объявления, слова марки/модели, "
+    "город, кузов, год, пробег, коробка и запрет импорта, если выбраны. "
+    "Неизвестные или нераспознанные данные не проходят соответствующий выбранный фильтр. "
+    "Город — место объявления, не пункт доставки.\n"
+    "Цель и дата покупки — только заметки: не определяют пригодность машины и не останавливают мониторинг.\n"
+    "Бюджет «под ключ» исключает иностранные объявления: полной стоимости ввоза пока нет. "
+    "Даже для местных объявлений проверяется цена машины, а не все расходы покупки. "
+    "Готовность к импорту не включает выключенные источники и не гарантирует срок доставки."
+)
+_USE_CASE_TIPS = {
+    "city": "Для городских поездок проверьте реальные габариты парковки и расход в пробках.",
+    "family": "Для семейных поездок проверьте крепления детских кресел, ремни и место для пассажиров и багажа.",
+    "work": "Для работы уточните допустимую нагрузку, стоимость простоя и доступность расходников.",
+    "travel": "Для дальних поездок проверьте запасное колесо, тормоза и историю обслуживания перед выездом.",
+}
 
 
 def privacy_text() -> str:
@@ -37,11 +91,14 @@ def privacy_text() -> str:
         "Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; "
         "доступность экспорта не подтверждена. Платные услуги не подключены.\n\n"
         "После вашего согласия сохраняю на сервере проекта Telegram ID, ID личного чата, "
-        "черновик рынка, бюджета и пожеланий, затем профиль и настройки уведомлений. "
+        "черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, "
+        "коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки уведомлений. "
         "Это нужно для поиска и бесплатного мониторинга. Бюджет и контакты партнёрам не передаются; "
         "профиль и уведомления доступны только в личном чате. Данные хранятся до удаления: "
         "/delete удаляет профиль и незавершённый ввод из рабочей базы. "
         "Локальные резервные копии хранятся до 7 дней; удалённые данные могут оставаться в них до истечения этого срока.\n\n"
+        "Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. "
+        "Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. "
         "Мониторинг включается отдельно. /privacy — это описание; /cancel — отмена ввода. "
         "До нажатия «Согласен на хранение» новый черновик не сохраняется."
     )
@@ -60,7 +117,15 @@ def profile_text(profile: Profile) -> str:
         quiet = f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
     return (
         f"Рынок: <b>{MARKETS[profile.market]}</b>\n"
-        f"Бюджет: <b>{budget}</b>\nАвтомобили: {query}\n"
+        f"Бюджет: <b>{budget}</b> · {BUDGET_SCOPES[profile.budget_scope]}\nАвтомобили: {query}\n"
+        f"Город объявления: {escape(profile.city) if profile.city else 'любой'}\n"
+        f"Кузов: {BODY_TYPES.get(profile.body_type, 'любой')}; "
+        f"год от: {profile.year_min if profile.year_min is not None else 'не задан'}\n"
+        f"Пробег до: {str(profile.mileage_max_km) + ' км' if profile.mileage_max_km is not None else 'не задан'}; "
+        f"коробка: {TRANSMISSIONS.get(profile.transmission, 'любая')}\n"
+        f"Импорт: {'готов ждать' if profile.allow_import is True else 'исключён' if profile.allow_import is False else 'не уточнён, разрешён из включённых источников'}\n"
+        f"Цель (заметка): {USE_CASES.get(profile.use_case, 'не задана')}; "
+        f"дата покупки (заметка): {escape(profile.purchase_by) if profile.purchase_by else 'не задана'}\n"
         f"Мониторинг: {'включён' if profile.monitoring else 'на паузе'}\n"
         f"Тихие часы (Бишкек, UTC+6): {quiet}. /quiet — настройка."
     )
@@ -168,37 +233,112 @@ class Conversation:
         ]
 
     def _begin(self, user_id: int, profile: Profile | None) -> list[Reply]:
+        data = {"consent": True, "budget_scope": "car", **_OPTIONAL_DEFAULTS}
         if profile:
             self.store.set_monitoring(user_id, False)
+            data.update({field: getattr(profile, field) for field in _OPTIONAL_DEFAULTS})
+            data.update(
+                market=profile.market,
+                currency=profile.currency,
+                minimum=profile.budget_min_minor,
+                maximum=profile.budget_max_minor,
+                query=profile.query,
+                budget_scope=profile.budget_scope,
+            )
         markets = enabled_markets()
         if len(markets) == 1:
-            self.store.set_draft(user_id, "currency", {"consent": True, "market": markets[0]})
-            return self._currency_prompt()
-        self.store.set_draft(user_id, "market", {"consent": True})
-        return [
-            Reply(
-                "На каком рынке искать автомобиль? Зарубежная цена — только цена объявления, "
-                "без доставки, таможни, оформления и ремонта. На время изменений мониторинг приостановлен.",
-                self._market_buttons(),
-            )
-        ]
+            data["market"] = markets[0]
+        return self._prompt(user_id, "currency" if len(markets) == 1 else "market", data)
 
     @staticmethod
-    def _market_buttons() -> Buttons:
-        markets = enabled_markets()
-        choices = (*markets, "ALL") if len(markets) > 1 else markets
-        return tuple(((MARKETS[market], f"market:{market}"),) for market in choices)
+    def _draft_profile(user_id: int, data: dict, profile: Profile | None) -> Profile:
+        return Profile(
+            user_id=user_id,
+            chat_id=user_id,
+            currency=data["currency"],
+            budget_min_minor=data["minimum"],
+            budget_max_minor=data["maximum"],
+            query=data["query"],
+            market=data.get("market", "KG"),
+            budget_scope=data.get("budget_scope", "car"),
+            quiet_start_minute=profile.quiet_start_minute if profile else None,
+            quiet_end_minute=profile.quiet_end_minute if profile else None,
+            **{field: data.get(field, default) for field, default in _OPTIONAL_DEFAULTS.items()},
+        )
 
-    @staticmethod
-    def _currency_prompt() -> list[Reply]:
-        return [
-            Reply(
-                "В какой валюте удобнее задать бюджет?\n"
-                "Это бюджет цены автомобиля в объявлении, не полной стоимости ввоза. "
-                "Дополнительные расходы учитываются отдельно. /cancel — отменить ввод.",
-                CURRENCIES,
+    def _prompt(self, user_id: int, state: str, data: dict, error: str = "") -> list[Reply]:
+        data = {**data, "nonce": secrets.token_urlsafe(12)}
+        self.store.set_draft(user_id, state, data)
+
+        def choice(label: str, value: str) -> Button:
+            return label, f"draft:{data['nonce']}:{state}:{value}"
+
+        if state == "review":
+            candidate = self._draft_profile(user_id, data, self.store.get_profile(user_id))
+            text = (
+                "<b>Проверьте поиск перед сохранением</b>\n"
+                "Что входит в ваш бюджет? При первом вводе по умолчанию — цена автомобиля. "
+                "Можно сохранить сразу или уточнить любое поле; незаполненные поля не добавляют ограничений.\n\n"
+                + profile_text(candidate)
+                + "\n\n"
+                + _FILTER_NOTE
+                + "\n\nПока это черновик. /cancel — оставить прежний поиск; мониторинг останется на паузе."
             )
-        ]
+            buttons = ((choice("Сохранить поиск", "save"),),) + tuple(
+                (choice(label, "edit." + field),) for field, label in _FIELD_LABELS.items()
+            )
+        else:
+            prompts = {
+                "market": "На каком рынке искать? Иностранная цена не включает доставку, таможню, оформление и ремонт.",
+                "currency": "В какой валюте задать бюджет? Значение бюджета уточняется перед сохранением.",
+                "budget": f"Какой бюджет в {data.get('pending_currency', data.get('currency', 'USD'))}? Например: 15000, 15к или 10000–15000. Без обозначения валюты.",
+                "query": "Какие автомобили рассматриваете? Например: Toyota Camry, Honda Accord. Запятая разделяет альтернативы; внутри варианта все слова обязательны. Если не определились — «Пока не знаю».",
+                "budget_scope": "Что входит в бюджет? Цена автомобиля — сравнение с ценой объявления. Под ключ — иностранные объявления исключены, пока нет полной стоимости ввоза; для местных проверяется только цена машины, дополнительные расходы не рассчитаны.",
+                "city": "Город объявления (до 80 символов), например Бишкек. Это место автомобиля в источнике, не адрес доставки. При выборе города объявления без известного города исключаются.",
+                "body_type": "Какой кузов? Неизвестный или нераспознанный кузов не пройдёт выбранный фильтр.",
+                "year_min": f"Самый ранний год выпуска: целое число от 1900 до {datetime.now(UTC).year + 1}. Неизвестный год не пройдёт фильтр.",
+                "mileage_max_km": "Максимальный пробег в километрах: целое число от 0 до 10 000 000. Можно разделять тысячи пробелами. Неизвестный пробег не пройдёт фильтр.",
+                "transmission": "Какая коробка передач? Неизвестная или нераспознанная коробка не пройдёт фильтр.",
+                "use_case": "Для чего автомобиль? Это заметка для общих советов, не оценка пригодности конкретной модели и не фильтр.",
+                "allow_import": "Готовы ждать импорт? «Без импорта» исключает зарубежные объявления. Готовность не гарантирует срок и не включает выключенные источники; бюджет под ключ всё равно исключает иностранные объявления.",
+                "purchase_by": "Планируемая дата покупки: ГГГГ-ММ-ДД (например 2026-12-31) или ДД.ММ.ГГГГ. Это заметка, не фильтр и не дата автоматической остановки мониторинга. Прошлая дата допустима.",
+            }
+            text = prompts[state]
+            choices = _CHOICES.get(state, {})
+            if state == "market":
+                markets = enabled_markets()
+                choices = {
+                    market: MARKETS[market]
+                    for market in ((*markets, "ALL") if len(markets) > 1 else markets)
+                }
+            elif state == "currency":
+                choices = {"USD": "Доллары США · USD", "KGS": "Сомы · KGS"}
+            buttons = tuple((choice(label, value),) for value, label in choices.items())
+            if state == "query" or state in _OPTIONAL_DEFAULTS:
+                buttons += (
+                    (
+                        choice(
+                            "Пока не знаю / без ограничения"
+                            if state == "query"
+                            else "Не знаю / пропустить (снять значение)",
+                            "skip",
+                        ),
+                    ),
+                )
+            if data.get("return_review") or state in {"currency", "budget", "query"}:
+                if state != "currency" or data.get("return_review") or len(enabled_markets()) > 1:
+                    buttons += ((choice("Назад — сохранить прежнее значение", "back"),),)
+            text += "\n/cancel — отменить весь ввод. Мониторинг на время изменений приостановлен."
+        return [Reply((escape(error) + "\n\n" if error else "") + text, buttons)]
+
+    def _advance(self, user_id: int, state: str, data: dict) -> list[Reply]:
+        if data.pop("return_review", False):
+            return self._prompt(user_id, "review", data)
+        return self._prompt(
+            user_id,
+            {"market": "currency", "currency": "budget", "budget": "query"}.get(state, "review"),
+            data,
+        )
 
     def _catalog_note(self, profile: Profile | None = None) -> str:
         lines = []
@@ -248,16 +388,19 @@ class Conversation:
                     "Совпадений в свежей собранной части каталога нет. Это не означает, что таких машин нет на всём рынке.\n\n"
                     + profile_text(profile)
                     + "\n\n"
+                    + _FILTER_NOTE
+                    + "\n\n"
                     + self._catalog_note(profile)
                     + "\n\nМожно изменить пожелания или включить бесплатный мониторинг.",
                     menu(profile),
                 )
             ]
         heading = (
-            f"<b>Подходящие автомобили · {offset + 1}–{offset + len(listings)} из {count}</b>\n"
+            f"<b>Совпадения по фильтрам · {offset + 1}–{offset + len(listings)} из {count}</b>\n"
             + profile_text(profile)
-            + "\n\nСовпадают с выбранными словами; цена объявления в пределах бюджета. "
-            "Это не обещание полной стоимости с ввозом. Сначала — недавно найденные варианты.\n"
+            + "\n\n"
+            + _FILTER_NOTE
+            + "\nСначала — недавно найденные варианты.\n"
             + self._catalog_note(profile)
         )
         buttons = menu(profile)
@@ -286,22 +429,43 @@ class Conversation:
                     )
                 ]
             return self._begin(user_id, None)
-        if text.startswith("market:") and (not draft or draft[0] != "market"):
-            return [
-                Reply("Рынок выбирается только на соответствующем шаге. /edit — изменить поиск.")
-            ]
-        if text.startswith("currency:") and (not draft or draft[0] != "currency"):
-            return [
-                Reply(
-                    "Валюта выбирается только на соответствующем шаге. /edit — начать изменение поиска."
-                )
-            ]
-        if text.startswith("query:") and (not draft or draft[0] != "query" or text != "query:any"):
-            return [
-                Reply(
-                    "Эта кнопка не относится к текущему шагу. Продолжите ввод или используйте /cancel."
-                )
-            ]
+        action = None
+        if text.startswith("draft:"):
+            parts = text.split(":")
+            if (
+                not draft
+                or len(parts) != 4
+                or parts[1] != draft[1].get("nonce")
+                or parts[2] != draft[0]
+                or draft[0] == "delete_confirm"
+            ):
+                return [
+                    Reply(
+                        "Эта кнопка устарела или не относится к вашему текущему шагу. Продолжите текущий ввод или /edit."
+                    )
+                ]
+            state = draft[0]
+            action = parts[3]
+            allowed = set(_CHOICES.get(state, {}))
+            if state == "review":
+                allowed = {"save", *("edit." + field for field in _FIELD_LABELS)}
+            elif state == "currency":
+                allowed.update(("USD", "KGS"))
+            elif state == "market":
+                markets = enabled_markets()
+                allowed.update((*markets, "ALL") if len(markets) > 1 else markets)
+            if state == "query" or state in _OPTIONAL_DEFAULTS:
+                allowed.add("skip")
+            if (
+                draft[1].get("return_review")
+                or state in {"budget", "query"}
+                or (state == "currency" and len(enabled_markets()) > 1)
+            ):
+                allowed.add("back")
+            if action not in allowed:
+                return [
+                    Reply("Эта кнопка не относится к текущему шагу. Продолжите ввод или /cancel.")
+                ]
         if text.startswith("monitor:"):
             parts = text.split(":")
             if (
@@ -402,7 +566,7 @@ class Conversation:
             if not profile:
                 return [Reply("Сначала задайте бюджет и пожелания через /start.", START_BUTTONS)]
             if command == "/profile":
-                return [Reply(profile_text(profile), menu(profile))]
+                return [Reply(profile_text(profile) + "\n\n" + _FILTER_NOTE, menu(profile))]
             if command == "/quiet":
                 value = text.partition(" ")[2].strip()
                 if value.lower() == "off":
@@ -469,7 +633,12 @@ class Conversation:
                         "\n• Сверьте VIN на машине и в документах. Объявление не подтверждает отсутствие ДТП, юридических ограничений или скрученного пробега."
                         "\n• До передачи денег проведите независимую диагностику. Не переводите задаток только на основании переписки."
                         "\n• Похожие модели сравнивайте по состоянию и полной стоимости владения, а не только по году выпуска."
-                        "\n\nЭто общие рекомендации, а не заключение о состоянии конкретной машины.",
+                        "\n\nЭто общие рекомендации, а не заключение о состоянии или пригодности конкретной машины."
+                        + (
+                            "\n" + _USE_CASE_TIPS[profile.use_case]
+                            if profile.use_case in _USE_CASE_TIPS
+                            else ""
+                        ),
                         menu(profile),
                     )
                 ]
@@ -501,80 +670,153 @@ class Conversation:
             ]
         if not profile and data.get("consent") is not True:
             return self._privacy(user_id, None)
+        if action is None and (
+            ":" in text
+            or text.startswith("/")
+            or any(ord(char) < 32 or ord(char) == 127 for char in text)
+        ):
+            return [
+                Reply(
+                    "Команда или кнопка не может быть значением поля. Продолжите ввод или /cancel."
+                )
+            ]
+        if state == "review":
+            if action == "save":
+                candidate = self._draft_profile(user_id, data, profile)
+                profile = self.store.save_profile(candidate)
+                self.store.clear_draft(user_id)
+                return [
+                    Reply(
+                        "Поиск сохранён. Подбор и мониторинг бесплатны. Уведомления включите отдельной кнопкой."
+                    )
+                ] + self.search(profile)
+            if action and action.startswith("edit."):
+                return self._prompt(
+                    user_id, action.removeprefix("edit."), {**data, "return_review": True}
+                )
+            return self._prompt(
+                user_id,
+                "review",
+                data,
+                "Для сохранения нажмите «Сохранить», для исправления — нужное поле.",
+            )
+        if action == "back":
+            data.pop("pending_currency", None)
+            if data.pop("return_review", False):
+                return self._prompt(user_id, "review", data)
+            return self._prompt(
+                user_id,
+                {"currency": "market", "budget": "currency", "query": "budget"}[state],
+                data,
+            )
+        unknown = text.casefold() in {
+            "любые",
+            "любой",
+            "любая",
+            "не знаю",
+            "пока не знаю",
+            "все",
+            "пропустить",
+        }
+        if action == "skip" or (
+            action is None and unknown and (state == "query" or state in _OPTIONAL_DEFAULTS)
+        ):
+            data[state] = _OPTIONAL_DEFAULTS.get(state, "")
+            return self._advance(user_id, state, data)
+        value = action if action is not None else text
+        if len(value) > 160:
+            return self._prompt(
+                user_id,
+                state,
+                data,
+                "Слишком длинный ввод: максимум 160 символов, для города — 80.",
+            )
         if state == "market":
-            market = text.removeprefix("market:").upper()
+            market = value.upper()
             markets = enabled_markets()
             allowed = (*markets, "ALL") if len(markets) > 1 else markets
             if market not in allowed:
-                return [Reply("Выберите включённый рынок кнопкой.", self._market_buttons())]
-            self.store.set_draft(user_id, "currency", {**data, "market": market})
-            return self._currency_prompt()
-        if state == "currency":
-            currency = text.removeprefix("currency:").upper()
+                return self._prompt(user_id, state, data, "Выберите включённый рынок кнопкой.")
+            data["market"] = market
+        elif state == "currency":
+            currency = value.upper()
             currency = {"СОМ": "KGS", "СОМЫ": "KGS", "$": "USD"}.get(currency, currency)
             if currency not in {"USD", "KGS"}:
-                return [Reply("Выберите валюту кнопкой: USD или KGS.", CURRENCIES)]
-            self.store.set_draft(user_id, "budget", {**data, "currency": currency, "consent": True})
-            return [
-                Reply(
-                    f"Какой бюджет в {'долларах' if currency == 'USD' else 'сомах'}?\nНапример: 15000, 15к или диапазон 10000–15000. Без обозначения валюты."
-                )
-            ]
-        if state == "budget":
+                return self._prompt(user_id, state, data, "Выберите USD или KGS.")
+            if data.get("return_review") and currency != data["currency"]:
+                return self._prompt(user_id, "budget", {**data, "pending_currency": currency})
+            data["currency"] = currency
+        elif state == "budget":
             try:
-                minimum, maximum = parse_budget(text)
+                minimum, maximum = parse_budget(value)
             except ValueError as error:
-                return [Reply(str(error))]
-            data.update({"minimum": minimum, "maximum": maximum})
-            self.store.set_draft(user_id, "query", data)
+                return self._prompt(user_id, state, data, str(error))
+            data.update(minimum=minimum, maximum=maximum)
+            if "pending_currency" in data:
+                data["currency"] = data.pop("pending_currency")
+        elif state == "query":
+            if len(value.split(",")) > 5 or any(not normalize(part) for part in value.split(",")):
+                return self._prompt(
+                    user_id,
+                    state,
+                    data,
+                    "Укажите до пяти непустых вариантов с буквами или цифрами через запятую, не более 160 символов, либо выберите «Пока не знаю».",
+                )
+            data["query"] = value
+        elif state in _CHOICES:
+            choices = _CHOICES[state]
+            selected = value.casefold()
+            if selected not in choices:
+                selected = next(
+                    (key for key, label in choices.items() if label.casefold() == selected), ""
+                )
+            if selected not in choices:
+                return self._prompt(user_id, state, data, "Выберите один из вариантов кнопкой.")
+            data[state] = selected == "yes" if state == "allow_import" else selected
+        elif state == "city":
+            if len(value) > 80 or not any(char.isalpha() for char in normalize_city(value)):
+                return self._prompt(
+                    user_id,
+                    state,
+                    data,
+                    "Введите название города с буквами, не более 80 символов, или пропустите.",
+                )
+            data["city"] = value
+        elif state in {"year_min", "mileage_max_km"}:
+            digits = (
+                value.replace(" ", "").replace("\u00a0", "") if state == "mileage_max_km" else value
+            )
+            minimum, maximum = (
+                (1900, datetime.now(UTC).year + 1) if state == "year_min" else (0, 10_000_000)
+            )
+            if not re.fullmatch(r"[0-9]+", digits) or not minimum <= int(digits) <= maximum:
+                return self._prompt(
+                    user_id,
+                    state,
+                    data,
+                    f"Введите целое число от {minimum} до {maximum} или пропустите.",
+                )
+            data[state] = int(digits)
+        elif state == "purchase_by":
+            try:
+                if re.fullmatch(r"[0-9]{2}\.[0-9]{2}\.[0-9]{4}", value):
+                    parsed = datetime.strptime(value, "%d.%m.%Y").date()
+                elif re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                    parsed = date.fromisoformat(value)
+                else:
+                    raise ValueError("Invalid date format")
+            except ValueError:
+                return self._prompt(
+                    user_id,
+                    state,
+                    data,
+                    "Введите существующую календарную дату ГГГГ-ММ-ДД или ДД.ММ.ГГГГ, либо пропустите.",
+                )
+            data[state] = parsed.isoformat()
+        else:
             return [
                 Reply(
-                    "Какие автомобили рассматриваете?\nНапример: Toyota Camry, Honda Accord. "
-                    "Запятая разделяет альтернативы; можно указать только марку или тип кузова. Если не определились — нажмите «Пока не знаю».",
-                    ANY_CAR,
+                    "Черновик использует прежний шаг. /edit — начать ввод заново; /cancel — отменить."
                 )
             ]
-        if state == "query":
-            unknown = text.casefold() in {
-                "query:any",
-                "любые",
-                "любой",
-                "любая",
-                "не знаю",
-                "пока не знаю",
-                "все",
-            }
-            if (
-                len(text) > 160
-                or len(text.split(",")) > 5
-                or text.startswith("/")
-                or (not unknown and any(not normalize(part) for part in text.split(",")))
-            ):
-                return [
-                    Reply(
-                        "Укажите до пяти непустых вариантов с буквами или цифрами через запятую, не более 160 символов, либо выберите «Пока не знаю».",
-                        ANY_CAR,
-                    )
-                ]
-            if unknown:
-                text = ""
-            profile = self.store.save_profile(
-                Profile(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    currency=data["currency"],
-                    budget_min_minor=data["minimum"],
-                    budget_max_minor=data["maximum"],
-                    query=text,
-                    market=data.get("market", "KG"),
-                    quiet_start_minute=profile.quiet_start_minute if profile else None,
-                    quiet_end_minute=profile.quiet_end_minute if profile else None,
-                )
-            )
-            self.store.clear_draft(user_id)
-            return [
-                Reply(
-                    "Поиск сохранён. Подбор и мониторинг бесплатны. Уведомления включите отдельной кнопкой."
-                )
-            ] + self.search(profile)
-        raise RuntimeError("Unknown stored conversation state")
+        return self._advance(user_id, state, data)
