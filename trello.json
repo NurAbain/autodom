@@ -1,0 +1,10 @@
+{
+  "board": "autodom",
+  "board_id": "6aa1e117c06007cacd0e2fdc",
+  "url": "https://trello.com/b/79E8k4Mg/autodom",
+  "mcp_server": "autodom-trello",
+  "mcp_config": ".omp/mcp.json",
+  "usage": "Always pass board=autodom explicitly; the shared MCP default belongs to Domcom.",
+  "workflow_template": "https://trello.com/b/lBivj8mi/domcom-mcp",
+  "task_source_of_truth": "Trello"
+}

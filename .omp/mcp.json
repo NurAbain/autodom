@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "autodom-trello": {
+      "type": "http",
+      "url": "https://trello.domcom24.com/mcp",
+      "headers": {
+        "Authorization": "!pass show autodom/trello-mcp/authorization",
+        "User-Agent": "Autodom-MCP/1.0"
+      }
+    }
+  }
+}

@@ -1,0 +1,46 @@
+services:
+  autodom:
+    build: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    environment:
+      AUTODOM_BOT_TOKEN: ${AUTODOM_BOT_TOKEN:?Set the Telegram bot token}
+      AUTODOM_DATA_DIR: /data
+      AUTODOM_BACKUP_DIR: /backups
+      AUTODOM_REFRESH_SECONDS: ${AUTODOM_REFRESH_SECONDS:-300}
+      AUTODOM_REFRESH_PAGES: ${AUTODOM_REFRESH_PAGES:-3}
+      AUTODOM_CRAWL_DELAY: ${AUTODOM_CRAWL_DELAY:-2}
+      AUTODOM_FULL_REFRESH_SECONDS: ${AUTODOM_FULL_REFRESH_SECONDS:-86400}
+      AUTODOM_MONITOR_SECONDS: ${AUTODOM_MONITOR_SECONDS:-30}
+      SMARTPROXY_USERNAME: ${SMARTPROXY_USERNAME:?Set Domcom datacenter credentials}
+      SMARTPROXY_PASSWORD: ${SMARTPROXY_PASSWORD:?Set Domcom datacenter credentials}
+      SMARTPROXY_DATACENTER_ENDPOINT: ${SMARTPROXY_DATACENTER_ENDPOINT:-dc.decodo.com:10000}
+      SMARTPROXY_DATACENTER_PORT_START: ${SMARTPROXY_DATACENTER_PORT_START:-0}
+      SMARTPROXY_DATACENTER_PORT_COUNT: ${SMARTPROXY_DATACENTER_PORT_COUNT:-0}
+      SMARTPROXY_RESIDENTIAL_USERNAME: ${SMARTPROXY_RESIDENTIAL_USERNAME:?Set Domcom residential credentials}
+      SMARTPROXY_RESIDENTIAL_PASSWORD: ${SMARTPROXY_RESIDENTIAL_PASSWORD:?Set Domcom residential credentials}
+      SMARTPROXY_RESIDENTIAL_ENDPOINT: ${SMARTPROXY_RESIDENTIAL_ENDPOINT:-gate.decodo.com:7000}
+      SMARTPROXY_RESIDENTIAL_PORT_START: ${SMARTPROXY_RESIDENTIAL_PORT_START:-0}
+      SMARTPROXY_RESIDENTIAL_PORT_COUNT: ${SMARTPROXY_RESIDENTIAL_PORT_COUNT:-0}
+    volumes:
+      - catalog:/data
+      - snapshots:/backups
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  catalog:
+  snapshots:
