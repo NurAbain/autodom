@@ -72,6 +72,8 @@ _FILTER_NOTE = (
     "Цель и дата покупки — только заметки: не определяют пригодность машины и не останавливают мониторинг.\n"
     "Бюджет «под ключ» исключает иностранные объявления: полной стоимости ввоза пока нет. "
     "Даже для местных объявлений проверяется цена машины, а не все расходы покупки. "
+    "Аукционы сравниваются с бюджетом только по Buy Now, пока предложение активно: "
+    "текущая ставка, оценка и результат завершённых торгов не являются ценой покупки. "
     "Готовность к импорту не включает выключенные источники и не гарантирует срок доставки."
 )
 _USE_CASE_TIPS = {
@@ -152,7 +154,10 @@ def listing_text(listing: Listing, currency: str) -> str:
     price = listing.price(currency)
     original = listing.original_price_minor
     if original is not None and listing.original_currency:
-        price_text = "Цена объявления: " + money(original, listing.original_currency)
+        label = (
+            "Buy Now — цена выкупа: " if listing.price_kind == "buy_now" else "Цена объявления: "
+        )
+        price_text = label + money(original, listing.original_currency)
         if listing.original_currency != currency:
             price_text += (
                 f" (≈ {money(price, currency)} по НБКР)"
@@ -194,6 +199,37 @@ def listing_text(listing: Listing, currency: str) -> str:
         text += " Независимая проверка не выполнена."
         if listing.fx_date and price is not None and listing.original_currency != currency:
             text += f"\nДаты курсов НБКР: {escape(listing.fx_date)}."
+    if listing.auction_house or listing.auction_status:
+        auction_status = {
+            "active": "активен на момент наблюдения",
+            "ended": "завершён",
+            "unknown": "не подтверждён",
+        }.get(listing.auction_status, "не подтверждён")
+        text += (
+            f"\nАукцион: {escape(listing.auction_house[:30]) or 'не указан'}, "
+            f"лот {escape(listing.auction_lot[:40]) or 'не указан'} — {auction_status}."
+        )
+        if listing.vin:
+            text += "\nVIN / номер кузова: " + escape(listing.vin[:40]) + "."
+        if listing.auction_at is not None:
+            auction_time = datetime.fromtimestamp(listing.auction_at, _BISHKEK).strftime(
+                "%d.%m.%Y %H:%M"
+            )
+            text += f"\nНачало основных торгов: {auction_time} (Бишкек, UTC+6)."
+        for label, amount in (
+            ("Текущая ставка — не цена покупки", listing.current_bid_minor),
+            ("Финальная ставка завершённых торгов — не предложение", listing.final_bid_minor),
+        ):
+            if amount is not None:
+                text += f"\n{label}: {money(amount, 'USD')}."
+        if listing.estimated_min_minor is not None and listing.estimated_max_minor is not None:
+            text += (
+                f"\nОценка источника — не цена покупки: {money(listing.estimated_min_minor, 'USD')}"
+                f"–{money(listing.estimated_max_minor, 'USD')}."
+            )
+        if price is None:
+            text += "\nПодтверждённой цены для текущего подбора нет; Buy Now может быть недоступен."
+        text += "\nАукционные и брокерские сборы также не включены. Условия выкупа подтвердите до оплаты."
     return text
 
 

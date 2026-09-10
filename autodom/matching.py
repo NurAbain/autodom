@@ -19,7 +19,14 @@ _ALIASES = {
 _WORDS = re.compile(r"[^\W_]+", re.UNICODE)
 _BODY_LABELS = {
     "sedan": ("sedan", "седан", "세단"),
-    "suv": ("suv", "crossover", "внедорожник", "кроссовер", "внедорожник кроссовер"),
+    "suv": (
+        "suv",
+        "sport utility",
+        "crossover",
+        "внедорожник",
+        "кроссовер",
+        "внедорожник кроссовер",
+    ),
     "hatchback": ("hatchback", "хэтчбек", "хетчбэк", "хэтчбэк", "해치백"),
     "wagon": ("wagon", "station wagon", "универсал", "왜건"),
     "minivan": ("minivan", "минивэн", "минивен", "미니밴"),

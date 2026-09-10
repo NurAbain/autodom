@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from . import encar, mashina, truecar
+from . import bidcars, encar, mashina, truecar
 from .config import approved_sources
 from .models import SourcePage
 from .storage import Store
@@ -23,6 +23,7 @@ SOURCES = (
     Source("mashina.kg", "Mashina.kg", "KG", ("mashina.kg",), mashina.fetch_page),
     Source("encar.com", "Encar", "KR", ("fem.encar.com",), encar.fetch_page),
     Source("truecar.com", "TrueCar", "US", ("www.truecar.com",), truecar.fetch_page),
+    Source("bid.cars", "Bid.Cars · Copart / IAAI", "US", ("bid.cars",), bidcars.fetch_page),
 )
 
 
@@ -69,7 +70,7 @@ def source_status(store: Store) -> list[dict]:
                 "listings": observed.get("listings", 0),
                 "last_seen": observed.get("last_seen"),
                 "last_sync": store.get_meta(prefix + "last_sync_at"),
-                "total": store.get_meta(prefix + "catalog_total"),
+                "total": store.get_meta(prefix + "catalog_total") or None,
                 "scope": store.get_meta(prefix + "scope", ""),
                 "error": store.get_meta(prefix + "source_error", ""),
             }

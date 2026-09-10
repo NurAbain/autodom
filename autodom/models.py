@@ -50,11 +50,52 @@ class Listing:
     price_kind: str = "asking"
     fx_date: str = ""
     fx_expires_at: float | None = None
+    vin: str = ""
+    auction_house: str = ""
+    auction_lot: str = ""
+    auction_status: str = ""
+    auction_at: float | None = None
+    current_bid_minor: int | None = None
+    buy_now_minor: int | None = None
+    final_bid_minor: int | None = None
+    estimated_min_minor: int | None = None
+    estimated_max_minor: int | None = None
+    sale_document: str = ""
+    primary_damage: str = ""
+    secondary_damage: str = ""
+    start_code: str = ""
+
+    @property
+    def is_auction(self) -> bool:
+        return bool(
+            self.auction_status
+            or self.auction_house
+            or self.auction_lot
+            or self.auction_at is not None
+            or self.price_kind == "auction"
+            or self.current_bid_minor is not None
+            or self.buy_now_minor is not None
+            or self.final_bid_minor is not None
+            or self.estimated_min_minor is not None
+            or self.estimated_max_minor is not None
+        )
+
+    @property
+    def purchase_eligible(self) -> bool:
+        return self.price_kind in ("asking", "buy_now") and (
+            not self.is_auction
+            or (
+                self.price_kind == "buy_now"
+                and self.auction_status == "active"
+                and self.auction_at is not None
+                and self.auction_at > time.time()
+            )
+        )
 
     def price(self, currency: str) -> int | None:
         if currency not in ("USD", "KGS"):
             raise ValueError("Unsupported currency")
-        if self.price_kind not in ("asking", "buy_now"):
+        if not self.purchase_eligible:
             return None
         if self.market != "KG" and currency != self.original_currency:
             if self.fx_expires_at is None or self.fx_expires_at <= time.time():
@@ -98,7 +139,7 @@ class ListingEvent:
     previous_original_currency: str = ""
 
     def is_price_drop(self, currency: str) -> bool:
-        if self.listing.price_kind not in ("asking", "buy_now"):
+        if not self.listing.purchase_eligible:
             return False
         if self.listing.original_currency:
             return (
@@ -116,6 +157,6 @@ class ListingEvent:
 class SourcePage:
     listings: list[Listing]
     page: int
-    total: int
+    total: int | None
     pages: int
     scope: str = ""

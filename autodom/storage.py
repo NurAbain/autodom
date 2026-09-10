@@ -27,7 +27,7 @@ from .models import (
     Profile,
 )
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _FRESH_SECONDS = 48 * 60 * 60
 _SCHEMA = """
 BEGIN;
@@ -50,12 +50,15 @@ CREATE TABLE IF NOT EXISTS listings (
     ,normalized_transmission TEXT NOT NULL DEFAULT ''
     ,vehicle_year INTEGER
     ,mileage_km INTEGER
+    ,auction_status TEXT NOT NULL DEFAULT ''
+    ,auction_at REAL
 );
 CREATE INDEX IF NOT EXISTS listings_recent ON listings(last_seen DESC, first_seen DESC, id);
 CREATE INDEX IF NOT EXISTS listings_source ON listings(source, market, last_seen);
 CREATE INDEX IF NOT EXISTS listings_preferences ON listings(
     normalized_city, normalized_body_type, normalized_transmission, vehicle_year, mileage_km
 );
+CREATE INDEX IF NOT EXISTS listings_auction ON listings(auction_status, auction_at);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     listing_id TEXT NOT NULL REFERENCES listings(id),
@@ -103,7 +106,7 @@ CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;
 COMMIT;
 """
 _MIGRATE_V1 = """
@@ -159,6 +162,12 @@ ALTER TABLE listings ADD COLUMN mileage_km INTEGER;
 CREATE INDEX listings_preferences ON listings(
     normalized_city, normalized_body_type, normalized_transmission, vehicle_year, mileage_km
 );
+"""
+_MIGRATE_V4 = """
+BEGIN;
+ALTER TABLE listings ADD COLUMN auction_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE listings ADD COLUMN auction_at REAL;
+CREATE INDEX listings_auction ON listings(auction_status, auction_at);
 """
 
 
@@ -296,7 +305,27 @@ class Store:
                                 (*_listing_filters(listing), row["id"]),
                             )
                         self._db.execute("PRAGMA user_version = 4")
-                elif version != _SCHEMA_VERSION:
+                    version = 4
+                if version == 4:
+                    self._db.executescript(_MIGRATE_V4)
+                    with self._db:
+                        for row in self._db.execute("SELECT id, data, last_seen FROM listings"):
+                            listing = _listing(row["data"], row["last_seen"])
+                            self._db.execute(
+                                """UPDATE listings SET auction_status = ?, auction_at = ?,
+                                   price_usd_minor = ?, price_kgs_minor = ? WHERE id = ?""",
+                                (
+                                    listing.auction_status
+                                    or ("unknown" if listing.is_auction else ""),
+                                    listing.auction_at,
+                                    listing.price("USD"),
+                                    listing.price("KGS"),
+                                    row["id"],
+                                ),
+                            )
+                        self._db.execute("PRAGMA user_version = 5")
+                    version = 5
+                if version != _SCHEMA_VERSION:
                     raise ValueError(f"Unsupported database schema version: {version}")
         except BaseException:
             self._db.close()
@@ -338,7 +367,7 @@ class Store:
                 )
                 previous = self._db.execute(
                     """SELECT price_usd_minor, price_kgs_minor, last_seen,
-                              original_price_minor, original_currency
+                              original_price_minor, original_currency, data
                        FROM listings WHERE id = ?""",
                     (listing.id,),
                 ).fetchone()
@@ -352,8 +381,9 @@ class Store:
                        (id, data, price_usd_minor, price_kgs_minor, availability,
                         normalized_text, first_seen, last_seen, source, market,
                         original_currency, original_price_minor, fx_expires_at, normalized_city,
-                        normalized_body_type, normalized_transmission, vehicle_year, mileage_km)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        normalized_body_type, normalized_transmission, vehicle_year, mileage_km,
+                        auction_status, auction_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                          data = excluded.data,
                          price_usd_minor = excluded.price_usd_minor,
@@ -369,7 +399,9 @@ class Store:
                          normalized_body_type = excluded.normalized_body_type,
                          normalized_transmission = excluded.normalized_transmission,
                          vehicle_year = excluded.vehicle_year,
-                         mileage_km = excluded.mileage_km""",
+                         mileage_km = excluded.mileage_km,
+                         auction_status = excluded.auction_status,
+                         auction_at = excluded.auction_at""",
                     (
                         listing.id,
                         data,
@@ -384,14 +416,46 @@ class Store:
                         listing.original_price_minor,
                         listing.fx_expires_at,
                         *_listing_filters(listing),
+                        listing.auction_status or ("unknown" if listing.is_auction else ""),
+                        listing.auction_at,
                     ),
                 )
                 changed = previous is None
+                kind = "new" if previous is None else "price_change"
+                comparable = previous is not None
                 if previous is not None:
-                    if listing.original_currency or previous["original_currency"]:
+                    old = _listing(previous["data"], previous["last_seen"])
+                    comparable = (
+                        old.price_kind == listing.price_kind
+                        and old.original_currency == listing.original_currency
+                        and old.purchase_eligible
+                        and listing.purchase_eligible
+                    )
+                    old_offer = old.purchase_eligible and any(
+                        price is not None and price > 0
+                        for price in (
+                            old.original_price_minor,
+                            old.price_usd_minor,
+                            old.price_kgs_minor,
+                        )
+                    )
+                    new_offer = listing.purchase_eligible and any(
+                        price is not None and price > 0
+                        for price in (
+                            listing.original_price_minor,
+                            listing.price_usd_minor,
+                            listing.price_kgs_minor,
+                        )
+                    )
+                    if new_offer and not old_offer:
+                        changed = True
+                        kind = "new"
+                    elif listing.is_auction and not new_offer:
+                        changed = False
+                    elif listing.original_currency or old.original_currency:
                         changed = (
-                            listing.original_currency != previous["original_currency"]
-                            or listing.original_price_minor != previous["original_price_minor"]
+                            listing.original_currency != old.original_currency
+                            or listing.original_price_minor != old.original_price_minor
                         )
                     else:
                         changed = (previous[0], previous[1]) != prices
@@ -403,13 +467,13 @@ class Store:
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             listing.id,
-                            "new" if previous is None else "price_change",
+                            kind,
                             data,
-                            previous[0] if previous is not None else None,
-                            previous[1] if previous is not None else None,
+                            previous[0] if comparable else None,
+                            previous[1] if comparable else None,
                             observation,
-                            previous["original_price_minor"] if previous is not None else None,
-                            previous["original_currency"] if previous is not None else "",
+                            previous["original_price_minor"] if comparable else None,
+                            previous["original_currency"] if comparable else "",
                         ),
                     )
                     events += 1
@@ -569,6 +633,7 @@ class Store:
             "last_seen >= ?",
             f"source IN ({','.join('?' for _ in sources)})",
             "(market = 'KG' OR original_currency = ? OR fx_expires_at > ?)",
+            "(auction_status = '' OR (auction_status = 'active' AND auction_at > ?))",
         ]
         now = time.time()
         parameters = [
@@ -577,6 +642,7 @@ class Store:
             now - _FRESH_SECONDS,
             *sources,
             profile.currency,
+            now,
             now,
         ]
         if profile.market != "ALL":

@@ -4,7 +4,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-SOURCE_IDS = ("mashina.kg", "encar.com", "truecar.com")
+SOURCE_IDS = ("mashina.kg", "encar.com", "truecar.com", "bid.cars")
 
 
 def approved_sources() -> tuple[str, ...]:

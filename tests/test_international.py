@@ -159,6 +159,25 @@ def test_expired_fx_excludes_conversions_but_preserves_native_usd(catalog, monke
     assert "1 000 $" not in listing_text(korean, "USD")
 
 
+def test_refreshed_fx_preserves_pending_native_price_drop(catalog, monkeypatch):
+    baseline = car("KR", fx_expires_at=NOW + 1)
+    catalog.upsert_listings([baseline], observed_at=NOW - 2)
+    catalog.save_profile(Profile(1, 1, "USD", 0, 200_000, market="KR", monitoring=True))
+    lower = replace(baseline, original_price_minor=900_000, price_usd_minor=90_000)
+    catalog.upsert_listings([lower], observed_at=NOW - 1)
+    monkeypatch.setattr("autodom.storage.time.time", lambda: NOW + 2)
+    refreshed = replace(lower, price_usd_minor=92_000, fx_expires_at=NOW + 3600)
+    catalog.upsert_listings([refreshed], observed_at=NOW + 2)
+    sent = []
+
+    async def send(chat, replies):
+        sent.extend(reply.text for reply in replies)
+
+    assert asyncio.run(notify_once(catalog, UserLocks(), send)) == 1
+    assert "900 000 KRW" in "\n".join(sent)
+    assert "920 $" in "\n".join(sent)
+
+
 def test_one_source_failure_keeps_other_source_progress_and_status(catalog, monkeypatch):
     catalog.set_meta("source:encar.com:crawl_next_page", "37")
 

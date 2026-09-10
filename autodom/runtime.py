@@ -55,7 +55,7 @@ def record_page(
         store.set_meta(prefix + "full_scan_completed_at", "0")
         raise SourceError("Source search scope changed; restart from the first page")
     count = store.upsert_listings(page.listings, observed_at=observed_at)
-    store.set_meta(prefix + "catalog_total", str(page.total))
+    store.set_meta(prefix + "catalog_total", "" if page.total is None else str(page.total))
     store.set_meta(prefix + "catalog_pages", str(page.pages))
     store.set_meta(prefix + "scope", page.scope)
     store.set_meta(prefix + "last_sync_at", datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"))
@@ -228,7 +228,12 @@ async def notify_once(store: Store, locks: UserLocks, send: Send) -> int:
             latest: dict[str, ListingEvent] = {}
             for event in events:
                 previous = latest.get(event.listing.id)
-                if previous is not None:
+                if (
+                    previous is not None
+                    and event.kind != "new"
+                    and previous.listing.price_kind == event.listing.price_kind
+                    and previous.listing.original_currency == event.listing.original_currency
+                ):
                     event = ListingEvent(
                         event.id,
                         event.listing,
@@ -246,11 +251,13 @@ async def notify_once(store: Store, locks: UserLocks, send: Send) -> int:
                 current = store.get_listing(event.listing.id, fresh_only=True)
                 if current is None or not matches(profile, current):
                     continue
+                if (
+                    current.price_kind != event.listing.price_kind
+                    or current.original_currency != event.listing.original_currency
+                ):
+                    continue
                 if current.original_currency:
-                    if (
-                        current.original_currency != event.listing.original_currency
-                        or current.original_price_minor != event.listing.original_price_minor
-                    ):
+                    if current.original_price_minor != event.listing.original_price_minor:
                         continue
                 elif current.price(profile.currency) != event.listing.price(profile.currency):
                     continue
