@@ -15,7 +15,9 @@ Usage: pnpm vin [serve|health] [--help]
   health    Probe the local /health endpoint with a five-second timeout
 
 serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters), explicit
-AUTODOM_VIN_PROVIDERS (carhistory,car365), and both existing SMARTPROXY tiers.
+AUTODOM_VIN_PROVIDERS (carhistory,car365,nhtsa_vpic).
+Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
+free public NHTSA API directly: technical decoding only, not vehicle history.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
 AUTODOM_VIN_API_MAX_IN_FLIGHT defaults to 4; AUTODOM_CRAWL_DELAY to 2 seconds.
 health needs only host/port. No database, Redis or Telegram configuration is used.
@@ -80,7 +82,9 @@ export async function main(
     const requestDelaySeconds = Number(delayText);
     if (!delayText.trim() || !Number.isFinite(requestDelaySeconds) || requestDelaySeconds < 0)
       throw new Error("AUTODOM_CRAWL_DELAY must be a non-negative number of seconds.");
-    const routes = loadProxyRoutes(env);
+    const routes = providers.some((provider) => provider !== "nhtsa_vpic")
+      ? loadProxyRoutes(env)
+      : [];
     service = new VinCheckService({
       providers,
       routes,

@@ -1,15 +1,27 @@
-import { VIN_SOURCE_URLS, type VinCheckResult, type VinProvider } from "@autodom/core/vin";
+import {
+  VIN_PROVIDERS,
+  VIN_SOURCE_URLS,
+  type VinCheckResult,
+  type VinProvider,
+} from "@autodom/core/vin";
 
 export const VIN_DISCLOSURE =
-  "По вашему запросу VIN передаётся отдельному сервису проверки Autodom и подключённым CarHistory и Car365 через настроенный прокси. Проверяем доступность платного отчёта CarHistory и государственные записи Car365; платный отчёт не покупаем и не получаем. VIN не сохраняется в вашем поиске или профиле.";
+  "По вашему запросу VIN передаётся отдельному сервису проверки Autodom: подключённым CarHistory и Car365 — только через настроенный прокси, а NHTSA vPIC, если включён, — напрямую через бесплатный публичный API. Проверяем доступность платного отчёта CarHistory и государственные записи Car365; платный отчёт не покупаем и не получаем. NHTSA предоставляет характеристики производителя для рынка США, не историю ДТП, пробега или владельцев. VIN не сохраняется в вашем поиске или профиле.";
 export const VIN_NOT_ENABLED = "Проверка VIN не подключена. Запрос провайдерам не отправлен.";
 export const VIN_HELP = `Отправьте /vin и VIN: 17 латинских букв и цифр, без I, O, Q. Например: /vin KMHDU41DBAU123456.\n\n${VIN_DISCLOSURE}`;
 export const VIN_CAUTION =
   "Отсутствие записей не означает отсутствие ДТП или ограничений. Записанный пробег — не текущий реальный пробег. Сверьте VIN с автомобилем и документами.";
 
+export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
+  carhistory: "CarHistory",
+  car365: "Car365",
+  nhtsa_vpic: "NHTSA vPIC · США, характеристики",
+};
+
 export function vinSourceText(provider: VinProvider, result: VinCheckResult): string {
   const observation = result[provider];
-  const name = provider === "carhistory" ? "CarHistory" : "Car365";
+  if (!observation) return "";
+  const name = VIN_SOURCE_NAMES[provider];
   let description: string;
   switch (observation.status) {
     case "disabled":
@@ -23,12 +35,27 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
       description =
         provider === "carhistory"
           ? "Доступность платного отчёта для этого VIN не подтверждена. Может потребоваться прежний корейский регистрационный номер."
-          : "Государственная запись об экспорте и пробеге для этого VIN не найдена. Это не подтверждает отсутствие повреждений.";
+          : provider === "nhtsa_vpic"
+            ? "Декодер не смог установить характеристики для этого VIN. Это не подтверждает отсутствие ДТП или других событий в истории."
+            : "Государственная запись об экспорте и пробеге для этого VIN не найдена. Это не подтверждает отсутствие повреждений.";
       break;
     case "available": {
       if (provider === "carhistory") {
         description =
           "Платный отчёт доступен для запроса у провайдера. Полный отчёт не куплен и не получен; его содержание неизвестно.";
+        break;
+      }
+      if (provider === "nhtsa_vpic") {
+        const record = result.nhtsa_vpic?.data;
+        const lines = ["Характеристики по данным производителя для рынка США."];
+        if (record?.make) lines.push(`Марка: ${record.make}`);
+        if (record?.model) lines.push(`Модель: ${record.model}`);
+        if (record?.model_year != null) lines.push(`Модельный год: ${record.model_year}`);
+        if (record?.body_class) lines.push(`Тип кузова: ${record.body_class}`);
+        if (record?.fuel_type) lines.push(`Топливо: ${record.fuel_type}`);
+        if (record?.plant_country) lines.push(`Страна сборки: ${record.plant_country}`);
+        lines.push("Неуказанные характеристики неизвестны.");
+        description = lines.join("\n");
         break;
       }
       const record = result.car365.data;
@@ -54,6 +81,10 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
       break;
     }
   }
+  if (provider === "nhtsa_vpic") {
+    description +=
+      "\nЭто не история ДТП, пробега или владельцев. Страна сборки не означает страну регистрации или эксплуатации.";
+  }
   const checked =
     observation.checked_at === null
       ? "Проверка не выполнялась."
@@ -64,8 +95,10 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
 export function vinResultText(result: VinCheckResult): string {
   return [
     `VIN: ${result.vin}`,
-    ...(["carhistory", "car365"] as const).map(
-      (provider) => `${vinSourceText(provider, result)}\nИсточник: ${VIN_SOURCE_URLS[provider]}`,
+    ...VIN_PROVIDERS.flatMap((provider) =>
+      result[provider]
+        ? [`${vinSourceText(provider, result)}\nИсточник: ${VIN_SOURCE_URLS[provider]}`]
+        : [],
     ),
     VIN_CAUTION,
   ].join("\n\n");

@@ -14,6 +14,17 @@ const record = z
     total_loss: z.boolean().nullable(),
   })
   .strict();
+const nhtsaRecord = z
+  .object({
+    vin: z.string(),
+    make: z.string().max(512).nullable(),
+    model: z.string().max(512).nullable(),
+    model_year: z.number().int().min(1886).max(9999).nullable(),
+    body_class: z.string().max(512).nullable(),
+    fuel_type: z.string().max(512).nullable(),
+    plant_country: z.string().max(512).nullable(),
+  })
+  .strict();
 const resultSchema = z
   .object({
     vin: z.string(),
@@ -22,6 +33,10 @@ const resultSchema = z
     car365: observation
       .extend({ source_url: z.literal(VIN_SOURCE_URLS.car365), data: record.nullable() })
       .strict(),
+    nhtsa_vpic: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.nhtsa_vpic), data: nhtsaRecord.nullable() })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -96,10 +111,15 @@ export function createVinApiLookup(
         reader.releaseLock();
       }
       const result = resultSchema.parse(JSON.parse(body));
+      const decoder = result.nhtsa_vpic;
       if (
         result.vin !== vin ||
         (result.car365.data !== null && result.car365.data.vin !== vin) ||
         (result.car365.status === "available") !== (result.car365.data !== null) ||
+        (decoder !== undefined &&
+          ((decoder.data !== null && decoder.data.vin !== vin) ||
+            (decoder.status === "available") !== (decoder.data !== null) ||
+            (decoder.status === "disabled") !== (decoder.checked_at === null))) ||
         [result.carhistory, result.car365].some(
           (item) => (item.status === "disabled") !== (item.checked_at === null),
         )

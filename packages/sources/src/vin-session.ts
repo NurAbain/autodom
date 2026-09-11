@@ -1,25 +1,22 @@
 import { setTimeout as delay } from "node:timers/promises";
-import {
-  type ProxyRoute,
-  SourceError,
-  SourceRateLimited,
-  VIN_SOURCE_URLS,
-  type VinProvider,
-} from "@autodom/core";
+import { type ProxyRoute, SourceError, SourceRateLimited, VIN_SOURCE_URLS } from "@autodom/core";
 import pLimit from "p-limit";
 import { type Dispatcher, fetch, getSetCookies, Headers, ProxyAgent, type Response } from "undici";
 import { readBody, retryAfterSeconds } from "./http-response.js";
 
-const REQUEST_PATHS: Readonly<Record<VinProvider, Readonly<Record<string, "GET" | "POST">>>> = {
-  carhistory: {
-    "/search/carhistory/search.car": "GET",
-    "/search/carhistory/initSearch.car": "POST",
-  },
-  car365: {
-    "/ccpt/carlife/scrcar/schdcarXportView.do": "GET",
-    "/ccpt/carlife/scrcar/selectSchdcarXportList.do": "POST",
-  },
-};
+type KoreanVinProvider = "carhistory" | "car365";
+
+const REQUEST_PATHS: Readonly<Record<KoreanVinProvider, Readonly<Record<string, "GET" | "POST">>>> =
+  {
+    carhistory: {
+      "/search/carhistory/search.car": "GET",
+      "/search/carhistory/initSearch.car": "POST",
+    },
+    car365: {
+      "/ccpt/carlife/scrcar/schdcarXportView.do": "GET",
+      "/ccpt/carlife/scrcar/selectSchdcarXportList.do": "POST",
+    },
+  };
 
 export interface VinSession {
   request(
@@ -55,8 +52,8 @@ export class VinTransport {
   readonly #abort = new AbortController();
   readonly #limit = pLimit(2);
   readonly #active = new Set<Promise<unknown>>();
-  readonly #nextRequest = new Map<VinProvider, number>();
-  readonly #rateLimitedUntil = new Map<VinProvider, number>();
+  readonly #nextRequest = new Map<KoreanVinProvider, number>();
+  readonly #rateLimitedUntil = new Map<KoreanVinProvider, number>();
   #page = 0;
 
   constructor(options: VinTransportOptions) {
@@ -73,7 +70,7 @@ export class VinTransport {
   }
 
   async run<T>(
-    provider: VinProvider,
+    provider: KoreanVinProvider,
     workflow: (session: VinSession) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
@@ -116,12 +113,12 @@ export class VinTransport {
     await Promise.allSettled(this.#active);
   }
 
-  #requireNotRateLimited(provider: VinProvider): void {
+  #requireNotRateLimited(provider: KoreanVinProvider): void {
     const remaining = (this.#rateLimitedUntil.get(provider) ?? 0) - Date.now();
     if (remaining > 0) throw new SourceRateLimited(Math.ceil(remaining / 1000));
   }
 
-  #session(provider: VinProvider, dispatcher: Dispatcher, signal: AbortSignal): VinSession {
+  #session(provider: KoreanVinProvider, dispatcher: Dispatcher, signal: AbortSignal): VinSession {
     const origin = new URL(VIN_SOURCE_URLS[provider]).origin;
     const cookies = new Map<string, SessionCookie>();
     return {

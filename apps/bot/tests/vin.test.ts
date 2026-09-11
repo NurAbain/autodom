@@ -38,6 +38,8 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).toContain("https://www.carhistory.or.kr/");
     expect(text).toContain("https://www.car365.go.kr/");
     expect(text).not.toContain("attacker.invalid");
+    expect(text).not.toContain("NHTSA");
+    expect(text).not.toContain("vpic.nhtsa.dot.gov");
   });
 
   it("does not turn disabled, failing or no-data providers into a clean-car claim", () => {
@@ -63,5 +65,89 @@ describe("VIN observations presented without buying or certifying a report", () 
         car365: { ...result.car365, data: { ...result.car365.data!, last_mileage_km: null } },
       }),
     ).toMatch(/Пробег.*неизвестен/);
+  });
+
+  it("presents decoder specifications separately from vehicle history and uses the trusted source", () => {
+    const decoded: VinCheckResult = {
+      ...result,
+      nhtsa_vpic: {
+        status: "available",
+        source_url: "https://attacker.invalid/",
+        checked_at: result.checked_at,
+        data: {
+          vin: result.vin,
+          make: "HYUNDAI",
+          model: "AVANTE",
+          model_year: 2011,
+          body_class: "Sedan/Saloon",
+          fuel_type: "Gasoline",
+          plant_country: "SOUTH KOREA",
+        },
+      },
+    };
+    const section = vinSourceText("nhtsa_vpic", decoded);
+    expect(section).toMatch(/NHTSA vPIC.*США.*характеристики/);
+    expect(section).toContain("HYUNDAI");
+    expect(section).toContain("AVANTE");
+    expect(section).toContain("2011");
+    expect(section).toContain("Sedan/Saloon");
+    expect(section).toContain("Gasoline");
+    expect(section).toMatch(/Страна сборки: SOUTH KOREA/);
+    expect(section).toMatch(/не история ДТП, пробега или владельцев/);
+    expect(section).toMatch(/не означает страну регистрации/);
+    expect(section).not.toContain("0 км");
+    expect(section).not.toContain("2024-05-02");
+    const text = vinResultText(decoded);
+    expect(text).toContain("https://vpic.nhtsa.dot.gov/api/");
+    expect(text).not.toContain("attacker.invalid");
+  });
+
+  it("treats unknown decoder fields as unknown rather than absent vehicle features", () => {
+    const text = vinSourceText("nhtsa_vpic", {
+      ...result,
+      nhtsa_vpic: {
+        status: "available",
+        source_url: "https://vpic.nhtsa.dot.gov/api/",
+        checked_at: result.checked_at,
+        data: {
+          vin: result.vin,
+          make: "HYUNDAI",
+          model: null,
+          model_year: null,
+          body_class: null,
+          fuel_type: null,
+          plant_country: null,
+        },
+      },
+    });
+    expect(text).toContain("HYUNDAI");
+    expect(text).toMatch(/характеристики неизвестны/);
+    expect(text).not.toMatch(/Модель:|Модельный год:|Тип кузова:|Топливо:|Страна сборки:/);
+    expect(text).not.toMatch(/null|undefined/);
+  });
+
+  it("distinguishes an undecodable VIN from unavailable and disabled decoder requests", () => {
+    const observation = {
+      source_url: "https://vpic.nhtsa.dot.gov/api/",
+      checked_at: result.checked_at,
+      data: null,
+    };
+    const missing = vinSourceText("nhtsa_vpic", {
+      ...result,
+      nhtsa_vpic: { ...observation, status: "not_found" },
+    });
+    const unavailable = vinSourceText("nhtsa_vpic", {
+      ...result,
+      nhtsa_vpic: { ...observation, status: "unavailable" },
+    });
+    const disabled = vinSourceText("nhtsa_vpic", {
+      ...result,
+      nhtsa_vpic: { ...observation, status: "disabled", checked_at: null },
+    });
+    expect(missing).toMatch(/Декодер не смог установить характеристики/);
+    expect(missing).toMatch(/не подтверждает отсутствие ДТП/);
+    expect(unavailable).toMatch(/недоступен.*Результат проверки неизвестен/);
+    expect(disabled).toMatch(/отключён; запрос не отправлен/);
+    expect(disabled).not.toMatch(/Проверено:/);
   });
 });

@@ -1,5 +1,6 @@
 import {
   normalizeVin,
+  SourceError,
   VIN_SOURCE_URLS,
   type VinCheckResult,
   type VinLookup,
@@ -7,15 +8,36 @@ import {
 } from "@autodom/core";
 import { checkCar365 } from "./car365.js";
 import { checkCarHistory } from "./carhistory.js";
+import { checkNhtsaVpic } from "./nhtsa-vpic.js";
 import { VinTransport, type VinTransportOptions } from "./vin-session.js";
 
 export class VinCheckService {
-  readonly #enabled: Record<VinProvider, boolean> = { carhistory: false, car365: false };
+  readonly #enabled: Record<VinProvider, boolean> = {
+    carhistory: false,
+    car365: false,
+    nhtsa_vpic: false,
+  };
   readonly #transport: VinTransport | undefined;
+  readonly #abort = new AbortController();
+  readonly #signal: AbortSignal;
+  readonly #timeoutMs: number;
+  readonly #active = new Set<Promise<unknown>>();
 
   constructor(options: VinTransportOptions & { providers: readonly VinProvider[] }) {
     for (const provider of options.providers) this.#enabled[provider] = true;
-    if (options.providers.length) this.#transport = new VinTransport(options);
+    if (this.#enabled.carhistory || this.#enabled.car365) {
+      this.#transport = new VinTransport(options);
+    }
+    this.#timeoutMs = options.timeoutMs ?? 40_000;
+    if (
+      this.#enabled.nhtsa_vpic &&
+      (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 1)
+    ) {
+      throw new SourceError("NHTSA request timeout must be a positive integer");
+    }
+    this.#signal = options.signal
+      ? AbortSignal.any([this.#abort.signal, options.signal])
+      : this.#abort.signal;
   }
 
   readonly check: VinLookup = async (value, signal): Promise<VinCheckResult> => {
@@ -34,10 +56,9 @@ export class VinCheckService {
       },
     };
     const transport = this.#transport;
-    if (!transport) return result;
     await Promise.all([
       (async () => {
-        if (!this.#enabled.carhistory) return;
+        if (!this.#enabled.carhistory || !transport) return;
         result.carhistory.checked_at = Date.now() / 1000;
         try {
           result.carhistory.status = await transport.run(
@@ -51,7 +72,7 @@ export class VinCheckService {
         }
       })(),
       (async () => {
-        if (!this.#enabled.car365) return;
+        if (!this.#enabled.car365 || !transport) return;
         result.car365.checked_at = Date.now() / 1000;
         try {
           result.car365.data = await transport.run(
@@ -65,11 +86,37 @@ export class VinCheckService {
           result.car365.status = "unavailable";
         }
       })(),
+      (async () => {
+        if (!this.#enabled.nhtsa_vpic) return;
+        const observation: NonNullable<VinCheckResult["nhtsa_vpic"]> = {
+          status: "unavailable",
+          source_url: VIN_SOURCE_URLS.nhtsa_vpic,
+          checked_at: Date.now() / 1000,
+          data: null,
+        };
+        result.nhtsa_vpic = observation;
+        const task = checkNhtsaVpic(
+          vin,
+          signal ? AbortSignal.any([this.#signal, signal]) : this.#signal,
+          this.#timeoutMs,
+        );
+        this.#active.add(task);
+        try {
+          observation.data = await task;
+          observation.status = observation.data ? "available" : "not_found";
+        } catch {
+          signal?.throwIfAborted();
+          observation.status = "unavailable";
+        } finally {
+          this.#active.delete(task);
+        }
+      })(),
     ]);
     return result;
   };
 
   async close(): Promise<void> {
-    await this.#transport?.close();
+    this.#abort.abort();
+    await Promise.all([this.#transport?.close(), Promise.allSettled(this.#active)]);
   }
 }

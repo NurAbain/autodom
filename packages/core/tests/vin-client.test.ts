@@ -57,11 +57,39 @@ afterEach(async () => {
 });
 
 describe("remote VIN API consumer", () => {
+  const decoder = {
+    status: "available",
+    source_url: VIN_SOURCE_URLS.nhtsa_vpic,
+    checked_at: result.checked_at,
+    data: {
+      vin: VIN,
+      make: "HYUNDAI",
+      model: null,
+      model_year: 1999,
+      body_class: null,
+      fuel_type: "Diesel",
+      plant_country: "SOUTH KOREA",
+    },
+  };
+
   it("preserves independently failed sources rather than rejecting a useful partial result", async () => {
     const check = await upstream(result);
     const actual = await check(VIN.toLowerCase());
     expect(actual.carhistory.status).toBe("available");
     expect(actual.car365).toMatchObject({ status: "unavailable", data: null });
+  });
+
+  it("accepts optional decoding without losing failed history sources during rollout", async () => {
+    const check = await upstream({
+      ...result,
+      nhtsa_vpic: decoder,
+    });
+    const actual = await check(VIN);
+    expect(actual.car365).toMatchObject({ status: "unavailable", data: null });
+    expect(actual.nhtsa_vpic).toMatchObject({
+      status: "available",
+      data: { vin: VIN, model_year: 1999 },
+    });
   });
 
   it.each([
@@ -72,6 +100,10 @@ describe("remote VIN API consumer", () => {
       ...result,
       carhistory: { ...result.carhistory, status: "disabled", checked_at: 1_789_000_000 },
     },
+    { ...result, nhtsa_vpic: { ...decoder, data: { ...decoder.data, vin: "KMFXKN7BPXU258801" } } },
+    { ...result, nhtsa_vpic: { ...decoder, source_url: "https://attacker.invalid/" } },
+    { ...result, nhtsa_vpic: { ...decoder, status: "not_found" } },
+    { ...result, nhtsa_vpic: { ...decoder, checked_at: null } },
   ])("rejects an untrustworthy observation instead of displaying it", async (body) => {
     const check = await upstream(body);
     await expect(check(VIN)).rejects.toThrow();

@@ -1,6 +1,11 @@
-import { normalizeVin, VIN_SOURCE_URLS, type VinCheckResult } from "@autodom/core/vin";
+import {
+  normalizeVin,
+  VIN_PROVIDERS,
+  VIN_SOURCE_URLS,
+  type VinCheckResult,
+} from "@autodom/core/vin";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
-import { VIN_CAUTION, VIN_DISCLOSURE, vinSourceText } from "../src/vin-text.js";
+import { VIN_CAUTION, VIN_DISCLOSURE, VIN_SOURCE_NAMES, vinSourceText } from "../src/vin-text.js";
 
 type TelegramApp = {
   initData?: string;
@@ -204,8 +209,8 @@ function gallery(car: MiniAppCar): HTMLElement {
 function vinPanel(car: MiniAppCar): HTMLElement {
   const panel = element("section", "panel vin-panel");
   panel.append(
-    element("p", "eyebrow", "История автомобиля"),
-    element("h2", "", "Проверка корейского VIN"),
+    element("p", "eyebrow", "Данные об автомобиле"),
+    element("h2", "", "Проверка VIN"),
     element(
       "p",
       car.vin ? "vin" : "muted",
@@ -302,15 +307,14 @@ function vinPanel(car: MiniAppCar): HTMLElement {
       const result = (await response.json()) as VinCheckResult;
       if (result.vin !== vin) throw new Error("VIN result mismatch");
       results.replaceChildren(element("p", "vin", `Результат для VIN ${result.vin}`));
-      for (const provider of ["carhistory", "car365"] as const) {
+      for (const provider of VIN_PROVIDERS) {
+        const observation = result[provider];
+        if (!observation) continue;
         const section = element("section", "vin-source");
-        section.dataset.status = result[provider].status;
+        section.dataset.status = observation.status;
         section.append(
           element("p", "vin-observation", vinSourceText(provider, result)),
-          sourceLink(
-            VIN_SOURCE_URLS[provider],
-            provider === "carhistory" ? "Источник: CarHistory" : "Источник: Car365",
-          ),
+          sourceLink(VIN_SOURCE_URLS[provider], `Источник: ${VIN_SOURCE_NAMES[provider]}`),
         );
         results.append(section);
       }
