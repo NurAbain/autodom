@@ -202,6 +202,39 @@ describe("PostgreSQL Store", () => {
     await db.upsertListings([car({ id: "boundary" })], NOW - 48 * 3600);
     expect(await db.getListing("boundary", true)).not.toBeNull();
   });
+  it("upgrades a populated v1 catalog without narrowing the normalized mileage range", async () => {
+    const legacyUrl = await database();
+    const legacy = new pg.Client({ connectionString: legacyUrl });
+    const initial = await readFile("packages/storage/migrations/0001_initial.sql", "utf8");
+    const previous = car({ id: "previous", mileage: "8000 км" });
+    await legacy.connect();
+    try {
+      await legacy.query(initial);
+      await legacy.query(
+        "CREATE TABLE autodom_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
+      );
+      await legacy.query("INSERT INTO autodom_migrations(version, checksum) VALUES (1, $1)", [
+        createHash("sha256").update(initial).digest("hex"),
+      ]);
+      await legacy.query(
+        "INSERT INTO listings(id, data, price_usd_minor, price_kgs_minor, availability, normalized_text, first_seen, last_seen, mileage_km) VALUES ($1, $2, 100, 9000, $3, '', $4, $4, 8000)",
+        [previous.id, previous, "в наличии", NOW],
+      );
+    } finally {
+      await legacy.end();
+    }
+    const migrated = await open(legacyUrl);
+    await migrated.upsertListings([car({ id: "large-mileage", mileage: "2394664666 км" })]);
+    expect((await migrated.getListing("previous"))?.mileage).toBe("8000 км");
+    expect((await migrated.getListing("large-mileage"))?.mileage).toBe("2394664666 км");
+    expect((await migrated.search(profile())).map((item) => item.id).sort()).toEqual([
+      "large-mileage",
+      "previous",
+    ]);
+    expect(
+      (await migrated.search({ ...profile(), mileage_max_km: 10_000_000 })).map((item) => item.id),
+    ).toEqual(["previous"]);
+  });
   it("uses native prices for events and excludes expired FX but keeps native USD", async () => {
     const kr = car({
       id: "kr",

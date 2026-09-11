@@ -274,14 +274,17 @@ export class Store {
     return this.advisory(key, fn, true);
   }
   async migrate(): Promise<void> {
-    const migration = await readFile(
-      resolve(
-        process.env.AUTODOM_MIGRATIONS_DIR ?? "packages/storage/migrations",
-        "0001_initial.sql",
-      ),
-      "utf8",
+    const directory = process.env.AUTODOM_MIGRATIONS_DIR ?? "packages/storage/migrations";
+    const migrations = await Promise.all(
+      ["0001_initial.sql", "0002_mileage_bigint.sql"].map(async (name, index) => {
+        const statement = await readFile(resolve(directory, name), "utf8");
+        return {
+          version: index + 1,
+          statement,
+          checksum: createHash("sha256").update(statement).digest("hex"),
+        };
+      }),
     );
-    const checksum = createHash("sha256").update(migration).digest("hex");
     await this.transaction(async () => {
       await this.database.execute(
         sql`CREATE TABLE IF NOT EXISTS autodom_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`,
@@ -289,12 +292,17 @@ export class Store {
       const applied = await this.database.execute<{ version: number; checksum: string }>(
         sql`SELECT version, checksum FROM autodom_migrations ORDER BY version`,
       );
-      if (applied.rows.some((row) => row.version !== 1 || row.checksum !== checksum))
+      if (
+        applied.rows.some(
+          (row, index) => row.version !== index + 1 || row.checksum !== migrations[index]?.checksum,
+        )
+      )
         throw new Error("Unsupported or modified PostgreSQL schema migration");
-      if (applied.rows.length === 0) {
-        await this.database.execute(sql.raw(migration));
+      for (const migration of migrations) {
+        if (migration.version <= applied.rows.length) continue;
+        await this.database.execute(sql.raw(migration.statement));
         await this.database.execute(
-          sql`INSERT INTO autodom_migrations(version,checksum) VALUES (1,${checksum})`,
+          sql`INSERT INTO autodom_migrations(version,checksum) VALUES (${migration.version},${migration.checksum})`,
         );
       }
     });

@@ -33,7 +33,7 @@ export const listings = pgTable(
     normalized_body_type: text("normalized_body_type").notNull().default(""),
     normalized_transmission: text("normalized_transmission").notNull().default(""),
     vehicle_year: integer("vehicle_year"),
-    mileage_km: integer("mileage_km"),
+    mileage_km: bigint("mileage_km", { mode: "number" }),
     auction_status: text("auction_status").notNull().default(""),
     auction_at: doublePrecision("auction_at"),
   },
