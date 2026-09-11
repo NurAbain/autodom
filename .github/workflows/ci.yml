@@ -74,7 +74,9 @@ jobs:
         env:
           AUTODOM_POSTGRES_PASSWORD: autodom_ci_password
           AUTODOM_REDIS_PASSWORD: autodom_ci_redis_password
-        run: docker compose config --quiet
+        run: |
+          docker compose config --quiet
+          docker compose -f compose.vin.yaml config --quiet
 
       - name: Build independent bot, parser, and VIN images
         timeout-minutes: 15
