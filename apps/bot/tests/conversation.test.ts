@@ -653,6 +653,11 @@ describe("grammY transport boundaries", () => {
       message: { ...message, chat: { ...message.chat, id: 2 }, text: "/vin KMHDU41DBAU123456" },
     });
     expect(checkVin).not.toHaveBeenCalled();
+    expect(
+      calls
+        .filter((call) => call.method === "sendMessage")
+        .every((call) => call.payload.reply_markup === undefined),
+    ).toBe(true);
     await bot.handleUpdate({
       update_id: 4,
       message: { ...message, text: "/vin@autodom_test_bot kmhdu41dbau123456" },
@@ -663,6 +668,9 @@ describe("grammY transport boundaries", () => {
     const text = String(calls.at(-1)?.payload.text);
     expect(text).toMatch(/CarHistory[\s\S]*не подтверждена/);
     expect(text).toMatch(/Car365[\s\S]*отключён/);
+    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+    });
     await bot.handleUpdate({ update_id: 5, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
     expect(checkVin).toHaveBeenCalledTimes(1);
@@ -681,6 +689,9 @@ describe("grammY transport boundaries", () => {
       message: { ...message, text: "/vin KMHDU41DBAU123456" },
     });
     expect(String(calls.at(-1)?.payload.text)).toMatch(/не подключена/);
+    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+    });
     expect(await store.getDraft(1)).toBeNull();
     const checkVin = vi.fn<VinLookup>();
     const enabled = telegram(checkVin);
@@ -711,6 +722,9 @@ describe("grammY transport boundaries", () => {
     const text = String(calls.at(-1)?.payload.text);
     expect(text).toMatch(/неизвестен/);
     expect(text).not.toContain("private-api-token");
+    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+    });
     expect(await store.getDraft(1)).toEqual(draft);
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");

@@ -3,9 +3,17 @@ import {
   VIN_PROVIDERS,
   VIN_SOURCE_URLS,
   type VinCheckResult,
+  vinGoogleSearchUrl,
 } from "@autodom/core/vin";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
-import { VIN_CAUTION, VIN_DISCLOSURE, VIN_SOURCE_NAMES, vinSourceText } from "../src/vin-text.js";
+import {
+  VIN_CAUTION,
+  VIN_DISCLOSURE,
+  VIN_GOOGLE_SEARCH_LABEL,
+  VIN_GOOGLE_SEARCH_NOTICE,
+  VIN_SOURCE_NAMES,
+  vinSourceText,
+} from "../src/vin-text.js";
 
 type TelegramApp = {
   initData?: string;
@@ -59,15 +67,15 @@ function safeUrl(value: string | null): string | null {
   }
 }
 
-function sourceLink(url: string, text: string): HTMLAnchorElement {
+function sourceLink(url: string | null, text: string): HTMLAnchorElement {
   const link = element("a", "source-link", text);
-  link.href = url;
+  if (url) link.href = url;
   link.rel = "noopener noreferrer";
   link.target = "_blank";
   link.addEventListener("click", (event) => {
-    if (telegram?.openLink) {
+    if (telegram?.openLink && link.hasAttribute("href")) {
       event.preventDefault();
-      telegram.openLink(url);
+      telegram.openLink(link.href);
     }
   });
   return link;
@@ -240,11 +248,20 @@ function vinPanel(car: MiniAppCar): HTMLElement {
   input.value = car.vin ?? "";
   const submit = element("button", "button", "Проверить VIN");
   submit.type = "submit";
+  const search = sourceLink(vinGoogleSearchUrl(input.value), VIN_GOOGLE_SEARCH_LABEL);
+  search.className = "button button-quiet";
+  search.hidden = !search.hasAttribute("href");
   const results = element("div", "vin-results");
   results.setAttribute("role", "status");
   results.setAttribute("aria-live", "polite");
-  input.addEventListener("input", () => results.replaceChildren());
-  form.append(label, input, submit);
+  input.addEventListener("input", () => {
+    const url = vinGoogleSearchUrl(input.value);
+    search.hidden = !url;
+    if (url) search.href = url;
+    else search.removeAttribute("href");
+    results.replaceChildren();
+  });
+  form.append(label, input, submit, search, element("p", "footnote", VIN_GOOGLE_SEARCH_NOTICE));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!submit.disabled) void lookup();

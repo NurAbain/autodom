@@ -52,6 +52,12 @@ export function normalizeVin(value: string): string | null {
   return /^[A-HJ-NPR-Za-hj-npr-z0-9]{17}$/u.test(vin) ? vin.toUpperCase() : null;
 }
 
+/** User-initiated exact-phrase search, not a vehicle-history provider. */
+export function vinGoogleSearchUrl(value: string): string | null {
+  const vin = normalizeVin(value);
+  return vin ? `https://www.google.com/search?q=%22${vin}%22` : null;
+}
+
 // These are on-demand VIN providers, not catalog collectors in APPROVED_SOURCES.
 export function configuredVinProviders(
   env: Readonly<Record<string, string | undefined>> = process.env,

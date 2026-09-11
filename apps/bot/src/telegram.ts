@@ -1,10 +1,16 @@
-import { normalizeVin, type VinLookup } from "@autodom/core/vin";
+import { normalizeVin, type VinLookup, vinGoogleSearchUrl } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
 import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
-import { VIN_HELP, VIN_NOT_ENABLED, vinResultText } from "./vin-text.js";
+import {
+  VIN_GOOGLE_SEARCH_LABEL,
+  VIN_GOOGLE_SEARCH_NOTICE,
+  VIN_HELP,
+  VIN_NOT_ENABLED,
+  vinResultText,
+} from "./vin-text.js";
 
 function replyKeyboard(buttons: Buttons, detailUrl?: string): InlineKeyboard {
   const keyboard = new InlineKeyboard();
@@ -151,22 +157,24 @@ export function createTelegramBot(
       if (vinCommand[1] && vinCommand[1].toLowerCase() !== bot.botInfo.username.toLowerCase())
         return;
       const vin = normalizeVin(vinCommand[2] ?? "");
-      if (!vin) {
+      const searchUrl = vinGoogleSearchUrl(vinCommand[2] ?? "");
+      if (!vin || !searchUrl) {
         await context.reply(VIN_HELP);
         return;
       }
-      if (!options.checkVin) {
-        await context.reply(VIN_NOT_ENABLED);
-        return;
+      let text = VIN_NOT_ENABLED;
+      if (options.checkVin) {
+        try {
+          text = vinResultText(await options.checkVin(vin));
+        } catch {
+          text =
+            "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
+        }
       }
-      let text: string;
-      try {
-        text = vinResultText(await options.checkVin(vin));
-      } catch {
-        text =
-          "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
-      }
-      await context.reply(text, { link_preview_options: { is_disabled: true } });
+      await context.reply(`${text}\n\n${VIN_GOOGLE_SEARCH_NOTICE}`, {
+        link_preview_options: { is_disabled: true },
+        reply_markup: new InlineKeyboard().url(VIN_GOOGLE_SEARCH_LABEL, searchUrl),
+      });
       return;
     }
     await store.withLock(`autodom:user:${context.from.id}`, async () => {

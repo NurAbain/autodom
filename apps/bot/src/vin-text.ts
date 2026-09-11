@@ -11,6 +11,9 @@ export const VIN_NOT_ENABLED = "Проверка VIN не подключена. 
 export const VIN_HELP = `Отправьте /vin и VIN: 17 латинских букв и цифр, без I, O, Q. Например: /vin KMHDU41DBAU123456.\n\n${VIN_DISCLOSURE}`;
 export const VIN_CAUTION =
   "Отсутствие записей не означает отсутствие ДТП или ограничений. Записанный пробег — не текущий реальный пробег. Сверьте VIN с автомобилем и документами.";
+export const VIN_GOOGLE_SEARCH_LABEL = "Искать VIN в Google";
+export const VIN_GOOGLE_SEARCH_NOTICE =
+  "Поиск точного VIN в Google для любого рынка. VIN передаётся Google только при нажатии. Отсутствие результатов не означает чистую историю.";
 
 export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
   carhistory: "CarHistory",
