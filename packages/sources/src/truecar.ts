@@ -274,12 +274,20 @@ function listing(
     year < 2200 && (linked === undefined || String(year) === linked.vehicleModelDate),
     "inconsistent model year",
   );
-  const trim = text(object(vehicle.style).trimName);
+  const trimValue = vehicle.style == null ? "" : (object(vehicle.style).trimName ?? "");
+  const linkedTrimValue = linked?.vehicleConfiguration ?? "";
+  requireValue(
+    typeof trimValue === "string" && typeof linkedTrimValue === "string",
+    "invalid vehicle trim",
+  );
+  const primaryTrim = trimValue.trim();
+  const linkedTrim = linkedTrimValue.trim();
+  const trim = primaryTrim || linkedTrim;
   requireValue(
     linked === undefined ||
       (object(linked.brand).name === make.name &&
         linked.model === model.name &&
-        linked.vehicleConfiguration === trim),
+        (!primaryTrim || !linkedTrim || primaryTrim === linkedTrim)),
     "inconsistent vehicle identity",
   );
   const miles = integer(vehicle.mileage);
@@ -331,15 +339,17 @@ function listing(
   const modelName = text(model.name);
   const publishedAt = details.listedAt || "";
   requireValue(typeof publishedAt === "string", "invalid publication time");
+  const transmission = vehicle.transmission ?? "";
+  requireValue(typeof transmission === "string", "invalid transmission");
   return makeListing({
     id: `truecar:${vin}`,
-    title: `${year} ${makeName} ${modelName} ${trim}`,
+    title: `${year} ${makeName} ${modelName}${trim ? ` ${trim}` : ""}`,
     url,
     price_usd_minor: price,
     price_kgs_minor: null,
     year,
     mileage: `${miles} miles`,
-    transmission: text(vehicle.transmission),
+    transmission: transmission.trim(),
     body_type: text(vehicle.bodyStyle),
     city: `${text(details.dealerCity)}, ${text(details.dealerState)}`,
     availability: "Опубликовано",

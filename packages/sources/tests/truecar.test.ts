@@ -292,6 +292,37 @@ describe("TrueCar connected retail inventory", () => {
     expect(() => parsePage(html())).toThrow(SourceError);
   });
 
+  it("keeps unknown trim and transmission without discarding a priced vehicle", () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "truecar.com");
+    const parts = fixture();
+    const known = parsePage(document(parts)).listings[0]!;
+    parts[2].vehicle.style = null;
+    parts[2].vehicle.transmission = null;
+    delete parts[3].vehicleConfiguration;
+    const car = parsePage(document(parts)).listings[0]!;
+    const profile = makeProfile({
+      user_id: 0,
+      chat_id: 0,
+      market: "US",
+      currency: "USD",
+      budget_min_minor: 1_234_567,
+      budget_max_minor: 1_234_567,
+      budget_scope: "car",
+      allow_import: true,
+    });
+    expect(matches(profile, car)).toBe(true);
+    expect(matches({ ...profile, query: "LE" }, known)).toBe(true);
+    expect(matches({ ...profile, query: "LE" }, car)).toBe(false);
+    expect(matches({ ...profile, transmission: "automatic" }, known)).toBe(true);
+    expect(matches({ ...profile, transmission: "automatic" }, car)).toBe(false);
+    parts[3].vehicleConfiguration = "LE";
+    expect(matches({ ...profile, query: "LE" }, parsePage(document(parts)).listings[0]!)).toBe(
+      true,
+    );
+    parts[2].vehicle.style = { trimName: "XLE" };
+    expect(() => parsePage(document(parts))).toThrow(SourceError);
+  });
+
   it.each([
     ["asking price", "$12,345.68", `/used-cars-for-sale/listing/${VIN}/2020-toyota-camry/`],
     ["currency", "€12,345.67", `/used-cars-for-sale/listing/${VIN}/2020-toyota-camry/`],
