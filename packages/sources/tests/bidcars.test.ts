@@ -382,6 +382,23 @@ describe("Bid.Cars catalog", () => {
     expect(result.urls).toEqual([URL]);
     expect(result).toMatchObject({ page: 1, pages: 3, total: null });
   });
+  it("uses current-page evidence when the SEO canonical names the first page of the same scope", () => {
+    const second = CATALOG_URL.replace("/page/1", "/page/2");
+    const html = catalog(undefined, { page: 2, pages: 3 }).replace(
+      `rel="canonical" href="${second}"`,
+      `rel="canonical" href="${CATALOG_URL}"`,
+    );
+    expect(parseCatalog(html, 2)).toMatchObject({ page: 2, pages: 3, urls: [URL] });
+    expect(() =>
+      parseCatalog(
+        html.replace(
+          `property="og:url" content="${second}"`,
+          `property="og:url" content="${CATALOG_URL}"`,
+        ),
+        2,
+      ),
+    ).toThrow(SourceError);
+  });
   it("rejects page, scope, row, and duplicate identity conflicts as whole-page failures", () => {
     for (const html of [
       catalog(undefined, { page: 2, pages: 3 }),

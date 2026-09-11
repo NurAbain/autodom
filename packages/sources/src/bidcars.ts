@@ -546,10 +546,16 @@ export function parseCatalog(
   const prefix = base.slice(0, base.lastIndexOf("/") + 1);
   const requested = prefix + page;
   const $ = document(text);
-  const identities = $('link[rel="canonical"],meta[property="og:url"]')
-    .toArray()
-    .map((node) => $(node).attr(node.tagName === "link" ? "href" : "content"));
-  if (!identities.length || identities.some((identity) => identity !== requested))
+  const identities = $('link[rel="canonical"],meta[property="og:url"]').toArray();
+  // SEO canonicals may name page 1; Open Graph and the active navigation must name this page.
+  if (
+    !identities.length ||
+    identities.some((node) => {
+      const canonical = node.tagName === "link";
+      const identity = $(node).attr(canonical ? "href" : "content");
+      return identity !== requested && (!canonical || identity !== base);
+    })
+  )
     throw new SourceError("Bid.Cars returned a different catalog scope or page");
   const area = one($('[id="search_area"]'), "search_area");
   const rows = area.find("div.item-horizontal.lots-search");
