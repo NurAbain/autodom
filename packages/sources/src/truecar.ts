@@ -228,16 +228,22 @@ function listing(row: RecordValue, linked: RecordValue, filters: RecordValue): L
       (odometer.unitText == null || odometer.unitText === "mi" || odometer.unitText === "miles"),
     "unsupported odometer units",
   );
-  let photo: string | null = null;
-  if (linked.image) {
-    const image = text(linked.image);
-    if (/^https?:\/\/static\.tcimg\.net(?:[/:?#]|$)/i.test(image)) {
-      const illustration = sourceUrl(image, "static.tcimg.net");
-      requireValue(
-        illustration.path.startsWith("/vehicles/primary/"),
-        "unsupported model illustration URL",
-      );
-    } else photo = sourceUrl(image, "listings-prod.tcimg.net").url;
+  const photos: string[] = [];
+  for (const image of Array.isArray(linked.image) ? linked.image : [linked.image]) {
+    // Static model artwork is not a photograph of this advertised vehicle.
+    if (
+      typeof image !== "string" ||
+      /[\s\\\p{Cc}]/u.test(image) ||
+      !/^https:\/\/listings-prod\.tcimg\.net\//.test(image)
+    )
+      continue;
+    try {
+      const photo = sourceUrl(image, "listings-prod.tcimg.net").url;
+      if (!photos.includes(photo)) photos.push(photo);
+      if (photos.length === 10) break;
+    } catch {
+      /* An invalid optional photograph does not invalidate the vehicle. */
+    }
   }
   const makeName = text(make.name);
   const modelName = text(model.name);
@@ -256,7 +262,8 @@ function listing(row: RecordValue, linked: RecordValue, filters: RecordValue): L
     city: `${text(details.dealerCity)}, ${text(details.dealerState)}`,
     availability: "Опубликовано",
     published_at: publishedAt,
-    photo_url: photo,
+    photo_url: photos[0] ?? null,
+    photo_urls: photos,
     source: SOURCE,
     market: "US",
     original_currency: "USD",

@@ -52,6 +52,21 @@ async function open(address: string) {
   stores.push(store);
   return store;
 }
+async function rewriteSnapshot(
+  source: string,
+  destination: string,
+  change: (record: Record<string, unknown>) => void,
+) {
+  const records = (await readFile(source, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const footer = records.pop()!;
+  for (const record of records) change(record);
+  const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
+  footer.sha256 = createHash("sha256").update(body).digest("hex");
+  await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
+}
 beforeAll(async () => {
   baseUrl = process.env.AUTODOM_TEST_DATABASE_URL ?? "";
   if (!baseUrl) {
@@ -144,6 +159,42 @@ describe("PostgreSQL Store", () => {
     expect(BigInt(resumed.revision)).toBe(BigInt(paused.revision) + 1n);
     await expect(db.setQuietHours(1, 60, 60)).rejects.toThrow();
     expect(await db.getProfile(1)).toEqual(resumed);
+  });
+  it("removes a previously applied advertising column without losing saved profiles", async () => {
+    const oldUrl = await database();
+    const old = new pg.Pool({ connectionString: oldUrl });
+    try {
+      await old.query(
+        "CREATE TABLE autodom_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
+      );
+      for (const [index, name] of [
+        "0001_initial.sql",
+        "0002_mileage_bigint.sql",
+        "0003_advertising_consent.sql",
+      ].entries()) {
+        const statement = await readFile(join("packages/storage/migrations", name), "utf8");
+        await old.query(statement);
+        await old.query("INSERT INTO autodom_migrations(version, checksum) VALUES ($1, $2)", [
+          index + 1,
+          createHash("sha256").update(statement).digest("hex"),
+        ]);
+      }
+      await old.query(
+        "INSERT INTO profiles (user_id, chat_id, currency, budget_min_minor, budget_max_minor, query, monitoring, revision, cursor, ads_consent) VALUES (1, 10, 'USD', 100, 200, 'toyota', true, 7, 3, true)",
+      );
+    } finally {
+      await old.end();
+    }
+    const migrated = await open(oldUrl);
+    expect(await migrated.getProfile(1)).toEqual({
+      ...profile(),
+      query: "toyota",
+      revision: "7",
+      cursor: 3,
+    });
+    const saved = await migrated.getProfile(1);
+    await migrated.migrate();
+    expect(await migrated.getProfile(1)).toEqual(saved);
   });
   it("rejects invalid profile updates without replacing saved private preferences", async () => {
     const original = await db.saveProfile(profile());
@@ -357,12 +408,22 @@ describe("PostgreSQL Store", () => {
 
 describe("portable snapshots and read-only legacy import", () => {
   it("round trips all committed private/catalog state, uses private exclusive files, and restores sequences", async () => {
-    await db.upsertListings([car()], NOW - 2);
+    const initial = car({
+      photo_url: "https://cdn.mashina.kg/cover.jpg",
+      photo_urls: ["https://cdn.mashina.kg/front.jpg", "https://cdn.mashina.kg/rear.jpg"],
+    });
+    await db.upsertListings([initial], NOW - 2);
     const saved = await db.saveProfile({ ...profile(), city: "Бишкек", allow_import: false });
     const quiet = await db.setQuietHours(1, 1320, 480);
+    const second = await db.saveProfile({ ...profile(), user_id: 2, chat_id: 20 });
     await db.setDraft(1, "budget", { query: "тойота", minimum: 100 });
     await db.setMeta("source:mashina.kg:crawl_next_page", "37");
-    await db.upsertListings([car({ price_usd_minor: 90 })], NOW - 1);
+    const updated = {
+      ...initial,
+      price_usd_minor: 150,
+      photo_urls: ["https://cdn.mashina.kg/new.jpg"],
+    };
+    await db.upsertListings([updated], NOW - 1);
     const destination = join(directory, "private", "snapshot.ndjson");
     await backup(db, destination);
     expect((await stat(destination)).mode & 0o777).toBe(0o600);
@@ -374,10 +435,17 @@ describe("portable snapshots and read-only legacy import", () => {
     await restore(destination, targetUrl);
     const target = await open(targetUrl);
     expect(await target.getProfile(1)).toEqual(quiet);
+    expect(await target.getProfile(2)).toEqual(second);
     expect(quiet?.cursor).toBe(saved.cursor);
     expect(await target.getDraft(1)).toEqual(["budget", { query: "тойота", minimum: 100 }]);
     expect(await target.eventsAfter(0)).toEqual(await db.eventsAfter(0));
-    expect(await target.getListing("1")).toEqual(await db.getListing("1"));
+    const expectedListing = { ...updated, observed_at: NOW - 1 };
+    expect(await target.getListing("1")).toEqual(expectedListing);
+    expect(await target.search(profile())).toEqual([expectedListing]);
+    expect((await target.eventsAfter(0)).map((event) => event.listing)).toEqual([
+      { ...initial, observed_at: NOW - 2 },
+      expectedListing,
+    ]);
     expect(await target.getMeta("source:mashina.kg:crawl_next_page")).toBe("37");
     await expect(restore(destination, targetUrl)).rejects.toThrow();
     await target.upsertListings([car({ id: "next" })]);
@@ -400,6 +468,65 @@ describe("portable snapshots and read-only legacy import", () => {
     await expect(restore(snapshot, targetUrl)).rejects.toThrow();
     expect((await target.stats()).listings).toBe(0);
   });
+  it.each([1, 2])(
+    "migrates schema-v%i snapshots without restoring removed profile fields",
+    async (version) => {
+      await db.upsertListings([car()]);
+      const saved = await db.saveProfile(profile());
+      await db.setDraft(1, "budget", { minimum: 150 });
+      await db.upsertListings([car({ id: "2" })]);
+      const current = join(directory, "current.ndjson");
+      const legacy = join(directory, `v${version}.ndjson`);
+      await backup(db, current);
+      await rewriteSnapshot(current, legacy, (record) => {
+        if (Object.hasOwn(record, "schema_version")) record.schema_version = version;
+        if (version === 2 && record.table === "profiles")
+          (record.row as Record<string, unknown>).ads_consent = true;
+        if (record.table === "listings" || record.table === "events")
+          delete ((record.row as Record<string, unknown>).data as Record<string, unknown>)
+            .photo_urls;
+      });
+      const targetUrl = await database();
+      await restore(legacy, targetUrl);
+      const target = await open(targetUrl);
+      expect(await target.getProfile(1)).toEqual(saved);
+      expect(await target.getDraft(1)).toEqual(["budget", { minimum: 150 }]);
+      expect(await target.eventsAfter(saved.cursor)).toEqual(await db.eventsAfter(saved.cursor));
+      expect((await target.getListing("1"))?.photo_urls).toEqual([]);
+    },
+  );
+  it.each([
+    { schemaVersion: 2, damage: "missing historical column" },
+    { schemaVersion: 2, damage: "malformed historical column" },
+    { schemaVersion: 1, damage: "unexpected column" },
+    { schemaVersion: 3, damage: "unexpected column" },
+    { schemaVersion: 3, damage: "missing filter" },
+  ])(
+    "rejects checksummed schema-$schemaVersion snapshots with $damage",
+    async ({ schemaVersion, damage }) => {
+      await db.upsertListings([car()]);
+      await db.saveProfile(profile());
+      const good = join(directory, "good.ndjson");
+      const damaged = join(directory, "damaged.ndjson");
+      await backup(db, good);
+      await rewriteSnapshot(good, damaged, (record) => {
+        if (Object.hasOwn(record, "schema_version")) record.schema_version = schemaVersion;
+        if (record.table !== "profiles") return;
+        const row = record.row as Record<string, unknown>;
+        if (damage === "missing historical column") delete row.ads_consent;
+        else if (damage === "malformed historical column") row.ads_consent = "true";
+        else if (damage === "unexpected column") row.ads_consent = true;
+        else {
+          delete row.query;
+        }
+      });
+      const targetUrl = await database();
+      await expect(restore(damaged, targetUrl)).rejects.toThrow();
+      const target = await open(targetUrl);
+      expect(await target.getProfile(1)).toBeNull();
+      expect(await target.getListing("1")).toBeNull();
+    },
+  );
   it.each([1, 2, 3, 4, 5])(
     "imports SQLite schema v%i read-only with migrated defaults and exact IDs",
     async (version) => {
@@ -415,6 +542,8 @@ describe("portable snapshots and read-only legacy import", () => {
         transmission: "Автомат",
         year: 2020,
         mileage: "15,625 miles",
+        photo_url: "https://cdn.mashina.kg/cover.jpg",
+        photo_urls: ["https://cdn.mashina.kg/front.jpg", "https://cdn.mashina.kg/rear.jpg"],
       });
       legacy
         .prepare("INSERT INTO listings VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
@@ -517,7 +646,11 @@ describe("portable snapshots and read-only legacy import", () => {
           nested: { profile_revision: "1760000000000000123" },
         },
       ]);
-      expect((await db.eventsAfter(6))[0]?.listing.observed_at).toBe(NOW - 72 * 3600);
+      expect((await db.eventsAfter(6))[0]?.listing).toEqual({
+        ...listing,
+        observed_at: NOW - 72 * 3600,
+      });
+      expect(await db.getListing("1")).toEqual({ ...listing, observed_at: NOW - 49 * 3600 });
       expect(await db.getListing("1", true)).toBeNull();
       vi.setSystemTime((NOW - 2 * 3600) * 1000);
       expect(

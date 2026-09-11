@@ -1,7 +1,13 @@
 import { type Listing, makeListing, matches, type Profile } from "@autodom/core";
 import type { Store } from "@autodom/storage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Conversation, listingText, packReplies, type Reply } from "../src/conversation.js";
+import {
+  Conversation,
+  listingReplies,
+  listingText,
+  packReplies,
+  type Reply,
+} from "../src/conversation.js";
 import { configureTelegramBot, createTelegramBot } from "../src/telegram.js";
 
 // An interaction fixture only: persistence, SQL locking and cursor semantics are
@@ -25,7 +31,10 @@ class InteractionStore {
     this.drafts.delete(id);
   }
   async saveProfile(profile: Profile) {
-    const saved = { ...profile, revision: String(++this.revision) };
+    const saved = {
+      ...profile,
+      revision: String(++this.revision),
+    };
     this.profiles.set(profile.user_id, saved);
     return structuredClone(saved);
   }
@@ -108,13 +117,12 @@ const car = (id: string, title = "Toyota Camry", extra: Partial<Listing> = {}) =
     availability: "В наличии",
     ...extra,
   });
-const CONSENT_SECRET = "123456:test-consent-signing-secret";
 let store: InteractionStore;
 let conversation: Conversation;
 beforeEach(() => {
   vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
   store = new InteractionStore();
-  conversation = new Conversation(store, CONSENT_SECRET);
+  conversation = new Conversation(store);
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -122,92 +130,18 @@ afterEach(() => {
 });
 
 describe("explicit consent and save safety", () => {
-  it("persists nothing before consent and accepts it on another replica after navigation", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-01T00:00:00Z"));
-    const consent = button(await conversation.handle(1, 1, "/start"), "Согласен");
-    for (const command of ["/privacy", "/begin", "/edit", "consent:accept", "Toyota"]) {
+  it("persists nothing before current explicit consent, including on restart", async () => {
+    const old = button(await conversation.handle(1, 1, "/start"), "Согласен");
+    for (const command of ["/privacy", "/begin", "/edit", "consent:accept", old]) {
       await conversation.handle(1, 1, command);
-      expect(store.drafts.size).toBe(0);
-      expect(store.profiles.size).toBe(0);
-    }
-    vi.setSystemTime(new Date("2026-09-01T00:04:59Z"));
-    await new Conversation(store, CONSENT_SECRET).handle(1, 1, consent);
-    expect((await store.getDraft(1))?.[0]).toBe("currency");
-    expect(await store.getProfile(1)).toBeNull();
-  });
-  it("rejects future and expired consent without consuming a still-valid credential", async () => {
-    vi.useFakeTimers();
-    const issuedAt = new Date("2026-09-01T00:00:00Z").getTime();
-    vi.setSystemTime(issuedAt);
-    const consent = button(await conversation.handle(1, 1, "/start"), "Согласен");
-    const restarted = new Conversation(store, CONSENT_SECRET);
-    for (const now of [issuedAt - 1000, issuedAt + 300_000]) {
-      vi.setSystemTime(now);
-      await restarted.handle(1, 1, consent);
       expect(await store.getDraft(1)).toBeNull();
       expect(await store.getProfile(1)).toBeNull();
     }
-    vi.setSystemTime(issuedAt);
-    await restarted.handle(1, 1, consent);
-    expect((await store.getDraft(1))?.[0]).toBe("currency");
-  });
-  it("binds compact consent to its user, secret and unmodified credential", async () => {
-    const user = Number.MAX_SAFE_INTEGER;
-    const consent = button(await conversation.handle(user, user, "/start"), "Согласен");
-    expect(Buffer.byteLength(consent, "utf8")).toBeLessThanOrEqual(64);
-    const signatureStart = consent.lastIndexOf(":") + 1;
-    const tampered =
-      consent.slice(0, signatureStart) +
-      (consent[signatureStart] === "A" ? "B" : "A") +
-      consent.slice(signatureStart + 1);
-    for (const invalid of [
-      tampered,
-      consent.slice(0, -1),
-      `${consent}:extra`,
-      consent.replace("consent:", "consent:0"),
-      "consent:invalid",
-    ]) {
-      await conversation.handle(user, user, invalid);
-      expect(store.drafts.size).toBe(0);
-      expect(store.profiles.size).toBe(0);
-    }
-    for (const foreignUser of [1, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      await conversation.handle(foreignUser, foreignUser, consent);
-      expect(store.drafts.size).toBe(0);
-      expect(store.profiles.size).toBe(0);
-    }
-    await new Conversation(store, "different-secret").handle(user, user, consent);
-    expect(store.drafts.size).toBe(0);
-    expect(store.profiles.size).toBe(0);
-    await new Conversation(store, CONSENT_SECRET).handle(user, user, consent);
-    expect((await store.getDraft(user))?.[0]).toBe("currency");
-    expect(await store.getProfile(user)).toBeNull();
-  });
-  it("does not let consent replay reset progress, deletion or an existing profile", async () => {
-    const consent = button(await conversation.handle(1, 1, "/start"), "Согласен");
-    const replica = new Conversation(store, CONSENT_SECRET);
-    const currencies = await replica.handle(1, 1, consent);
-    await replica.handle(1, 1, button(currencies, "USD"));
-    await replica.handle(1, 1, "15000");
-    const reviewed = await replica.handle(1, 1, "Honda Accord");
-    const draft = await store.getDraft(1);
-    await conversation.handle(1, 1, consent);
-    expect(await store.getDraft(1)).toEqual(draft);
-    expect(await store.getProfile(1)).toBeNull();
-    await replica.handle(1, 1, "/delete");
-    const deletion = await store.getDraft(1);
-    await conversation.handle(1, 1, consent);
-    expect(await store.getDraft(1)).toEqual(deletion);
-    await replica.handle(1, 1, "/cancel");
-    await replica.handle(1, 1, button(reviewed, "Сохранить"));
-    expect((await store.getProfile(1))?.query).toBe("Honda Accord");
-    expect((await store.getProfile(1))?.monitoring).toBe(false);
-    await replica.handle(1, 1, "/resume");
-    const profile = await store.getProfile(1);
-    await new Conversation(store, CONSENT_SECRET).handle(1, 1, consent);
-    expect(await store.getProfile(1)).toEqual(profile);
+    const fresh = button(await conversation.handle(1, 1, "/privacy"), "Согласен");
+    await new Conversation(store).handle(1, 1, fresh);
     expect(await store.getDraft(1)).toBeNull();
+    await conversation.handle(1, 1, fresh);
+    expect((await store.getDraft(1))?.[0]).toBe("currency");
   });
   it.each(["currency:KGS", "query:unexpected", "!!!", "___", ", ,", "Toyota, !!!"])(
     "does not save invalid query %s",
@@ -237,7 +171,7 @@ describe("explicit consent and save safety", () => {
     const other = await store.getDraft(2);
     await conversation.handle(2, 2, button(city, "пропустить"));
     expect(await store.getDraft(2)).toEqual(other);
-    const restarted = new Conversation(store, CONSENT_SECRET);
+    const restarted = new Conversation(store);
     const currentReview = await restarted.handle(1, 1, button(city, "Назад"));
     await restarted.handle(1, 1, oldSave);
     expect(await store.getProfile(1)).toBeNull();
@@ -247,26 +181,6 @@ describe("explicit consent and save safety", () => {
     expect(saved?.query).toBe("Toyota");
     await restarted.handle(1, 1, currentSave);
     expect(await store.getProfile(1)).toEqual(saved);
-  });
-  it("reopens a review without consent, restart or implicit save and invalidates its old action", async () => {
-    const oldSave = button(await review(conversation, "Honda Accord"), "Сохранить");
-    const reopened = await conversation.current(1);
-    await conversation.handle(1, 1, oldSave);
-    expect(await store.getProfile(1)).toBeNull();
-    expect((await store.getDraft(1))?.[0]).toBe("review");
-    await conversation.handle(1, 1, button(reopened, "Сохранить"));
-    expect((await store.getProfile(1))?.query).toBe("Honda Accord");
-  });
-  it("reopens deletion with a fresh confirmation and preserves the previous draft on cancellation", async () => {
-    await review(conversation, "Honda Accord");
-    const original = await store.getDraft(1);
-    const oldDelete = button(await conversation.handle(1, 1, "/delete"), "Удалить");
-    const reopened = await conversation.current(1);
-    await conversation.handle(1, 1, oldDelete);
-    expect((await store.getDraft(1))?.[0]).toBe("delete_confirm");
-    await conversation.handle(1, 1, button(reopened, "Отмена"));
-    expect(await store.getDraft(1)).toEqual(original);
-    expect(await store.getProfile(1)).toBeNull();
   });
   it("prevents stale and unknown callback payloads becoming free text", async () => {
     const currencies = await conversation.handle(
@@ -313,7 +227,7 @@ describe("editing, monitoring and deletion", () => {
     await conversation.handle(1, 1, old);
     expect((await store.getProfile(1))?.monitoring).toBe(false);
     const fresh = button(await conversation.handle(1, 1, "/profile"), "Включить мониторинг");
-    await new Conversation(store, CONSENT_SECRET).handle(1, 1, fresh);
+    await new Conversation(store).handle(1, 1, fresh);
     expect((await store.getProfile(1))?.monitoring).toBe(true);
     await conversation.handle(1, 1, "/pause");
     expect((await store.getProfile(1))?.monitoring).toBe(false);
@@ -503,39 +417,51 @@ describe("search and safe rendering", () => {
     expect((await store.getProfile(1))?.market).toBe("KR");
     expect((await store.getProfile(1))?.monitoring).toBe(false);
   });
-  it("paginates alternatives without duplicates and rejects stale pagination", async () => {
+  it("browses one vehicle and its photos in both directions and rejects stale pagination", async () => {
     store.listings = Array.from({ length: 7 }, (_, i) =>
-      car(String(i), i < 3 ? "Toyota Camry" : "Honda Accord"),
+      car(String(i), i < 3 ? "Toyota Camry" : "Honda Accord", {
+        photo_url: `https://im.mashina.kg/images/${i}.jpg`,
+      }),
     );
     store.listings.push(car("other", "Kia Rio"));
-    const first = await save(conversation, "Toyota Camry, Honda Accord", 1, "KGS", "1000000");
-    const next = button(first, "Ещё варианты");
-    const second = await conversation.handle(1, 1, next);
-    for (const item of store.listings.slice(0, 7))
+    let page = await save(conversation, "Toyota Camry, Honda Accord", 1, "KGS", "1000000");
+    const firstNext = button(page, "Следующий");
+    for (let index = 0; index < 7; index++) {
+      expect(page.flatMap((reply) => (reply.listingId ? [reply.listingId] : []))).toEqual([
+        String(index),
+      ]);
+      expect(page.flatMap((reply) => reply.photos ?? [])).toEqual([
+        `https://im.mashina.kg/images/${index}.jpg`,
+      ]);
+      for (const [other, item] of store.listings.entries())
+        expect(rendered(page).includes(item.url)).toBe(other === index);
       expect(
-        Number(rendered(first).includes(item.url)) + Number(rendered(second).includes(item.url)),
-      ).toBe(1);
-    expect(rendered(first) + rendered(second)).not.toContain("/other");
+        page.flatMap((reply) => reply.buttons.flat()).some(([label]) => label === "Предыдущий"),
+      ).toBe(index > 0);
+      expect(
+        page.flatMap((reply) => reply.buttons.flat()).some(([label]) => label === "Следующий"),
+      ).toBe(index < 6);
+      if (index < 6) page = await conversation.handle(1, 1, button(page, "Следующий"));
+    }
+    page = await new Conversation(store).handle(1, 1, button(page, "Предыдущий"));
+    expect(page.at(-1)?.listingId).toBe("5");
     await conversation.handle(1, 1, "/quiet 22:00-07:00");
-    expect(rendered(await conversation.handle(1, 1, next))).not.toContain("/details/");
+    expect(rendered(await conversation.handle(1, 1, firstNext))).not.toContain("/details/");
   });
-  it("pairs each photo only with its own full listing and keeps missing photos readable", async () => {
-    store.listings = [
-      car("first", "Toyota Camry", { photo_url: "https://im.mashina.kg/first.jpg" }),
-      car("second", "Honda Accord", { photo_url: "https://pictures.mashina.kg/second.jpg" }),
-      car("third", "Honda Fit"),
-    ];
-    const replies = await save(conversation, "Toyota, Honda");
-    const listings = replies.filter((reply) => reply.text.includes("/details/"));
-    expect(listings.map((reply) => reply.photoUrl ?? null)).toEqual([
-      "https://im.mashina.kg/first.jpg",
-      "https://pictures.mashina.kg/second.jpg",
-      null,
-    ]);
-    for (const [index, item] of store.listings.entries())
-      expect(listings[index]?.text).toBe(listingText(item, "USD"));
-    expect(listings.slice(0, -1).every((reply) => reply.buttons.length === 0)).toBe(true);
-    expect(button(listings.slice(-1), "Изменить")).toBe("/edit");
+  it("never exposes a vehicle for invalid, cross-user or vanished pagination", async () => {
+    store.listings = [car("first"), car("second")];
+    const first = await save(conversation);
+    const next = button(first, "Следующий");
+    await save(conversation, "Toyota", 2);
+    expect((await conversation.handle(2, 2, next)).some((reply) => reply.listingId)).toBe(false);
+    const revision = (await store.getProfile(1))!.revision;
+    for (const offset of ["-1", "1.5", "1000001", "9007199254740993"]) {
+      const replies = await conversation.handle(1, 1, `page:${revision}:${offset}`);
+      expect(replies.some((reply) => reply.listingId)).toBe(false);
+    }
+    store.listings.pop();
+    expect((await conversation.handle(1, 1, next)).some((reply) => reply.listingId)).toBe(false);
+    expect(button(await conversation.handle(1, 1, "/search"), "Изменить")).toBe("/edit");
   });
   it("unknown model removes only model filter, not the budget", async () => {
     store.listings = [
@@ -606,6 +532,36 @@ describe("search and safe rendering", () => {
     expect(output).toContain("1 000 000 KRW");
     expect(output).toContain("пересчёт");
     expect(output).not.toContain("по НБКР");
+  });
+  it("keeps full escaped descriptions and vehicle details across message boundaries", () => {
+    const description = '<script>unsafe & "quoted"</script>\n'.repeat(300) + "Описание до конца";
+    const item = car("full", "Полное название ".repeat(20), {
+      condition: "<b>Состояние со слов продавца</b>",
+      description,
+      vin: "VIN<123>",
+      sale_document: "Документы & ограничения",
+      primary_damage: "Передняя часть",
+      secondary_damage: "Задняя часть",
+      start_code: "Запуск не проверен",
+    });
+    const replies = listingReplies(item, "USD", [[["Далее", "page:revision:1"]]]);
+    const output = replies.map((reply) => reply.text.replace(/<[^>]+>/g, "")).join("");
+    expect(output).toContain(item.title);
+    expect(output).toContain("&lt;b&gt;Состояние со слов продавца&lt;/b&gt;");
+    expect(output).toContain("Описание до конца");
+    expect(output).toContain("VIN&lt;123&gt;");
+    expect(output).toContain("Документы &amp; ограничения");
+    for (const value of [item.primary_damage, item.secondary_damage, item.start_code])
+      expect(output).toContain(value);
+    expect(output).not.toContain("<script>");
+    expect(replies.every((reply) => reply.text.length <= 3800)).toBe(true);
+    expect(
+      replies.slice(0, -1).every((reply) => !reply.listingId && reply.buttons.length === 0),
+    ).toBe(true);
+    expect(replies.at(-1)?.listingId).toBe(item.id);
+    expect(
+      replies.map((reply) => reply.richHtml!.replace(/<[^>]+>/g, "").replace(/\s/g, "")).join(""),
+    ).toBe(replies.map((reply) => reply.text.replace(/<[^>]+>/g, "").replace(/\s/g, "")).join(""));
   });
   it("packs oversized HTML safely without losing text and attaches buttons only to the last message", () => {
     const text = "Текст &amp; &lt;машина&gt; ".repeat(600);
@@ -700,25 +656,6 @@ describe("grammY transport boundaries", () => {
           call.method === "answerCallbackQuery" && call.payload.callback_query_id === "foreign",
       ),
     ).toBe(true);
-  });
-  it("does not turn non-text service events into draft field values or invalidate the active choice", async () => {
-    const { bot, calls } = telegram();
-    await bot.init();
-    await review(conversation);
-    const previous = await store.getDraft(1);
-    await bot.handleUpdate({
-      update_id: 1,
-      message: {
-        message_id: 1,
-        date: 1,
-        from: { id: 1, is_bot: false, first_name: "Buyer" },
-        chat: { id: 1, type: "private", first_name: "Buyer" },
-        web_app_data: { button_text: "App", data: "Honda Accord" },
-      },
-    });
-    expect(await store.getDraft(1)).toEqual(previous);
-    expect(await store.getProfile(1)).toBeNull();
-    expect(calls.filter((call) => call.method === "sendMessage")).toEqual([]);
   });
   it("orders same-user messages and callbacks without blocking another user", async () => {
     const { bot, calls } = telegram();

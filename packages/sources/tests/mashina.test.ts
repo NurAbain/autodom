@@ -176,23 +176,26 @@ describe("Mashina Flight catalog", () => {
     },
   );
 
-  it("encodes the full slug and accepts only usable HTTPS photos from the first image", () => {
+  it("encodes the full slug and retains a bounded gallery of trusted photo variants", () => {
     expect(listing({ slug: "a/b?c#d!'()" }).url).toBe(
       "https://mashina.kg/details/a%2Fb%3Fc%23d%21%27%28%29",
     );
-    expect(
-      listing({
-        images: [{ medium: "http://photos.example/a.jpg", thumb: "https://photos.example/b.jpg" }],
-      }).photo_url,
-    ).toBe("https://photos.example/b.jpg");
-    expect(
-      listing({
-        images: [
-          { medium: "https://user:secret@photos.example/a.jpg" },
-          { medium: "https://photos.example/b.jpg" },
-        ],
-      }).photo_url,
-    ).toBeNull();
+    const photos = Array.from({ length: 12 }, (_, index) => `https://im.mashina.kg/${index}.jpg`);
+    const car = listing({
+      images: [
+        null,
+        { medium: "https://user:secret@im.mashina.kg/a.jpg" },
+        { medium: "https://im.mashina.kg.evil.test/a.jpg" },
+        { medium: "https://im.mashina.kg:443/a.jpg" },
+        { medium: "https://im.mashina.kg/a.jpg#fragment" },
+        { medium: "http://im.mashina.kg/a.jpg", thumb: photos[0] },
+        { medium: photos[0], thumb: "https://im.mashina.kg/duplicate-thumb.jpg" },
+        ...photos.slice(1).map((medium) => ({ medium, thumb: `${medium}?thumb=1` })),
+      ],
+    });
+    expect(car.photo_url).toBe(photos[0]);
+    expect(car.photo_urls).toEqual(photos.slice(0, 10));
+    expect(listing({ images: [{ medium: "https://evil.test/a.jpg" }] }).photo_url).toBeNull();
   });
 
   it("permits empty final and out-of-range pages but rejects missing interior coverage", () => {

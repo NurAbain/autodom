@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,16 +9,12 @@ import {
   listingUrlAllowed,
   MARKETS,
   money,
-  normalize,
-  purchaseEligible,
 } from "@autodom/core";
 import type { Store } from "@autodom/storage";
-import { type Api, GrammyError } from "grammy";
-import type { InlineQueryResult } from "grammy/types";
-import { type Conversation, listingText, type Reply } from "./conversation.js";
-import { listingPhotoUrl } from "./media.js";
-import { type MiniAppUser, validateMiniAppData } from "./miniapp-auth.js";
-import type { MiniAppCar, MiniAppCars, MiniAppSession } from "./miniapp-contract.js";
+import { listingText } from "./conversation.js";
+import { listingPhotoUrls } from "./media.js";
+import { validateMiniAppData } from "./miniapp-auth.js";
+import type { MiniAppCar } from "./miniapp-contract.js";
 
 class RequestError extends Error {
   constructor(
@@ -30,73 +25,50 @@ class RequestError extends Error {
   }
 }
 
-async function jsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
-  if (request.headers["content-type"]?.split(";", 1)[0]?.trim() !== "application/json")
-    throw new RequestError(415, "Ожидается JSON.");
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > 8192) {
-      request.resume();
-      throw new RequestError(413, "Запрос слишком большой.");
-    }
-    chunks.push(buffer);
-  }
-  try {
-    const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (value && typeof value === "object" && !Array.isArray(value))
-      return value as Record<string, unknown>;
-  } catch {
-    // Return the same bounded response for malformed JSON and non-object bodies.
-  }
-  throw new RequestError(400, "Некорректный запрос.");
-}
-
 function carView(listing: Listing, currency: string): MiniAppCar {
   const price = listingPrice(listing, currency);
-  const original = listing.original_price_minor;
   let priceText = price === null ? "Цена для сравнения недоступна" : money(price, currency);
-  if (original !== null && ["USD", "KGS", "KRW"].includes(listing.original_currency)) {
-    priceText = money(original, listing.original_currency);
+  if (
+    listing.original_price_minor !== null &&
+    ["USD", "KGS", "KRW"].includes(listing.original_currency)
+  ) {
+    priceText = money(listing.original_price_minor, listing.original_currency);
     if (listing.original_currency !== currency && price !== null)
       priceText += ` (≈ ${money(price, currency)})`;
   }
   if (listing.price_kind === "buy_now") priceText = `Buy Now: ${priceText}`;
   return {
     id: listing.id,
-    title: listing.title.slice(0, 140),
+    title: listing.title,
     url: listingUrlAllowed(listing.source, listing.url) ? listing.url : null,
-    photoUrl: listingPhotoUrl(listing),
+    photoUrls: listingPhotoUrls(listing),
     price: priceText,
     year: listing.year,
-    mileage: listing.mileage.slice(0, 80),
-    transmission: listing.transmission.slice(0, 80),
-    bodyType: listing.body_type.slice(0, 80),
-    city: listing.city.slice(0, 80),
+    mileage: listing.mileage,
+    transmission: listing.transmission,
+    bodyType: listing.body_type,
+    city: listing.city,
     market: MARKETS[listing.market as keyof typeof MARKETS] ?? listing.market,
     source: listing.source,
     observedAt: listing.observed_at,
+    availability: listing.availability,
     detailsHtml: listingText(listing, currency),
+    vin: listing.vin || null,
   };
 }
 
 export interface MiniAppServerOptions {
-  store: Store;
-  conversation: Conversation;
-  api: Api;
+  store: Pick<Store, "getProfile" | "getListing">;
   token: string;
   publicUrl: string;
-  port: number;
   host: string;
+  port: number;
   assetsDirectory?: string;
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
 }
 
-export async function startMiniAppServer(options: MiniAppServerOptions) {
-  const { store, conversation, api, token } = options;
+export async function startMiniAppServer(options: MiniAppServerOptions): Promise<Server> {
   const origin = new URL(options.publicUrl).origin;
   const directory = options.assetsDirectory ?? fileURLToPath(new URL("./public/", import.meta.url));
   const assets = new Map<string, { body: Buffer; type: string }>();
@@ -111,30 +83,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions) {
     });
   }
 
-  async function session(user: MiniAppUser, replies?: Reply[]): Promise<MiniAppSession> {
-    const current = replies ?? (await conversation.current(user.id));
-    const profile = await store.getProfile(user.id);
-    const draft = await store.getDraft(user.id);
-    return { user, profile, draftState: draft?.[0] ?? null, replies: current };
-  }
-
-  async function availableCar(id: unknown): Promise<Listing> {
-    if (typeof id !== "string" || !id || id.length > 200 || /[\p{Cc}]/u.test(id))
-      throw new RequestError(400, "Некорректный идентификатор автомобиля.");
-    const listing = await store.getListing(id, true);
-    const availability = listing ? normalize(listing.availability) : "";
-    if (
-      !listing ||
-      !approvedSources().includes(listing.source) ||
-      !purchaseEligible(listing) ||
-      (availability !== "в наличии" &&
-        !(listing.market !== "KG" && availability === "опубликовано"))
-    )
-      throw new RequestError(404, "Объявление недоступно, устарело или источник выключен.");
-    return listing;
-  }
-
-  function respond(response: ServerResponse, status: number, value: unknown) {
+  function respond(response: ServerResponse, status: number, value: unknown): void {
     response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
     response.end(JSON.stringify(value));
   }
@@ -148,7 +97,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions) {
       response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
       response.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src https:; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
+        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
@@ -178,121 +127,55 @@ export async function startMiniAppServer(options: MiniAppServerOptions) {
           response.end(request.method === "HEAD" ? undefined : asset.body);
           return;
         }
-        if (!url.pathname.startsWith("/miniapp/api/"))
+        if (url.pathname !== "/miniapp/api/car")
           throw new RequestError(404, "Страница не найдена.");
         if (
           (request.headers.origin && request.headers.origin !== origin) ||
           request.headers["sec-fetch-site"] === "cross-site"
         )
-          throw new RequestError(403, "Откройте приложение в Telegram.");
+          throw new RequestError(403, "Откройте карточку из личного чата в Telegram.");
         const authorization = request.headers.authorization ?? "";
         const user = authorization.startsWith("tma ")
-          ? validateMiniAppData(authorization.slice(4), token)
+          ? validateMiniAppData(authorization.slice(4), options.token)
           : null;
         if (!user)
           throw new RequestError(
             401,
-            "Сессия истекла. Закройте и заново откройте Mini App в Telegram.",
+            "Сессия истекла. Закройте карточку и откройте её заново в Telegram.",
           );
-        if (request.method !== "GET" && request.method !== "POST")
-          throw new RequestError(405, "Метод не поддерживается.");
-        const body = request.method === "POST" ? await jsonBody(request) : null;
-        // Bot updates and Mini App requests share the same cross-process user lock.
-        const result = await store.withLock(`autodom:user:${user.id}`, async () => {
-          if (url.pathname === "/miniapp/api/session" && request.method === "GET")
-            return session(user);
-          if (url.pathname === "/miniapp/api/action" && body) {
-            if (typeof body.input !== "string" || !body.input.trim() || body.input.length > 4096)
-              throw new RequestError(400, "Введите значение или выберите действие.");
-            return session(user, await conversation.handle(user.id, user.id, body.input));
-          }
-          const profile = await store.getProfile(user.id);
-          if (!profile)
-            throw new RequestError(409, "Сначала подтвердите согласие и сохраните поиск.");
-          if (url.pathname === "/miniapp/api/cars" && request.method === "GET") {
-            const rawOffset = url.searchParams.get("offset") ?? "0";
-            if (!/^\d{1,7}$/u.test(rawOffset) || Number(rawOffset) > 1_000_000)
-              throw new RequestError(400, "Некорректная страница каталога.");
-            const offset = Number(rawOffset);
-            const revision = url.searchParams.get("revision");
-            if ((revision !== null && revision !== profile.revision) || (offset > 0 && !revision))
-              throw new RequestError(409, "Поиск изменился. Обновите каталог.");
-            return store.transaction(async (): Promise<MiniAppCars> => {
-              const total = await store.countMatches(profile);
-              const listings = await store.search(profile, 12, offset);
-              return {
-                cars: listings.map((listing) => carView(listing, profile.currency)),
-                total,
-                offset,
-                nextOffset:
-                  listings.length && offset + listings.length < total
-                    ? offset + listings.length
-                    : null,
-                revision: profile.revision,
-              };
-            }, "snapshot");
-          }
-          if (url.pathname === "/miniapp/api/car" && request.method === "GET")
-            return carView(await availableCar(url.searchParams.get("id")), profile.currency);
-          if (url.pathname === "/miniapp/api/share" && body) {
-            const listing = await availableCar(body.id);
-            if (!listingUrlAllowed(listing.source, listing.url))
-              throw new RequestError(404, "Ссылка на объявление недоступна.");
-            // Deliberately independent of the user's private profile and budget.
-            const text = listingText(listing, "USD");
-            const photo = listingPhotoUrl(listing);
-            const id = createHash("sha256").update(listing.id).digest("hex");
-            const article: InlineQueryResult = {
-              type: "article",
-              id,
-              title: listing.title.slice(0, 140),
-              url: listing.url,
-              ...(photo ? { thumbnail_url: photo } : {}),
-              input_message_content: {
-                message_text: text,
-                parse_mode: "HTML",
-                link_preview_options: photo
-                  ? { url: photo, prefer_large_media: true, show_above_text: true }
-                  : { is_disabled: true },
-              },
-            };
-            const result: InlineQueryResult =
-              photo && /\.jpe?g$/iu.test(new URL(photo).pathname) && text.length <= 1024
-                ? {
-                    type: "photo",
-                    id,
-                    photo_url: photo,
-                    thumbnail_url: photo,
-                    caption: text,
-                    parse_mode: "HTML",
-                    reply_markup: {
-                      inline_keyboard: [[{ text: "Объявление у источника", url: listing.url }]],
-                    },
-                  }
-                : article;
-            const prepared = await api.savePreparedInlineMessage(user.id, result, {
-              allow_user_chats: true,
-              allow_group_chats: true,
-              allow_channel_chats: true,
-            });
-            return { id: prepared.id, expiresAt: prepared.expiration_date };
-          }
-          throw new RequestError(404, "Действие не найдено.");
-        });
-        respond(response, 200, result);
+        if (request.method !== "GET") {
+          response.setHeader("Allow", "GET");
+          throw new RequestError(405, "Карточка доступна только для чтения.");
+        }
+        const profile = await options.store.getProfile(user.id);
+        if (!profile || profile.user_id !== user.id || profile.chat_id !== user.id)
+          throw new RequestError(403, "Сначала сохраните поиск в личном чате с ботом.");
+        const id = url.searchParams.get("id");
+        if (
+          !id ||
+          id.length > 200 ||
+          /[\p{Cc}]/u.test(id) ||
+          url.searchParams.getAll("id").length !== 1
+        )
+          throw new RequestError(400, "Откройте карточку конкретного автомобиля из чата.");
+        // A notification remains useful after filters change. Only freshness and source access
+        // gate details; this route never searches or mutates the user's saved profile.
+        const listing = await options.store.getListing(id, true);
+        if (!listing || !approvedSources().includes(listing.source))
+          throw new RequestError(
+            404,
+            "Объявление недоступно, устарело или источник выключен. Вернитесь в чат за свежими вариантами.",
+          );
+        respond(response, 200, carView(listing, profile.currency));
       })().catch((error: unknown) => {
         if (response.destroyed || response.headersSent) return;
         if (error instanceof RequestError)
           respond(response, error.status, { error: error.message });
-        else if (error instanceof GrammyError && error.error_code === 429) {
-          const seconds = error.parameters.retry_after ?? 30;
-          response.setHeader("Retry-After", String(seconds));
-          respond(response, 429, {
-            error: `Telegram просит подождать ${seconds} сек. перед повторной отправкой.`,
-          });
-        } else {
+        else {
           options.onError?.(error);
-          respond(response, 503, { error: "Сервис временно недоступен. Попробуйте ещё раз." });
+          respond(response, 503, {
+            error: "Сервис временно недоступен. Попробуйте открыть карточку позже.",
+          });
         }
       });
     },

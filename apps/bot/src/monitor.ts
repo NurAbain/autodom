@@ -8,7 +8,7 @@ import {
   type Profile,
 } from "@autodom/core";
 import { GrammyError, HttpError } from "grammy";
-import { listingText, menu, packReplies, type Reply } from "./conversation.js";
+import { listingReplies, menu, packReplies, type Reply } from "./conversation.js";
 
 export interface MonitorStore {
   withLock<T>(key: string, operation: () => Promise<T>): Promise<T>;
@@ -66,8 +66,8 @@ export async function notifyOnce(
         }
         latest.set(event.listing.id, event);
       }
-      const sections: string[] = [];
-      let characters = 0;
+      const cards: Reply[] = [];
+      let shown = 0;
       let count = 0;
       for (const event of [...latest.values()].sort((a, b) => b.id - a.id)) {
         const current = await store.getListing(event.listing.id, true);
@@ -86,23 +86,21 @@ export async function notifyOnce(
           continue;
         if (event.kind !== "new" && !isPriceDrop(event, profile.currency)) continue;
         count += 1;
-        if (sections.length < 5) {
+        if (shown < 5) {
           const kind =
             event.kind === "new" ? "Новое совпадение в каталоге" : "Цена на сайте снизилась";
-          const section = `<b>${kind}</b>\n${listingText(current, profile.currency)}`;
-          if (characters + section.length + 2 <= 3000) {
-            sections.push(section);
-            characters += section.length + 2;
-          }
+          cards.push(...listingReplies(current, profile.currency, [], kind));
+          shown += 1;
         }
       }
       try {
-        if (sections.length) {
+        if (cards.length) {
           let header =
             "<b>Бесплатный мониторинг Autodom</b>\nОбновления по вашему сохранённому поиску.";
-          if (count > sections.length)
-            header += ` Ещё подходящих обновлений: ${count - sections.length} — смотрите /search.`;
-          await send(profile.chat_id, packReplies(header, sections, menu(profile)));
+          if (count > shown)
+            header += ` Ещё подходящих обновлений: ${count - shown} — смотрите /search.`;
+          cards[cards.length - 1]!.buttons = menu(profile);
+          await send(profile.chat_id, [...packReplies(header, []), ...cards]);
           delivered += 1;
         }
         await store.advanceCursor(profile.user_id, lastEvent.id, profile.revision);

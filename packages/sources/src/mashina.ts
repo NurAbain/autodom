@@ -154,19 +154,31 @@ function attributeText(attribute: ObjectValue): string {
   return "";
 }
 
-function photoUrl(images: unknown): string | null {
-  if (!Array.isArray(images) || !isObject(images[0])) return null;
-  for (const key of ["medium", "thumb"]) {
-    const value = images[0][key];
-    if (typeof value !== "string") continue;
-    try {
-      const url = new URL(value);
-      if (url.protocol === "https:" && url.hostname && !url.username) return value;
-    } catch {
-      /* Invalid optional photo URLs do not invalidate the listing. */
+function photoUrls(images: unknown): string[] {
+  const photos: string[] = [];
+  if (!Array.isArray(images)) return photos;
+  for (const image of images) {
+    if (!isObject(image)) continue;
+    for (const key of ["medium", "thumb"]) {
+      const value = image[key];
+      if (
+        typeof value !== "string" ||
+        /[\s\\\p{Cc}]/u.test(value) ||
+        !/^https:\/\/(?:im|pictures|storage|s3)\.mashina\.kg\//.test(value)
+      )
+        continue;
+      try {
+        const url = new URL(value);
+        if (url.username || url.password || url.port || url.hash) continue;
+        if (!photos.includes(url.href)) photos.push(url.href);
+        break;
+      } catch {
+        /* Invalid optional photo URLs do not invalidate the listing. */
+      }
     }
+    if (photos.length === 10) break;
   }
-  return null;
+  return photos;
 }
 
 function parseListing(
@@ -201,6 +213,7 @@ function parseListing(
     throw new SourceError("Mashina catalog availability schema changed");
   if (item.created_at != null && typeof item.created_at !== "string")
     throw new SourceError("Mashina catalog publication date schema changed");
+  const photos = photoUrls(item.images);
   return makeListing({
     id: `mashina:${item.id}`,
     title: item.title.trim(),
@@ -214,7 +227,8 @@ function parseListing(
     city: attributeText(attrs.get("city") ?? {}),
     availability: item.status !== "active" ? "Неактивно" : (item.availability ?? "").trim(),
     published_at: item.created_at ?? "",
-    photo_url: photoUrl(item.images),
+    photo_url: photos[0] ?? null,
+    photo_urls: photos,
   });
 }
 

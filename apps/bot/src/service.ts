@@ -15,7 +15,6 @@ import { type Bot, type BotError, type Context, GrammyError, HttpError } from "g
 import type { Update } from "grammy/types";
 import pg from "pg";
 import type { Logger } from "pino";
-import type { Conversation } from "./conversation.js";
 import { startMiniAppServer } from "./miniapp-server.js";
 import { monitor } from "./monitor.js";
 import { configureTelegramBot, sendReplies } from "./telegram.js";
@@ -97,7 +96,6 @@ export function startPolling(bot: Bot): RunnerHandle {
 
 export interface BotServiceContext {
   bot: Bot;
-  conversation: Conversation;
   token: string;
   miniAppUrl?: string;
   assetsDirectory?: string;
@@ -143,7 +141,7 @@ export async function runBotService(
   logger: Logger,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const { bot, conversation, token, miniAppUrl } = context;
+  const { bot, token, miniAppUrl } = context;
   const port = metricsPort(env);
   const listener = miniAppUrl ? miniAppListener(env) : undefined;
   const abort = new AbortController();
@@ -203,7 +201,7 @@ export async function runBotService(
     bot.catch(({ error }) => {
       logger.warn({ err: error }, "Telegram update could not be handled");
     });
-    await configureTelegramBot(bot, abort.signal, miniAppUrl);
+    await configureTelegramBot(bot, abort.signal);
     abort.signal.throwIfAborted();
     if (miniAppUrl && listener) {
       let probe: Promise<boolean> | undefined;
@@ -229,8 +227,6 @@ export async function runBotService(
       };
       miniAppServer = await startMiniAppServer({
         store,
-        conversation,
-        api: bot.api,
         token,
         publicUrl: miniAppUrl,
         ...listener,
@@ -261,7 +257,7 @@ export async function runBotService(
       }),
       monitor(
         store,
-        (chatId, replies) => sendReplies(bot, chatId, replies, miniAppUrl),
+        (chatId, replies) => sendReplies(bot, chatId, replies, miniAppUrl ? { miniAppUrl } : {}),
         settings.monitor_seconds,
         abort.signal,
       ),

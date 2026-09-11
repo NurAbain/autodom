@@ -10,6 +10,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
+const SCHEMA_VERSION = 3;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -109,7 +110,12 @@ export async function backup(store: Store, destination: string): Promise<void> {
       await file.writeFile(line);
     };
     await store.transaction(async () => {
-      await emit({ format: FORMAT, version: VERSION, schema_version: 1, tables: DATA_TABLES });
+      await emit({
+        format: FORMAT,
+        version: VERSION,
+        schema_version: SCHEMA_VERSION,
+        tables: DATA_TABLES,
+      });
       for (const table of DATA_TABLES) {
         // Server cursor bounds memory independently of catalog size, within one MVCC snapshot.
         await store.database.execute(
@@ -172,7 +178,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      header.schema_version !== 1 ||
+      ![1, 2, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !== JSON.stringify(DATA_TABLES)
     )
       throw new Error("Unsupported Autodom snapshot format");
@@ -240,7 +246,15 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         const index = DATA_TABLES.indexOf(table);
         if (index < lastTable) throw new Error("Snapshot tables are out of order");
         lastTable = index;
-        await insertSnapshotRow(target, table, record.row);
+        let row = record.row;
+        if (header.schema_version === 2 && table === "profiles") {
+          // Validate the historical column before discarding it from the current profile.
+          if (typeof row.ads_consent !== "boolean")
+            throw new Error("Invalid profiles snapshot columns for schema version 2");
+          const { ads_consent: _removed, ...current } = row;
+          row = current;
+        }
+        await insertSnapshotRow(target, table, row);
         counts[table]++;
       }
       if (!finished || !sequences) throw new Error("Truncated Autodom snapshot");

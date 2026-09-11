@@ -17,11 +17,13 @@ function detail({
   status,
   timezone = "(UTC+00:00) UTC",
   mileage = "59 197 mi (95 268 km)",
+  image = "https://images.bid.cars/example.jpg",
 }: {
   ended?: boolean;
   status?: string;
   timezone?: string;
   mileage?: string;
+  image?: unknown;
 } = {}): string {
   const vehicle = {
     "@type": "Vehicle",
@@ -31,7 +33,7 @@ function detail({
     vehicleModelDate: "1969",
     vehicleTransmission: "Manual",
     vehicleEngine: { name: "" },
-    image: "https://images.bid.cars/example.jpg",
+    image,
     offers: { price: "475", availability: "https://schema.org/OnlineOnly" },
   };
   const label = ended ? "Final bid" : "Current Bid";
@@ -324,9 +326,29 @@ describe("Bid.Cars detail", () => {
         `https://${host}/example.jpg`,
       );
     }
-    expect(() =>
-      parseDetail(detail().replace("images.bid.cars", "images.bid.cars.evil.test"), URL),
-    ).toThrow(SourceError);
+    const photos = Array.from({ length: 12 }, (_, index) => `https://images.bid.cars/${index}.jpg`);
+    const car = parseDetail(
+      detail({
+        image: [
+          null,
+          {},
+          "https://images.bid.cars.evil.test/a.jpg",
+          "https://user@images.bid.cars/a.jpg",
+          "https://images.bid.cars:443/a.jpg",
+          "https://images.bid.cars/a.jpg#fragment",
+          "https://images.bid.cars/a.jpg?redirect=1",
+          "http://images.bid.cars/a.jpg",
+          photos[0],
+          ...photos,
+        ],
+      }),
+      URL,
+    )!;
+    expect(car.photo_url).toBe(photos[0]);
+    expect(car.photo_urls).toEqual(photos.slice(0, 10));
+    expect(
+      parseDetail(detail({ image: "https://images.bid.cars.evil.test/a.jpg" }), URL)!.photo_url,
+    ).toBeNull();
   });
 });
 

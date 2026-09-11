@@ -49,6 +49,7 @@ export const listingSchema = z
     availability: text,
     published_at: text,
     photo_url: z.string().nullable().default(null),
+    photo_urls: z.array(z.string()).default([]),
     source: z.string().default("mashina.kg"),
     observed_at: timestamp,
     market: z.string().default("KG"),
@@ -102,7 +103,7 @@ export const profileSchema = z
     allow_import: z.boolean().nullable().default(null),
     purchase_by: text,
   })
-  .passthrough();
+  .strip();
 
 export const sourcePageSchema = z
   .object({

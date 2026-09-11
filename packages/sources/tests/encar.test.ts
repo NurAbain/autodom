@@ -156,17 +156,24 @@ describe("Encar domestic catalog", () => {
     expect(listing({ FormYear: 2201, Mileage: true })).toMatchObject({ year: null, mileage: "" });
   });
 
-  it("accepts only evidenced photo paths and rejects traversal and remote URLs", () => {
-    expect(
-      listing({
-        Photos: [
-          null,
-          { location: "/carpicture/../x.jpg" },
-          { location: "https://evil.example/x.jpg" },
-          { location: "/carpicture00/pic0000/900_001.png" },
-        ],
-      }).photo_url,
-    ).toBe("https://ci.encar.com/carpicture/carpicture00/pic0000/900_001.png");
+  it("retains unique photo paths without traversal, remote URLs, or album overflow", () => {
+    const paths = Array.from(
+      { length: 12 },
+      (_, index) => `/carpicture00/pic0000/900_${index}.png`,
+    );
+    const car = listing({
+      Photos: [
+        null,
+        { location: "/carpicture/../x.jpg" },
+        { location: "https://evil.example/x.jpg" },
+        { location: "/carpicture00/x.jpg?redirect=1" },
+        { location: paths[0] },
+        ...paths.map((location) => ({ location })),
+      ],
+    });
+    const photos = paths.slice(0, 10).map((path) => `https://ci.encar.com/carpicture${path}`);
+    expect(car.photo_url).toBe(photos[0]);
+    expect(car.photo_urls).toEqual(photos);
     expect(
       listing({ Photos: [{ location: "/carpicture00/x.jpg?redirect=1" }] }).photo_url,
     ).toBeNull();

@@ -460,14 +460,16 @@ export function parseDetail(text: string, url: string): Listing | null {
   if (!name.endsWith(suffix) || !name.startsWith(`${year} `))
     throw new SourceError("Bid.Cars vehicle title identity mismatch");
   const title = name.slice(0, -suffix.length);
-  const photo = optional(identity.image);
-  if (
-    photo &&
-    !/^https:\/\/(?:images\.bid\.cars|mercury\.bid\.cars|pluto\.bid\.car)(?:\/[^?#\s]*)?$/.test(
-      photo,
-    )
-  ) {
-    throw new SourceError("Bid.Cars photo URL schema changed");
+  const photos: string[] = [];
+  for (const photo of Array.isArray(identity.image) ? identity.image : [identity.image]) {
+    if (
+      typeof photo === "string" &&
+      !/[\s\\\p{Cc}]/u.test(photo) &&
+      /^https:\/\/(?:images\.bid\.cars|mercury\.bid\.cars|pluto\.bid\.car)\/[^?#\s]+$/.test(photo)
+    ) {
+      if (!photos.includes(photo)) photos.push(photo);
+      if (photos.length === 10) break;
+    }
   }
   const saleDocument = optional(main["sale document"]);
   const primary = optional(secondary["primary damage"]);
@@ -494,7 +496,8 @@ export function parseDetail(text: string, url: string): Listing | null {
     transmission: optional(identity.vehicleTransmission),
     city: city ?? "",
     availability: { active: "Опубликовано", ended: "Завершено", unknown: "Неизвестно" }[status],
-    photo_url: photo || null,
+    photo_url: photos[0] ?? null,
+    photo_urls: photos,
     source: "bid.cars",
     market: "US",
     original_currency: "USD",

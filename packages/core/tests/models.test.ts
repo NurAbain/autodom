@@ -60,7 +60,6 @@ describe("JSON models", () => {
       use_case: "family",
       allow_import: false,
       purchase_by: "2026-12-01",
-      custom: "preserved",
     });
     expect(profile).toMatchObject({
       quiet_start_minute: 1380,
@@ -68,8 +67,8 @@ describe("JSON models", () => {
       use_case: "family",
       allow_import: false,
       purchase_by: "2026-12-01",
-      custom: "preserved",
     });
+    expect(makeProfile({ ...profile, ...JSON.parse('{"ads_consent":true}') })).toEqual(profile);
   });
   it("rejects money that cannot retain integer precision", () => {
     expect(() =>

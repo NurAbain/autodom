@@ -4,7 +4,7 @@ import { validateMiniAppData } from "../src/miniapp-auth.js";
 
 const TOKEN = "12345:miniapp-auth-fixture";
 const NOW = 2_000_000_000;
-function signed(fields: Record<string, string>) {
+function signed(fields: Record<string, string>): string {
   const params = new URLSearchParams(fields);
   params.sort();
   const secret = createHmac("sha256", "WebAppData").update(TOKEN).digest();
@@ -23,7 +23,7 @@ const identity = {
   signature: "Telegram-third-party-signature",
 };
 
-it("authenticates decoded Telegram fields including the third-party signature without trusting a requested user ID", () => {
+it("authenticates decoded fields including Telegram's signature and rejects identity or token tampering", () => {
   expect(validateMiniAppData(signed(identity), TOKEN, NOW)).toEqual({
     id: 1234567890123,
     firstName: "Алёна + Али",
@@ -37,7 +37,7 @@ it("authenticates decoded Telegram fields including the third-party signature wi
   expect(validateMiniAppData(tampered.toString(), TOKEN, NOW)).toBeNull();
 });
 
-it("rejects ambiguous duplicate fields even when the signed first values are valid", () => {
+it("rejects ambiguous duplicate fields even with a valid signature", () => {
   const data = signed(identity);
   expect(validateMiniAppData(`${data}&user=%7B%22id%22%3A999%7D`, TOKEN, NOW)).toBeNull();
   expect(validateMiniAppData(`${data}&auth_date=${NOW}`, TOKEN, NOW)).toBeNull();
@@ -45,7 +45,7 @@ it("rejects ambiguous duplicate fields even when the signed first values are val
   expect(validateMiniAppData(`${data}&hash=${hash}`, TOKEN, NOW)).toBeNull();
 });
 
-it("expires bearer data and rejects timestamps beyond the allowed clock skew", () => {
+it("bounds bearer replay lifetime and future clock skew inclusively", () => {
   const data = signed(identity);
   expect(validateMiniAppData(data, TOKEN, NOW + 3600)?.id).toBe(1234567890123);
   expect(validateMiniAppData(data, TOKEN, NOW + 3601)).toBeNull();

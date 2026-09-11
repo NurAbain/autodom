@@ -6,7 +6,6 @@ import { loadBotSettings, loadToken, miniAppUrl } from "@autodom/core";
 import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
-import { Conversation } from "./conversation.js";
 import { metricsPort, runBotService } from "./service.js";
 import { createTelegramBot } from "./telegram.js";
 
@@ -90,9 +89,7 @@ export async function main(
     if (!abort.signal.aborted) {
       store = await Store.open(settings.database_url);
       if (!abort.signal.aborted) {
-        const conversation = new Conversation(store, token);
         const bot = createTelegramBot(store, token, {
-          conversation,
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
         });
         await runBotService(
@@ -100,7 +97,6 @@ export async function main(
           settings,
           {
             bot,
-            conversation,
             token,
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
             signal: abort.signal,

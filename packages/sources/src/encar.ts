@@ -78,8 +78,9 @@ function textField(item: ObjectValue, key: string): string {
   return value.trim();
 }
 
-function photoUrl(item: ObjectValue): string | null {
-  if (!Array.isArray(item.Photos)) return null;
+function photoUrls(item: ObjectValue): string[] {
+  const photos: string[] = [];
+  if (!Array.isArray(item.Photos)) return photos;
   for (const photo of item.Photos) {
     const path = isObject(photo) ? photo.location : null;
     if (
@@ -87,10 +88,12 @@ function photoUrl(item: ObjectValue): string | null {
       /^\/carpicture[\p{L}\p{N}_/.-]+\.(?:jpg|jpeg|png)$/u.test(path) &&
       !path.includes("..")
     ) {
-      return `https://ci.encar.com/carpicture${path}`;
+      const url = `https://ci.encar.com/carpicture${path}`;
+      if (!photos.includes(url)) photos.push(url);
+      if (photos.length === 10) break;
     }
   }
-  return null;
+  return photos;
 }
 
 function parseListing(item: unknown): Listing {
@@ -125,6 +128,7 @@ function parseListing(item: unknown): Listing {
   ];
   if (make === "KG모빌리티(쌍용)" && model === "더 뉴 렉스턴 스포츠" && detail === "와일드")
     aliases.push("Wild");
+  const photos = photoUrls(item);
   return makeListing({
     id: `encar:${id}`,
     title: [make, model, trim].filter(Boolean).join(" "),
@@ -136,7 +140,8 @@ function parseListing(item: unknown): Listing {
     mileage: mileage === null ? "" : `${mileage} km`,
     city: textField(item, "OfficeCityState"),
     availability: "Опубликовано",
-    photo_url: photoUrl(item),
+    photo_url: photos[0] ?? null,
+    photo_urls: photos,
     source: "encar.com",
     market: "KR",
     original_currency: "KRW",

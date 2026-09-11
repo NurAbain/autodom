@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   BODY_TYPES,
   BUDGET_SCOPES,
@@ -19,14 +19,16 @@ import {
   USE_CASES,
 } from "@autodom/core";
 import type { Store } from "@autodom/storage";
-import { listingPhotoUrl } from "./media.js";
+import { listingPhotoUrls } from "./media.js";
 
 export type Button = readonly [string, string];
 export type Buttons = readonly (readonly Button[])[];
 export interface Reply {
   text: string;
   buttons: Buttons;
-  photoUrl?: string;
+  photos?: readonly string[];
+  listingId?: string;
+  richHtml?: string;
 }
 export type ConversationStore = Pick<
   Store,
@@ -112,9 +114,11 @@ export function privacyText(): string {
       .map((source) => escapeHtml(source.name))
       .join(", ")}. ` +
     "Иностранные адаптеры без согласованного доступа не собирают и не показывают объявления. Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; доступность экспорта не подтверждена. Платные услуги не подключены.\n\n" +
-    "После вашего согласия сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки уведомлений. Это нужно для поиска и бесплатного мониторинга. Бюджет и контакты партнёрам не передаются; профиль доступен только вам — в личном чате и Mini App с проверенной сессией Telegram. Уведомления отправляю в личный чат. Данные хранятся до удаления: /delete удаляет профиль и незавершённый ввод из рабочей базы. Локальные резервные копии хранятся до 7 дней; удалённые данные могут оставаться в них до истечения этого срока.\n\n" +
-    "В Mini App избранное (до 100 ID объявлений) хранится на устройстве отдельно для вашего Telegram-аккаунта, а сравнение — только в текущем сеансе. Хранилище избранного не содержит бюджета или данных авторизации. Удаление данных внутри Mini App очищает избранное на текущем устройстве; /delete в чате не очищает хранилища устройств. Фотографии загружаются с серверов площадок: им виден IP вашего устройства, но бюджет и профиль не передаются. Через кнопку «Поделиться объявлением» отправляется только публичное объявление.\n\n" +
-    "Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. Мониторинг включается отдельно. /privacy — это описание; /cancel — отмена ввода. До нажатия «Согласен на хранение» новый черновик не сохраняется."
+    "После вашего согласия на хранение сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки. Это нужно для бесплатного поиска. Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. До кнопки «Согласен на хранение» новый черновик не сохраняется.\n\n" +
+    "Мониторинг бесплатный и включается отдельно: /resume; /pause — остановить. Сохранение поиска само по себе не включает уведомления.\n\n" +
+    "Партнёрам данные не передаются. Заявки партнёрам сейчас не подключены. Архив истории чата не ведётся, контакты не собираются; однако текст, который вы сами вводите в поля поиска, сохраняется в этих полях. Не вводите туда контакты. Сообщения чата хранит Telegram. Профиль и уведомления доступны пользователю только в личном чате. Интерфейса доступа операторов к профилям и контактам нет; привилегированные администраторы инфраструктуры технически могут получить доступ к базе и резервным копиям.\n\n" +
+    "Данные хранятся до /delete: команда с подтверждением удаляет профиль, настройки и незавершённый ввод из рабочей базы. /cancel очищает только черновик, а не сохранённый профиль; при подтверждении удаления отменяет удаление и возвращает прежний черновик. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения этого срока. /delete не удаляет переписку в Telegram.\n\n" +
+    "Платные заказы и платежи не подключены; обязательные записи по платным заказам сейчас не хранятся. Если в будущем вы оформите заказ, /delete не сможет удалить финансовые записи, которые необходимо хранить по закону. /privacy — данные и согласие на хранение."
   );
 }
 export function profileText(profile: Profile): string {
@@ -155,7 +159,7 @@ export function menu(profile: Profile): Buttons {
   ];
 }
 export function listingText(listing: Listing, currency: string): string {
-  let title = escapeHtml(listing.title.slice(0, 140));
+  let title = escapeHtml(listing.title);
   if (listingUrlAllowed(listing.source, listing.url))
     title = `<a href="${escapeHtml(listing.url)}">${title}</a>`;
   const price = listingPrice(listing, currency);
@@ -164,36 +168,44 @@ export function listingText(listing: Listing, currency: string): string {
   if (original !== null && listing.original_currency) {
     priceText =
       (listing.price_kind === "buy_now" ? "Buy Now — цена выкупа: " : "Цена объявления: ") +
-      money(original, listing.original_currency);
+      escapeHtml(money(original, listing.original_currency));
     if (listing.original_currency !== currency)
       priceText +=
         price !== null
-          ? ` (≈ ${money(price, currency)} по НБКР)`
+          ? ` (≈ ${escapeHtml(money(price, currency))} по НБКР)`
           : " (свежий пересчёт в валюту бюджета недоступен)";
-  } else priceText = price !== null ? money(price, currency) : "цена не указана";
+  } else priceText = price !== null ? escapeHtml(money(price, currency)) : "цена не указана";
   const parts = [
     listing.year ? String(listing.year) : "год не указан",
-    ...[listing.mileage, listing.transmission, listing.body_type, listing.trim]
-      .filter(Boolean)
-      .map((value) => value.slice(0, 80)),
+    ...[listing.mileage, listing.transmission, listing.body_type, listing.trim].filter(Boolean),
   ];
-  if (listing.registration_month)
-    parts.push(`регистрация: ${listing.registration_month.slice(0, 10)}`);
+  if (listing.registration_month) parts.push(`регистрация: ${listing.registration_month}`);
   const observed =
     listing.observed_at !== null
       ? `${bishkekTime(listing.observed_at)} (Бишкек, UTC+6)`
       : "время наблюдения неизвестно";
   let text =
-    `<b>${title}</b>\n${priceText} · ${listing.city ? escapeHtml(listing.city.slice(0, 80)) : "город не указан"} · ${MARKETS[listing.market as keyof typeof MARKETS]}\n${escapeHtml(parts.join(" · "))}\n` +
-    `Статус на сайте: ${escapeHtml(listing.availability.slice(0, 50)) || "не указан"}. Источник: ${escapeHtml(listing.source)}.\nПоследнее наблюдение: ${observed}. Цену и наличие подтвердите у продавца.`;
+    `<b>${title}</b>\n${priceText} · ${listing.city ? escapeHtml(listing.city) : "город не указан"} · ${escapeHtml(MARKETS[listing.market as keyof typeof MARKETS] ?? listing.market)}\n${escapeHtml(parts.join(" · "))}\n` +
+    `Статус на сайте: ${escapeHtml(listing.availability) || "не указан"}. Источник: ${escapeHtml(listing.source)}.\nПоследнее наблюдение: ${observed}. Цену и наличие подтвердите у продавца.`;
   if (listing.market !== "KG") {
     text += "\nДоставка, таможня, оформление и ремонт не включены. Экспорт не подтверждён.";
-    text += listing.condition
-      ? `\n${escapeHtml(listing.condition.slice(0, 600))}`
-      : "\nИстория ДТП и документов неизвестна.";
+    if (!listing.condition) text += "\nИстория ДТП и документов неизвестна.";
     text += " Независимая проверка не выполнена.";
     if (listing.fx_date && price !== null && listing.original_currency !== currency)
       text += `\nДаты курсов НБКР: ${escapeHtml(listing.fx_date)}.`;
+  }
+  if (listing.condition)
+    text += `\n\n<b>Состояние по данным источника</b>\n${escapeHtml(listing.condition)}`;
+  if (typeof listing.description === "string" && listing.description)
+    text += `\n\n<b>Описание объявления</b>\n${escapeHtml(listing.description)}`;
+  if (listing.vin) text += `\nVIN / номер кузова: ${escapeHtml(listing.vin)}.`;
+  for (const [label, value] of [
+    ["Документ продажи", listing.sale_document],
+    ["Основное повреждение", listing.primary_damage],
+    ["Дополнительное повреждение", listing.secondary_damage],
+    ["Запуск / движение по данным источника", listing.start_code],
+  ] as const) {
+    if (value) text += `\n${label}: ${escapeHtml(value)}.`;
   }
   if (listing.auction_house || listing.auction_status) {
     const status: Record<string, string> = {
@@ -201,8 +213,7 @@ export function listingText(listing: Listing, currency: string): string {
       ended: "завершён",
       unknown: "не подтверждён",
     };
-    text += `\nАукцион: ${escapeHtml(listing.auction_house.slice(0, 30)) || "не указан"}, лот ${escapeHtml(listing.auction_lot.slice(0, 40)) || "не указан"} — ${status[listing.auction_status] ?? "не подтверждён"}.`;
-    if (listing.vin) text += `\nVIN / номер кузова: ${escapeHtml(listing.vin.slice(0, 40))}.`;
+    text += `\nАукцион: ${escapeHtml(listing.auction_house) || "не указан"}, лот ${escapeHtml(listing.auction_lot) || "не указан"} — ${status[listing.auction_status] ?? "не подтверждён"}.`;
     if (listing.auction_at !== null)
       text += `\nНачало основных торгов: ${bishkekTime(listing.auction_at)} (Бишкек, UTC+6).`;
     for (const [label, amount] of [
@@ -287,6 +298,26 @@ export function packReplies(
   if (current) chunks.push({ text: current, buttons });
   return chunks;
 }
+
+export function listingReplies(
+  listing: Listing,
+  currency: string,
+  buttons: Buttons = [],
+  heading = "",
+): Reply[] {
+  const replies = packReplies(heading, [listingText(listing, currency)], buttons);
+  // Bot API rich HTML supports semantic headings and paragraphs; the ordinary
+  // HTML remains complete for servers that have not enabled sendRichMessage.
+  for (const reply of replies) {
+    const title = /^<b>(.*?)<\/b>\n?/s.exec(reply.text);
+    reply.richHtml =
+      (title ? `<h2>${title[1]!.replaceAll("\n", "<br>")}</h2>` : "") +
+      `<p>${reply.text.slice(title?.[0].length ?? 0).replaceAll("\n", "<br>")}</p>`;
+  }
+  replies[0]!.photos = listingPhotoUrls(listing);
+  replies.at(-1)!.listingId = listing.id;
+  return replies;
+}
 export function tips(profile: Profile): string {
   return (
     "<b>Перед покупкой</b>\n\n" +
@@ -302,51 +333,21 @@ export function tips(profile: Profile): string {
 }
 
 export class Conversation {
-  constructor(
-    private readonly store: ConversationStore,
-    private readonly consentSecret: string,
-  ) {
-    if (typeof consentSecret !== "string" || !consentSecret.trim())
-      throw new Error("A stable consent signing secret is required");
-  }
-
-  private consentSignature(userId: number, issuedAt: string): Buffer {
-    return createHmac("sha256", this.consentSecret)
-      .update(`autodom:storage-consent:v1:${userId}:${issuedAt}`)
-      .digest();
-  }
-
-  private validConsent(userId: number, callback: string): boolean {
-    const parts = /^consent:([0-9a-z]{1,11}):([A-Za-z0-9_-]{43})$/.exec(callback);
-    if (!parts) return false;
-    const issuedAt = Number.parseInt(parts[1]!, 36);
-    const age = Math.floor(Date.now() / 1000) - issuedAt;
-    if (
-      !Number.isSafeInteger(issuedAt) ||
-      issuedAt.toString(36) !== parts[1] ||
-      age < 0 ||
-      age >= 300
-    )
-      return false;
-    const signature = Buffer.from(parts[2]!, "base64url");
-    return (
-      signature.toString("base64url") === parts[2] &&
-      timingSafeEqual(signature, this.consentSignature(userId, parts[1]!))
-    );
+  // Bounded ephemeral storage consent; any next input consumes it.
+  private readonly consents = new Map<number, string>();
+  constructor(private readonly store: ConversationStore) {}
+  private consentAction(userId: number): string {
+    const action = `consent:${randomBytes(12).toString("base64url")}`;
+    this.consents.delete(userId);
+    this.consents.set(userId, action);
+    if (this.consents.size > 2048) this.consents.delete(this.consents.keys().next().value!);
+    return action;
   }
 
   private privacy(userId: number, profile: Profile | null): Reply[] {
     if (profile) return packReplies(privacyText(), [], menu(profile));
-    if (!Number.isSafeInteger(userId) || userId <= 0)
-      throw new RangeError("Telegram user ID must be a positive safe integer");
-    // Only Telegram holds this credential; replicas need no pre-consent user state.
-    const issuedAt = Math.floor(Date.now() / 1000).toString(36);
-    const signature = this.consentSignature(userId, issuedAt).toString("base64url");
-    return packReplies(
-      privacyText(),
-      [],
-      [[["Согласен на хранение — начать подбор", `consent:${issuedAt}:${signature}`]]],
-    );
+    const action = this.consentAction(userId);
+    return packReplies(privacyText(), [], [[["Согласен на хранение — начать подбор", action]]]);
   }
   private async begin(userId: number, profile: Profile | null): Promise<Reply[]> {
     const data: Draft = { consent: true, budget_scope: "car", ...OPTIONAL_DEFAULTS };
@@ -521,8 +522,8 @@ export class Conversation {
     const count = await this.store.countMatches(profile);
     if (offset >= count && offset)
       return packReplies("Выдача изменилась. Откройте её заново: /search.", [], menu(profile));
-    const listings = await this.store.search(profile, 5, offset);
-    if (!listings.length)
+    const [listing] = await this.store.search(profile, 1, offset);
+    if (!listing)
       return packReplies(
         "Совпадений в свежей собранной части каталога нет. Это не означает, что таких машин нет на всём рынке.\n\n" +
           profileText(profile) +
@@ -535,41 +536,22 @@ export class Conversation {
         menu(profile),
       );
     const heading =
-      `<b>Совпадения по фильтрам · ${offset + 1}–${offset + listings.length} из ${count}</b>\n` +
-      profileText(profile) +
-      "\n\n" +
-      FILTER_NOTE +
-      "\nСначала — недавно найденные варианты.\n" +
-      (await this.catalogNote(profile));
-    let buttons = menu(profile);
-    if (offset + listings.length < count)
-      buttons = [
-        [["Ещё варианты", `page:${profile.revision}:${offset + listings.length}`]],
-        ...buttons,
-      ];
-    return [
-      ...packReplies(heading, []),
-      ...listings.map((listing, index): Reply => {
-        const photoUrl = listingPhotoUrl(listing);
-        return {
-          text: listingText(listing, profile.currency),
-          buttons: index === listings.length - 1 ? buttons : [],
-          ...(photoUrl ? { photoUrl } : {}),
-        };
-      }),
-    ];
-  }
-
-  async current(userId: number): Promise<Reply[]> {
-    const draft = await this.store.getDraft(userId);
-    if (draft?.[0] === "delete_confirm") return this.handle(userId, userId, "/delete");
-    if (draft) return this.prompt(userId, draft[0], draft[1]);
-    const profile = await this.store.getProfile(userId);
-    return profile ? this.handle(userId, userId, "/profile") : this.privacy(userId, null);
+      `<b>Автомобиль ${offset + 1} из ${count}</b>\n` +
+      "Свежая собранная часть рынка, не все объявления. Сначала недавно найденные. /status — источники.";
+    const navigation: Button[] = [];
+    if (offset > 0) navigation.push(["Предыдущий", `page:${profile.revision}:${offset - 1}`]);
+    if (offset + 1 < count)
+      navigation.push(["Следующий", `page:${profile.revision}:${offset + 1}`]);
+    return listingReplies(
+      listing,
+      profile.currency,
+      [...(navigation.length ? [navigation] : []), ...menu(profile)],
+      heading,
+    );
   }
 
   async handle(userId: number, chatId: number, input: string): Promise<Reply[]> {
-    if (!Number.isSafeInteger(userId) || userId <= 0 || chatId !== userId)
+    if (chatId !== userId)
       return [
         {
           text: "Бюджет, профиль и уведомления доступны только в личном чате с ботом.",
@@ -580,8 +562,10 @@ export class Conversation {
     let profile = await this.store.getProfile(userId);
     let command = text.split(/\s+/, 1)[0]?.split("@", 1)[0]?.toLowerCase() ?? "";
     const draft = await this.store.getDraft(userId);
+    const consent = this.consents.get(userId);
+    this.consents.delete(userId);
     if (text.startsWith("consent:")) {
-      if (profile || draft || !this.validConsent(userId, text))
+      if (profile || !consent || text !== consent)
         return packReplies(
           "Согласие не принято: откройте актуальное описание /privacy.",
           [],
@@ -670,7 +654,7 @@ export class Conversation {
     }
     if (command === "/help")
       return packReplies(
-        "/start — начать или открыть поиск\n/app — открыть Mini App, если он подключён: пожелания, автомобили и фотографии\n/search — подходящие автомобили с фото источника, если оно доступно\n/profile — бюджет и пожелания\n/edit — изменить поиск\n/resume — включить бесплатный мониторинг\n/pause — приостановить\n/quiet HH:MM-HH:MM — тихие часы (Бишкек, UTC+6); /quiet off — отключить\n/privacy — хранение данных и согласие\n/tips — советы перед покупкой\n/status — состояние каталога\n/cancel — отменить ввод\n/delete — удалить мои данные\n\nБюджет можно ввести как 15000, 15к или 10000–15000. Модели — через запятую: Toyota Camry, Honda Accord. Внутри одного варианта все слова обязательны. Можно выбрать «Пока не знаю».",
+        "/start — начать или открыть поиск\n/search — подходящие автомобили по одному, с фото и описанием\n/profile — бюджет и пожелания\n/edit — изменить поиск\n/resume — включить бесплатный мониторинг\n/pause — приостановить\n/quiet HH:MM-HH:MM — тихие часы (Бишкек, UTC+6); /quiet off — отключить\n/privacy — хранение данных и согласие\n/tips — советы перед покупкой\n/status — состояние каталога\n/cancel — отменить ввод, не удаляя сохранённый поиск\n/delete — удалить мои данные\n\nБюджет можно ввести как 15000, 15к или 10000–15000. Модели — через запятую: Toyota Camry, Honda Accord. Внутри одного варианта все слова обязательны. Можно выбрать «Пока не знаю».",
         [],
         profile ? menu(profile) : START_BUTTONS,
       );
@@ -682,7 +666,7 @@ export class Conversation {
       const nonce = randomBytes(12).toString("base64url");
       await this.store.setDraft(userId, "delete_confirm", { nonce, previous });
       return packReplies(
-        "Удалить Telegram ID, бюджет, пожелания, незавершённый ввод и настройки уведомлений из рабочей базы? Мониторинг остановится сразу. Локальные резервные копии хранятся до 7 дней. Восстановить поиск здесь можно только новым вводом.",
+        "Удалить Telegram ID, бюджет, пожелания, незавершённый ввод и настройки уведомлений из рабочей базы? После подтверждения мониторинг остановится. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения срока. Переписка в Telegram не удаляется. Платные заказы и платежи сейчас не подключены; если заказы появятся, финансовые записи, необходимые по закону, этим удалением не стираются. Восстановить поиск здесь можно только новым вводом.",
         [],
         [
           [
@@ -701,7 +685,7 @@ export class Conversation {
         );
       await this.store.deleteUser(userId);
       return packReplies(
-        "Профиль и незавершённый ввод удалены. Уведомления остановлены.",
+        "Профиль и незавершённый ввод удалены из рабочей базы. Уведомления остановлены. Переписка в Telegram не удалена; локальные снимки при управляемом хранении могут содержать удалённые данные до 7 дней.",
         [],
         START_BUTTONS,
       );

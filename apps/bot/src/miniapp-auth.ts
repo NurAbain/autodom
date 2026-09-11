@@ -6,6 +6,7 @@ export interface MiniAppUser {
 }
 
 // initData is a short-lived bearer credential. Never persist or log it.
+// Reuse within the one-hour session is intentional; expired sessions cannot be replayed.
 export function validateMiniAppData(
   data: string,
   token: string,
@@ -25,8 +26,7 @@ export function validateMiniAppData(
   if (authDate > now + 30 || now - authDate > 3600) return null;
   fields.delete("hash");
   fields.sort();
-  // The HMAC includes signature when Telegram supplies it. Only Ed25519's
-  // separate third-party validation scheme excludes both hash and signature.
+  // The bot-token HMAC includes signature; Telegram's separate Ed25519 scheme does not.
   const check = [...fields].map(([key, value]) => `${key}=${value}`).join("\n");
   const secret = createHmac("sha256", "WebAppData").update(token).digest();
   const expected = createHmac("sha256", secret).update(check).digest();

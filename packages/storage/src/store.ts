@@ -276,7 +276,12 @@ export class Store {
   async migrate(): Promise<void> {
     const directory = process.env.AUTODOM_MIGRATIONS_DIR ?? "packages/storage/migrations";
     const migrations = await Promise.all(
-      ["0001_initial.sql", "0002_mileage_bigint.sql"].map(async (name, index) => {
+      [
+        "0001_initial.sql",
+        "0002_mileage_bigint.sql",
+        "0003_advertising_consent.sql",
+        "0004_remove_advertising_consent.sql",
+      ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
           version: index + 1,

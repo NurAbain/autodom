@@ -188,6 +188,31 @@ describe("TrueCar connected retail inventory", () => {
     expect(parsePage(document(parts)).listings[0]?.photo_url).toBeNull();
   });
 
+  it("keeps actual vehicle photos despite invalid artwork and duplicate gallery entries", () => {
+    const parts = fixture();
+    const photos = Array.from(
+      { length: 12 },
+      (_, index) => `https://listings-prod.tcimg.net/${index}.jpg`,
+    );
+    parts[3].image = [
+      null,
+      {},
+      "https://static.tcimg.net/vehicles/primary/model-example.png",
+      "https://listings-prod.tcimg.net.evil.test/a.jpg",
+      "https://user@listings-prod.tcimg.net/a.jpg",
+      "https://listings-prod.tcimg.net:443/a.jpg",
+      "https://listings-prod.tcimg.net/a.jpg#fragment",
+      "http://listings-prod.tcimg.net/a.jpg",
+      photos[0],
+      ...photos,
+    ];
+    const car = parsePage(document(parts)).listings[0]!;
+    expect(car.photo_url).toBe(photos[0]);
+    expect(car.photo_urls).toEqual(photos.slice(0, 10));
+    parts[3].image = "https://evil.test/a.jpg";
+    expect(parsePage(document(parts)).listings[0]?.photo_url).toBeNull();
+  });
+
   it("retains actual geographic scope across ranked page overlap", () => {
     const first = parsePage(document(fixture({ total: 2 })));
     const second = parsePage(document(fixture({ page: 2, total: 2 })), 2);

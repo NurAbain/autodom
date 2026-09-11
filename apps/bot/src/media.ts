@@ -1,8 +1,6 @@
 import type { Listing } from "@autodom/core";
 
-// Exact source CDN hosts, not arbitrary source subdomains or seller-supplied URLs.
-// Mashina hosts come from catalog image variants and its image preconnects;
-// the other hosts match the corresponding source parsers.
+// Exact source CDN hosts, never arbitrary source subdomains or seller-supplied hosts.
 const PHOTO_HOSTS: Readonly<Record<string, readonly string[]>> = {
   "mashina.kg": ["im.mashina.kg", "pictures.mashina.kg", "storage.mashina.kg", "s3.mashina.kg"],
   "encar.com": ["ci.encar.com"],
@@ -10,17 +8,11 @@ const PHOTO_HOSTS: Readonly<Record<string, readonly string[]>> = {
   "truecar.com": ["listings-prod.tcimg.net"],
 };
 
-export function listingPhotoUrl(listing: Listing): string | null {
-  const value = listing.photo_url;
-  if (!value || /[\s\\\p{Cc}]/u.test(value)) return null;
-  // Inspect the literal authority before URL normalization can erase :443 or
-  // decode a disguised host. Credentials, ports, IPs and suffix tricks fail here.
+function safePhotoUrl(source: string, value: unknown): string | null {
+  if (typeof value !== "string" || !value || /[\s\\\p{Cc}]/u.test(value)) return null;
+  // Inspect the literal authority before normalization can hide ports or decode hosts.
   const host = /^https:\/\/([a-z0-9.-]+)\//.exec(value)?.[1];
-  if (
-    !host ||
-    !Object.hasOwn(PHOTO_HOSTS, listing.source) ||
-    !PHOTO_HOSTS[listing.source]?.includes(host)
-  )
+  if (!host || !Object.hasOwn(PHOTO_HOSTS, source) || !PHOTO_HOSTS[source]?.includes(host))
     return null;
   try {
     const url = new URL(value);
@@ -29,4 +21,16 @@ export function listingPhotoUrl(listing: Listing): string | null {
   } catch {
     return null;
   }
+}
+
+export function listingPhotoUrls(listing: Listing): string[] {
+  const photos: string[] = [];
+  const cover = safePhotoUrl(listing.source, listing.photo_url);
+  if (cover) photos.push(cover);
+  for (const value of listing.photo_urls ?? []) {
+    const url = safePhotoUrl(listing.source, value);
+    if (url && !photos.includes(url)) photos.push(url);
+    if (photos.length === 10) break;
+  }
+  return photos;
 }
