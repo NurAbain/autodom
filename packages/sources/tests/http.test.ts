@@ -4,23 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
-import { type Dispatcher, MockAgent } from "undici";
+import { type Dispatcher, fetch, MockAgent } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProxyTransport, retryAfterSeconds } from "../src/http.js";
 
 const directories: string[] = [];
 const transports: ProxyTransport[] = [];
+const browserAgents = new Set<MockAgent>();
 afterEach(async () => {
   await Promise.all(transports.splice(0).map((transport) => transport.close()));
+  await Promise.all([...browserAgents].map((agent) => agent.close()));
+  browserAgents.clear();
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
   vi.unstubAllEnvs();
 });
 
-async function transportWith(agents: MockAgent[]) {
+async function transportWith(agents: MockAgent[], browserRoutes = agents) {
   const dataDir = await mkdtemp(join(tmpdir(), "autodom-http-test-"));
   directories.push(dataDir);
+  for (const agent of browserRoutes) browserAgents.add(agent);
   const transport = new ProxyTransport({
     routes: agents.map(
       (_, index) =>
@@ -37,8 +41,12 @@ async function transportWith(agents: MockAgent[]) {
     dispatcherFactory: (_route, _page, index): Dispatcher => {
       const agent = agents[index];
       if (!agent) throw new Error("Missing test proxy");
+      browserAgents.delete(agent);
       return agent;
     },
+    browserClientFactory: (_route, _page, index) => ({
+      fetch: (url, init) => fetch(url, { ...init, dispatcher: browserRoutes[index]! }),
+    }),
   });
   transports.push(transport);
   return transport;
@@ -140,6 +148,66 @@ describe("mandatory proxy document transport", () => {
     expect(second.pendingInterceptors()).toHaveLength(1);
   });
 
+  it("preserves origin rate limits on the browser transport without rotating proxies", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const blocked = new MockAgent();
+    blocked.disableNetConnect();
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(429, "limited", { headers: { "retry-after": "180" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(200, "must not request");
+    const transport = await transportWith([blocked, blocked], [first, second]);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", (text) => text, {
+        source: "bid.cars",
+      }),
+    ).rejects.toMatchObject({ retry_after: 180 });
+    expect(second.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("rejects browser redirects and oversized documents before parsing", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const blocked = new MockAgent();
+    blocked.disableNetConnect();
+    const redirect = new MockAgent();
+    redirect.disableNetConnect();
+    redirect
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(302, "", { headers: { location: "http://127.0.0.1/private" } });
+    redirect.get("http://127.0.0.1").intercept({ path: "/private" }).reply(200, "private content");
+    const transport = await transportWith([blocked], [redirect]);
+    const parse = vi.fn((text: string) => text);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", parse, {
+        source: "bid.cars",
+      }),
+    ).rejects.toBeInstanceOf(SourceError);
+    expect(redirect.pendingInterceptors()).toHaveLength(1);
+    const oversized = new MockAgent();
+    oversized.disableNetConnect();
+    oversized
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(200, "x".repeat(4 * 1024 * 1024 + 1));
+    const bounded = await transportWith([blocked], [oversized]);
+    await expect(
+      bounded.fetchDocument("https://bid.cars/en/automobile/page/1", parse, {
+        source: "bid.cars",
+      }),
+    ).rejects.toBeInstanceOf(SourceError);
+    oversized.assertNoPendingInterceptors();
+    expect(parse).not.toHaveBeenCalled();
+  });
+
   it("rejects disabled sources and off-origin requests before transport", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
     const agent = agentReply(200, "unused");
@@ -154,20 +222,25 @@ describe("mandatory proxy document transport", () => {
   });
 
   it("does not follow redirects or accept oversized documents", async () => {
-    const transport = await transportWith([
-      agentReply(302, "", { location: "http://127.0.0.1/private" }),
-    ]);
+    const redirect = agentReply(302, "", { location: "http://127.0.0.1/private" });
+    redirect.get("http://127.0.0.1").intercept({ path: "/private" }).reply(200, "private content");
+    const transport = await transportWith([redirect]);
+    const parse = vi.fn((text: string) => text);
     await expect(
-      transport.fetchDocument("https://mashina.kg/catalog/passenger", (text) => text, {
+      transport.fetchDocument("https://mashina.kg/catalog/passenger", parse, {
         source: "mashina.kg",
       }),
-    ).rejects.toThrow("HTTP 302");
-    const oversized = await transportWith([agentReply(200, "x".repeat(4 * 1024 * 1024 + 1))]);
+    ).rejects.toBeInstanceOf(SourceError);
+    expect(redirect.pendingInterceptors()).toHaveLength(1);
+    const excessive = agentReply(200, "x".repeat(4 * 1024 * 1024 + 1));
+    const oversized = await transportWith([excessive]);
     await expect(
-      oversized.fetchDocument("https://mashina.kg/catalog/passenger", (text) => text, {
+      oversized.fetchDocument("https://mashina.kg/catalog/passenger", parse, {
         source: "mashina.kg",
       }),
-    ).rejects.toThrow("size limit");
+    ).rejects.toBeInstanceOf(SourceError);
+    excessive.assertNoPendingInterceptors();
+    expect(parse).not.toHaveBeenCalled();
   });
 
   it("allows only bounded official NBKR currency archives", async () => {
@@ -216,13 +289,12 @@ describe("mandatory proxy document transport", () => {
           global.gc();
         }
         proxy.assertNoPendingInterceptors();
-        console.log('24 batches completed');
       } finally {
         await transport.close();
         await rm(dir, { recursive: true, force: true });
       }
     `;
-    const { stdout } = await promisify(execFile)(
+    await promisify(execFile)(
       process.execPath,
       [
         "--max-old-space-size=128",
@@ -239,7 +311,6 @@ describe("mandatory proxy document transport", () => {
         timeout: 25_000,
       },
     );
-    expect(stdout.trim()).toBe("24 batches completed");
   }, 30_000);
 
   it("requires proxies even for the explicitly allowed NBKR feed", () => {

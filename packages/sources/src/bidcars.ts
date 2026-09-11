@@ -179,17 +179,21 @@ export function catalogUrl(): string {
 
 function options($: CheerioAPI, root: Selection): Record<string, string> {
   const result: Record<string, string> = {};
-  root.find(".option").each((_index, element) => {
-    const node = $(element);
-    const label = nodeText(
-      node.contents().filter((_i, child) => child.type === "text"),
-    ).toLowerCase();
-    if (OPTION_LABELS[label] !== true) return;
-    const value = nodeText(one(node.find(".right-info"), "right-info"));
-    if (result[label] !== undefined && result[label] !== value)
-      throw new SourceError("Conflicting Bid.Cars labeled attributes");
-    result[label] = value;
-  });
+  // Supplemental platform specs repeat raw labels alongside the site's primary representation.
+  root
+    .find(".option")
+    .not(".more-specs .option")
+    .each((_index, element) => {
+      const node = $(element);
+      const label = nodeText(
+        node.contents().filter((_i, child) => child.type === "text"),
+      ).toLowerCase();
+      if (OPTION_LABELS[label] !== true) return;
+      const value = nodeText(one(node.find(".right-info"), "right-info"));
+      if (result[label] !== undefined && result[label] !== value)
+        throw new SourceError("Conflicting Bid.Cars labeled attributes");
+      result[label] = value;
+    });
   return result;
 }
 
@@ -298,8 +302,12 @@ function deadline($: CheerioAPI, value: string): number | null {
 function mileage(value: string): string {
   value = optional(value);
   if (!value) return "";
-  const exact = /^([0-9]+(?:[ ,][0-9]{3})*)\s*(mi|miles|km)(?:\s*\([0-9 ,]+\s*km\))?$/i.exec(value);
+  const exact =
+    /^([0-9]+(?:[ ,][0-9]{3})*)\s*(mi|miles|km)(?:\s*\((?:[0-9 ,]+\s*km|(unknown))\))?$/i.exec(
+      value,
+    );
   if (exact) {
+    if (exact[3]) return "";
     const number = BigInt(exact[1]!.replace(/[ ,]/g, ""));
     return `${number} ${exact[2]!.toLowerCase() === "km" ? "km" : "miles"}`;
   }
@@ -659,7 +667,8 @@ export async function fetchPage({ page = 1, transport }: FetchPageOptions): Prom
         if (
           listing !== null &&
           (listing.vin !== lot.vin ||
-            listing.title !== lot.title ||
+            (listing.title !== lot.title &&
+              !(lot.title.endsWith("...") && listing.title.startsWith(lot.title.slice(0, -3)))) ||
             listing.auction_lot !== lot.lot ||
             listing.url !== lot.url)
         ) {

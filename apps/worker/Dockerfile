@@ -32,8 +32,9 @@ ENV NODE_ENV=production \
     AUTODOM_DATA_DIR=/data \
     AUTODOM_METRICS_PORT=9901
 # Preserve the production fix: Crawlee's process-memory sampler needs ps on Linux.
+# The native browser HTTP client validates TLS using the system CA bundle.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends procps \
+    && apt-get install --yes --no-install-recommends procps ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=production-dependencies /app/node_modules ./node_modules

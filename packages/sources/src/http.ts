@@ -13,6 +13,7 @@ import {
 } from "@autodom/core";
 import { BasicCrawler } from "@crawlee/basic";
 import { Configuration, KeyValueStore, Log, LogLevel, RequestList } from "@crawlee/core";
+import { Impit, type ImpitResponse } from "impit";
 import pLimit, { type LimitFunction } from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { DETAIL_DELAY_SECONDS } from "./bidcars.js";
@@ -26,6 +27,19 @@ const ORIGINS: Readonly<Record<string, string>> = {
   "nbkr.kg": "https://www.nbkr.kg",
 };
 
+interface BrowserClient {
+  fetch(
+    url: URL,
+    init: {
+      method: "GET" | "POST";
+      headers: Record<string, string>;
+      body?: string;
+      redirect: "manual";
+      signal: AbortSignal;
+    },
+  ): Promise<Response | ImpitResponse>;
+}
+
 export interface ProxyTransportOptions {
   routes: readonly ProxyRoute[];
   dataDir: string;
@@ -34,6 +48,7 @@ export interface ProxyTransportOptions {
   signal?: AbortSignal;
   onRequest?: (outcome: RequestOutcome) => void;
   dispatcherFactory?: (route: ProxyRoute, page: number, index: number) => Dispatcher;
+  browserClientFactory?: (route: ProxyRoute, page: number, index: number) => BrowserClient;
 }
 
 export function retryAfterSeconds(value: string | null, now = Date.now() / 1000): number {
@@ -93,7 +108,7 @@ function requestUrl(raw: string, options: DocumentOptions): URL {
   return url;
 }
 
-async function readBody(response: Response): Promise<string> {
+async function readBody(response: Response | ImpitResponse): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) throw new SourceError("Source returned an empty response body");
   const chunks: Uint8Array[] = [];
@@ -116,6 +131,7 @@ async function readBody(response: Response): Promise<string> {
 export class ProxyTransport implements DocumentTransport {
   readonly #options: ProxyTransportOptions;
   readonly #dispatchers = new Map<string, Dispatcher>();
+  readonly #browserClients = new Map<string, BrowserClient>();
   readonly #nextRequest = new Map<string, number>();
   readonly #abort = new AbortController();
   readonly #limit: LimitFunction;
@@ -144,6 +160,38 @@ export class ProxyTransport implements DocumentTransport {
     this.#abort.abort();
     await Promise.all([...this.#dispatchers.values()].map((dispatcher) => dispatcher.close()));
     this.#dispatchers.clear();
+    this.#browserClients.clear();
+  }
+
+  private browserClient(route: ProxyRoute, page: number, index: number): BrowserClient {
+    const endpoint = route.urlFor(page);
+    const key = `${index}:${endpoint}`;
+    let client = this.#browserClients.get(key);
+    if (!client) {
+      client = this.#options.browserClientFactory?.(route, page, index);
+      if (!client) {
+        const proxy = new URL(endpoint);
+        const credentials = Buffer.from(route.authorization.slice(6), "base64").toString("latin1");
+        const separator = credentials.indexOf(":");
+        proxy.username = credentials.slice(0, separator);
+        proxy.password = credentials.slice(separator + 1);
+        client = new Impit({
+          browser: "firefox144",
+          proxyUrl: proxy.href,
+          timeout: 40_000,
+          followRedirects: false,
+          ignoreTlsErrors: false,
+          http3: false,
+        });
+      }
+      this.#browserClients.set(key, client);
+      // Rotating proxy ports must not retain an unbounded number of native connection pools.
+      if (this.#browserClients.size > 16) {
+        const oldest = this.#browserClients.keys().next().value;
+        if (oldest !== undefined) this.#browserClients.delete(oldest);
+      }
+    }
+    return client;
   }
 
   async fetchDocument<T>(
@@ -253,14 +301,6 @@ export class ProxyTransport implements DocumentTransport {
       );
       if (start > instant) await delay(start - instant, undefined, { signal });
       const url = requestUrl(request.url, options);
-      const key = `${index}:${route.urlFor(page)}`;
-      let dispatcher = this.#dispatchers.get(key);
-      if (!dispatcher) {
-        dispatcher =
-          this.#options.dispatcherFactory?.(route, page, index) ??
-          new ProxyAgent({ uri: route.urlFor(page), token: route.authorization });
-        this.#dispatchers.set(key, dispatcher);
-      }
       // Cancel the deadline after a response instead of retaining a completed
       // request's async-local context for the full timeout.
       const deadline = new AbortController();
@@ -269,19 +309,39 @@ export class ProxyTransport implements DocumentTransport {
         40_000,
       ).unref();
       try {
-        const response = await fetch(url, {
+        const browser = options.source === "bid.cars";
+        const init = {
           method: options.method ?? "GET",
           headers: {
-            "User-Agent": "AutodomBot/0.2",
-            Accept: "application/json,text/html,*/*",
+            // Preserve the browser's coherent headers rather than mixing them with AutodomBot.
+            ...(browser
+              ? {}
+              : {
+                  "User-Agent": "AutodomBot/0.2",
+                  Accept: "application/json,text/html,*/*",
+                }),
             ...options.headers,
             ...(options.payload !== undefined ? { "Content-Type": "application/json" } : {}),
           },
           ...(options.payload !== undefined ? { body: JSON.stringify(options.payload) } : {}),
-          dispatcher,
-          redirect: "manual",
+          redirect: "manual" as const,
           signal: AbortSignal.any([signal, deadline.signal]),
-        });
+        };
+        let response: Response | ImpitResponse;
+        if (browser) {
+          response = await this.browserClient(route, page, index).fetch(url, init);
+        } else {
+          const endpoint = route.urlFor(page);
+          const key = `${index}:${endpoint}`;
+          let dispatcher = this.#dispatchers.get(key);
+          if (!dispatcher) {
+            dispatcher =
+              this.#options.dispatcherFactory?.(route, page, index) ??
+              new ProxyAgent({ uri: endpoint, token: route.authorization });
+            this.#dispatchers.set(key, dispatcher);
+          }
+          response = await fetch(url, { ...init, dispatcher });
+        }
         if (response.status !== 200) {
           await response.body?.cancel();
           if (response.status === 429)

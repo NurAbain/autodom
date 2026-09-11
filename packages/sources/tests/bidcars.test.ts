@@ -139,6 +139,27 @@ afterEach(() => {
 });
 
 describe("Bid.Cars detail", () => {
+  it("keeps primary attributes separate from supplemental platform specifications", () => {
+    const html = detail().replace(
+      '<div id="tertiary-info"></div>',
+      `<div id="tertiary-info">
+        <div class="option">Body Style<span class="right-info">Sedan</span></div>
+        <div class="more-specs">
+          <div class="option">Body Style<span class="right-info">Saloon</span></div>
+        </div>
+      </div>`,
+    );
+    expect(parseDetail(html, URL)?.body_type).toBe("Sedan");
+    expect(() =>
+      parseDetail(
+        html.replace(
+          '<div class="more-specs">',
+          '<div class="option">Body Style<span class="right-info">Wagon</span></div><div class="more-specs">',
+        ),
+        URL,
+      ),
+    ).toThrow(SourceError);
+  });
   it("separates buy-now, current and estimate amounts while preserving an old chassis and actual odometer", () => {
     const listing = parseDetail(detail(), URL)!;
     expect(listing).toMatchObject({
@@ -243,6 +264,9 @@ describe("Bid.Cars detail", () => {
   it("never promotes rounded odometer values to exact mileage", () => {
     expect(parseDetail(detail({ mileage: "52k mi" }), URL)!.mileage).toBe("");
     expect(parseDetail(detail({ mileage: "95,268 km" }), URL)!.mileage).toBe("95268 km");
+  });
+  it("does not turn an explicitly unknown odometer placeholder into measured mileage", () => {
+    expect(parseDetail(detail({ mileage: "999 999 mi (unknown)" }), URL)!.mileage).toBe("");
   });
   it.each([
     ["var lotNumber = '1-66587646'", "var lotNumber = '1-12345678'"],
@@ -429,6 +453,40 @@ describe("Bid.Cars fetch", () => {
     expect(result.total).toBeNull();
     expect(calls).toEqual([CATALOG_URL, URL]);
     expect(batch).toHaveBeenCalledTimes(1);
+  });
+  it("uses the full detail identity when the catalog visibly truncates the trim", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-12T00:00:00Z"));
+    const title = "1969 Alfa Romeo Duetto, 1750 Veloce Spider";
+    const result = await fetchPage({
+      transport: transportFor({
+        [CATALOG_URL]: catalog([row(URL, "1-66587646", "1969 Alfa Romeo Duetto, 1750 Vel...")]),
+        [URL]: detail().replaceAll("1969 Alfa Romeo Duetto", title),
+      }),
+    });
+    const profile = makeProfile({
+      user_id: 0,
+      chat_id: 0,
+      market: "US",
+      currency: "USD",
+      budget_min_minor: 0,
+      budget_max_minor: 4_000_000,
+      budget_scope: "car",
+      allow_import: true,
+      query: "Veloce Spider",
+    });
+    expect(
+      result.listings.filter((listing) => matches(profile, listing)).map((listing) => listing.id),
+    ).toEqual(["bidcars:1-66587646"]);
+    await expect(
+      fetchPage({
+        transport: transportFor({
+          [CATALOG_URL]: catalog([row(URL, "1-66587646", "1969 Other car...")]),
+          [URL]: detail(),
+        }),
+      }),
+    ).rejects.toBeInstanceOf(SourceError);
   });
   it("propagates detail rate limiting instead of returning a partial page", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
