@@ -10,7 +10,8 @@ import {
 import { type CheerioAPI, load } from "cheerio";
 import { Decimal } from "decimal.js";
 
-export const SEARCH_URL = "https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/";
+export const SEARCH_URL =
+  "https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/location-new-york-ny/";
 const SOURCE = "truecar.com";
 const SEARCH_PREFIX = "marketplaceListingSearch(";
 const VIN = /^[A-HJ-NPR-Z0-9]{17}$/;
@@ -427,10 +428,27 @@ function parseScopedPage(
     const filters = object(args.filters);
     const radius = object(filters.withinRadius);
     integer(radius.distance, 1);
-    requireValue(
-      typeof radius.postalCode === "string" && /^[0-9]{5}$/.test(radius.postalCode),
-      "missing search postal code",
+    const locations = path.filter(
+      (part) => typeof part === "string" && part.startsWith("location-"),
     );
+    requireValue(locations.length <= 1, "ambiguous search location");
+    if (locations.length) {
+      const location = /^location-([a-z0-9]+(?:-[a-z0-9]+)*)-([a-z]{2})$/.exec(
+        String(locations[0]),
+      );
+      requireValue(
+        location &&
+          radius.city === location[1] &&
+          radius.state === location[2] &&
+          radius.postalCode === undefined,
+        "returned city scope differs",
+      );
+    } else {
+      requireValue(
+        typeof radius.postalCode === "string" && /^[0-9]{5}$/.test(radius.postalCode),
+        "missing search postal code",
+      );
+    }
     requireValue(typeof args.sort === "string", "missing search sort");
     for (const [parameter, actual] of [
       ["zip", radius.postalCode],

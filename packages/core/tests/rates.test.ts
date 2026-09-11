@@ -248,44 +248,49 @@ it("never replaces a newer valid quote with an older feed", async () => {
   expect(book.convert(car("USD", 100)).price_kgs_minor).toBe(8745);
 });
 
-it("uses the effective archive during prepublication, then changes rates at Bishkek midnight", async () => {
-  const boundary = instant("2026-09-12");
-  vi.setSystemTime((boundary - 3600) * 1000);
-  const book = new RateBook(
-    metadata(),
-    transport((url) => {
-      if (url.includes("daily")) return xml("USD", "87,4500", "12.09.2026");
-      if (url.includes("weekly")) return xml("KRW", "0,0651", "12.09.2026");
-      const params = new URL(url).searchParams;
-      const usd = params.get("valuta_id") === "15";
-      const name = usd ? "1 Доллар США" : "1 Вона Республики Корея/южно-корейский вон";
-      return `<center>
+it.each([false, true])(
+  "refreshes at Bishkek midnight even within the last hour (reopened: %s)",
+  async (reopen) => {
+    const boundary = instant("2026-09-12");
+    vi.setSystemTime((boundary - 1800) * 1000);
+    const store = metadata();
+    let book = new RateBook(
+      store,
+      transport((url) => {
+        if (url.includes("daily")) return xml("USD", "87,4500", "12.09.2026");
+        if (url.includes("weekly")) return xml("KRW", "0,0651", "12.09.2026");
+        const params = new URL(url).searchParams;
+        const usd = params.get("valuta_id") === "15";
+        const name = usd ? "1 Доллар США" : "1 Вона Республики Корея/южно-корейский вон";
+        return `<center>
         <form><select name="valuta_id"><option selected value="${usd ? "15" : "25"}">${name}</option></select></form>
         <span align="center">${name}</span><br>
         <table><tr><td>Дата<br>(курсы действуют с указанных дат)</td><td>Курс<br>(к кыргызскому сому)</td></tr>
         <tr><td class="stat-center"><!--date-->${usd ? "11.09.2026" : "05.09.2026"}<!--date--></td>
         <td class="stat-right"><!--value-->${usd ? "87,4500" : "0,0647"}<!--value-->&nbsp;&nbsp;</td></tr></table>
       </center>`;
-    }),
-  );
-  await book.refresh();
-  expect(book.convert(car("KRW", 18500000))).toMatchObject({
-    price_kgs_minor: 119695000,
-    price_usd_minor: 1368725,
-    fx_date: "USD:2026-09-11;KRW:2026-09-05",
-    fx_expires_at: boundary,
-  });
-  vi.setSystemTime((boundary - 1) * 1000);
-  await book.refresh();
-  expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBe(119695000);
-  vi.setSystemTime(boundary * 1000);
-  expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBeNull();
-  await book.refresh();
-  expect(book.convert(car("KRW", 18500000))).toMatchObject({
-    price_kgs_minor: 120435000,
-    fx_date: "USD:2026-09-12;KRW:2026-09-12",
-  });
-});
+      }),
+    );
+    await book.refresh();
+    expect(book.convert(car("KRW", 18500000))).toMatchObject({
+      price_kgs_minor: 119695000,
+      price_usd_minor: 1368725,
+      fx_date: "USD:2026-09-11;KRW:2026-09-05",
+      fx_expires_at: boundary,
+    });
+    vi.setSystemTime((boundary - 1) * 1000);
+    await book.refresh();
+    expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBe(119695000);
+    vi.setSystemTime(boundary * 1000);
+    if (reopen) book = new RateBook(store, book.transport);
+    expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBeNull();
+    await book.refresh();
+    expect(book.convert(car("KRW", 18500000))).toMatchObject({
+      price_kgs_minor: 120435000,
+      fx_date: "USD:2026-09-12;KRW:2026-09-12",
+    });
+  },
+);
 
 it.each([
   { id: "25", date: "12.09.2026", duplicate: false },
@@ -333,4 +338,38 @@ it("honors the origin pause when the effective archive is rate limited", async (
   expect(requested).toHaveLength(2);
   expect(requested.some((url) => url.includes("weekly"))).toBe(false);
   expect(book.convert(car("USD", 100)).price_kgs_minor).toBeNull();
+});
+
+it("does not shorten an origin pause when cached quotes expire", async () => {
+  const boundary = instant("2026-09-12");
+  vi.setSystemTime((boundary - 1800) * 1000);
+  const store = metadata();
+  await store.setMeta(
+    "nbkr:USD",
+    JSON.stringify({
+      date: "2026-09-08",
+      nominal: "1",
+      value: "87.45",
+      valid_days: 4,
+    }),
+  );
+  const requested: string[] = [];
+  const book = new RateBook(
+    store,
+    transport((url) => {
+      requested.push(url);
+      if (url.includes("daily")) return xml("USD", "87.45", "12.09.2026");
+      throw new SourceRateLimited(3600);
+    }),
+  );
+  await book.refresh();
+  expect(book.convert(car("USD", 100)).price_kgs_minor).toBe(8745);
+  vi.setSystemTime(boundary * 1000);
+  const reopened = new RateBook(store, book.transport);
+  await reopened.refresh();
+  expect(reopened.convert(car("USD", 100)).price_kgs_minor).toBeNull();
+  expect(requested).toEqual([
+    "https://www.nbkr.kg/XML/daily.xml",
+    "https://www.nbkr.kg/XML/weekly.xml",
+  ]);
 });

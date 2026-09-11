@@ -18,6 +18,7 @@ const ARCHIVES: Readonly<Record<string, readonly [string, string]>> = {
   KRW: ["25", "Вона Республики Корея/южно-корейский вон"],
 };
 const LAST_REFRESH = "nbkr:last_refresh";
+const NEXT_REFRESH = "nbkr:next_refresh";
 const ExactDecimal = Decimal.clone({ precision: 50, rounding: Decimal.ROUND_HALF_UP });
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -209,6 +210,7 @@ export class RateBook {
   readonly quotes: Record<string, Quote> = {};
   private loaded: Promise<void> | undefined;
   private lastRefresh = 0;
+  private nextRefresh = 0;
 
   constructor(
     readonly store: MetadataStore,
@@ -234,6 +236,15 @@ export class RateBook {
     const attempted = saved === null || saved.trim() === "" ? NaN : Number(saved);
     this.lastRefresh =
       Number.isFinite(attempted) && attempted >= 0 && attempted <= now ? attempted : 0;
+    const scheduled = Number(
+      await this.store.getMeta(NEXT_REFRESH, String(this.lastRefresh + 3600)),
+    );
+    this.nextRefresh =
+      Number.isFinite(scheduled) &&
+      scheduled >= this.lastRefresh &&
+      scheduled <= this.lastRefresh + 3600
+        ? scheduled
+        : this.lastRefresh + 3600;
   }
 
   async refresh(): Promise<void> {
@@ -242,9 +253,12 @@ export class RateBook {
     this.loaded ??= this.loadCache();
     await this.loaded;
     const now = Date.now() / 1000;
-    if (now - this.lastRefresh >= 0 && now - this.lastRefresh < 3600) return;
+    if (now >= this.lastRefresh && now < this.nextRefresh) return;
     this.lastRefresh = now;
     await this.store.setMeta(LAST_REFRESH, String(now));
+    this.nextRefresh = now + 3600;
+    await this.store.setMeta(NEXT_REFRESH, String(this.nextRefresh));
+    let nextRefresh = this.nextRefresh;
     for (const [currency, feed] of Object.entries(FEEDS)) {
       let fetched: Quote | null;
       try {
@@ -265,7 +279,11 @@ export class RateBook {
           },
         );
         if (fetched === null) {
-          if (this.quotes[currency]?.validAt(now)) continue;
+          const cached = this.quotes[currency];
+          if (cached?.validAt(now)) {
+            nextRefresh = Math.min(nextRefresh, cached.expires_at);
+            continue;
+          }
           // NBKR rules §§6,8: published today, effective next calendar day.
           // https://www.nbkr.kg/contout.jsp?lang=RUS&material=132534
           fetched = await this.transport.fetchDocument(
@@ -275,7 +293,7 @@ export class RateBook {
           );
         }
       } catch (error) {
-        if (error instanceof SourceRateLimited) break;
+        if (error instanceof SourceRateLimited) return;
         if (error instanceof SourceError) continue;
         throw error;
       }
@@ -291,6 +309,13 @@ export class RateBook {
         }),
       );
       this.quotes[currency] = fetched;
+      nextRefresh = Math.min(nextRefresh, fetched.expires_at);
+    }
+    // Successful quotes may expire before the hourly poll, notably at Bishkek
+    // midnight. Persist that deadline so restarting cannot postpone fresh prices.
+    if (nextRefresh < this.nextRefresh) {
+      this.nextRefresh = nextRefresh;
+      await this.store.setMeta(NEXT_REFRESH, String(nextRefresh));
     }
   }
 

@@ -12,7 +12,7 @@ import {
   SourceRateLimited,
 } from "@autodom/core";
 import { BasicCrawler } from "@crawlee/basic";
-import { Configuration, KeyValueStore, Log, LogLevel, RequestQueue } from "@crawlee/core";
+import { Configuration, KeyValueStore, Log, LogLevel, RequestList } from "@crawlee/core";
 import pLimit, { type LimitFunction } from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { DETAIL_DELAY_SECONDS } from "./bidcars.js";
@@ -168,14 +168,25 @@ export class ProxyTransport implements DocumentTransport {
         persistStorage: true,
       },
     });
-    const queue = await RequestQueue.open(name, { config });
+    // The batch is immutable and retries belong to the durable source job.
+    // A dynamic RequestQueue allocates million-slot caches for every tiny batch.
+    const requestList = await Configuration.storage.run(config, () =>
+      RequestList.open(
+        name,
+        urls.map((url, index) => ({
+          url: url.href,
+          uniqueKey: `${index}:${url.href}`,
+          userData: { index },
+        })),
+      ),
+    );
     const abort = new AbortController();
     const results: T[] = new Array(requests.length);
     const completed = new Set<number>();
     let failure: unknown;
     const crawler = new BasicCrawler(
       {
-        requestQueue: queue,
+        requestList,
         minConcurrency: 1,
         maxConcurrency: this.#options.concurrency ?? 2,
         maxRequestRetries: 0,
@@ -209,20 +220,13 @@ export class ProxyTransport implements DocumentTransport {
     );
     const transport = this;
     try {
-      await crawler.run(
-        urls.map((url, index) => ({
-          url: url.href,
-          uniqueKey: `${index}:${url.href}`,
-          userData: { index },
-        })),
-      );
+      await crawler.run();
       if (failure) throw failure;
       if (completed.size !== requests.length)
         throw new SourceError("Source batch did not complete; refusing partial page");
       return results;
     } finally {
       abort.abort();
-      await queue.drop();
       await (await KeyValueStore.open(name, { config })).drop();
     }
   }
@@ -257,6 +261,13 @@ export class ProxyTransport implements DocumentTransport {
           new ProxyAgent({ uri: route.urlFor(page), token: route.authorization });
         this.#dispatchers.set(key, dispatcher);
       }
+      // Cancel the deadline after a response instead of retaining a completed
+      // request's async-local context for the full timeout.
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(new DOMException("Request deadline exceeded", "TimeoutError")),
+        40_000,
+      ).unref();
       try {
         const response = await fetch(url, {
           method: options.method ?? "GET",
@@ -269,7 +280,7 @@ export class ProxyTransport implements DocumentTransport {
           ...(options.payload !== undefined ? { body: JSON.stringify(options.payload) } : {}),
           dispatcher,
           redirect: "manual",
-          signal: AbortSignal.any([signal, AbortSignal.timeout(40_000)]),
+          signal: AbortSignal.any([signal, deadline.signal]),
         });
         if (response.status !== 200) {
           await response.body?.cancel();
@@ -298,6 +309,8 @@ export class ProxyTransport implements DocumentTransport {
               ? error.name
               : "RequestError";
         failures.push(`${route.tier}: ${reason}`);
+      } finally {
+        clearTimeout(timer);
       }
     }
     throw new SourceError(`${options.source}: all proxy routes failed: ${failures.join("; ")}`);

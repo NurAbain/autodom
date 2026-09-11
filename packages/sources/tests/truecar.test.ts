@@ -614,32 +614,32 @@ describe("TrueCar gated document transport", () => {
     }
   });
 
-  it("uses injected transport with query-free canonical URL and explicit requested page", async () => {
+  it("keeps city-scoped pagination fixed and rejects a different executed city", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "truecar.com");
-    vi.stubEnv("AUTODOM_TRUECAR_SEARCH_URL", `${SEARCH_URL}?page=99&zip=10017&searchRadius=75`);
-    const requests: unknown[] = [];
+    vi.stubEnv(
+      "AUTODOM_TRUECAR_SEARCH_URL",
+      "https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/location-new-york-ny/",
+    );
+    const parts = fixture({ total: 2 });
+    parts[0].filters.withinRadius = { city: "new-york", state: "ny", distance: 75 };
     const query = {
       condition: "used",
-      page: "2",
-      splat: ["toyota", "camry"],
-      zip: "10017",
-      searchRadius: "75",
+      page: "1",
+      splat: ["toyota", "camry", "location-new-york-ny"],
     };
-    const result = await fetchPage({
+    const first = await fetchPage({ transport: capturedTransport(document(parts, { query })) });
+    const next = fixture({ page: 2, total: 2, vin: OTHER_VIN });
+    next[0].filters.withinRadius = { city: "new-york", state: "ny", distance: 75 };
+    const nextQuery = { ...query, page: "2" };
+    const second = await fetchPage({
       page: 2,
-      transport: capturedTransport(document(fixture({ page: 2, total: 2 }), { query }), requests),
+      transport: capturedTransport(document(next, { query: nextQuery })),
     });
-    expect(result.page).toBe(2);
-    expect(result.listings[0]?.id).toBe(`truecar:${VIN}`);
-    expect(requests).toEqual([
-      {
-        url: SEARCH_URL,
-        options: {
-          source: "truecar.com",
-          page: 2,
-          params: { page: "2", zip: "10017", searchRadius: "75" },
-        },
-      },
-    ]);
+    expect(second.scope).toBe(first.scope);
+    expect(second.listings[0]?.id).toBe(`truecar:${OTHER_VIN}`);
+    next[0].filters.withinRadius.city = "los-angeles";
+    await expect(
+      fetchPage({ page: 2, transport: capturedTransport(document(next, { query: nextQuery })) }),
+    ).rejects.toThrow(SourceError);
   });
 });

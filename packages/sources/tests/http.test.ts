@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { type Dispatcher, MockAgent } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -190,6 +192,55 @@ describe("mandatory proxy document transport", () => {
       transport.fetchDocument(url, Number, { source: "nbkr.kg", params: { beg_year: "2025" } }),
     ).rejects.toBeInstanceOf(SourceError);
   });
+
+  it("collects repeated batches within a bounded worker heap", async () => {
+    const program = `
+      import assert from 'node:assert/strict';
+      import { mkdtemp, rm } from 'node:fs/promises';
+      import { tmpdir } from 'node:os';
+      import { join } from 'node:path';
+      import { MockAgent } from 'undici';
+      import { ProxyRoute } from ${JSON.stringify(new URL("../../core/src/index.ts", import.meta.url).href)};
+      import { ProxyTransport } from ${JSON.stringify(new URL("../src/http.ts", import.meta.url).href)};
+      const dir = await mkdtemp(join(tmpdir(), 'autodom-bounded-worker-'));
+      const proxy = new MockAgent();
+      proxy.disableNetConnect();
+      proxy.get('https://mashina.kg').intercept({ path: '/catalog/passenger' }).reply(200, 'ok').times(24);
+      const transport = new ProxyTransport({
+        routes: [new ProxyRoute('datacenter', 'http://proxy.test:7000', 'Basic ZGVtbzpkZW1v', 7000, 1)],
+        dataDir: dir, requestDelaySeconds: 0, dispatcherFactory: () => proxy,
+      });
+      try {
+        for (let page = 1; page <= 24; page++) {
+          assert.equal(await transport.fetchDocument('https://mashina.kg/catalog/passenger', text => text, { source: 'mashina.kg', page }), 'ok');
+          global.gc();
+        }
+        proxy.assertNoPendingInterceptors();
+        console.log('24 batches completed');
+      } finally {
+        await transport.close();
+        await rm(dir, { recursive: true, force: true });
+      }
+    `;
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [
+        "--max-old-space-size=128",
+        "--expose-gc",
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        program,
+      ],
+      {
+        cwd: new URL("../../../", import.meta.url),
+        env: { ...process.env, AUTODOM_APPROVED_SOURCES: "mashina.kg" },
+        timeout: 25_000,
+      },
+    );
+    expect(stdout.trim()).toBe("24 batches completed");
+  }, 30_000);
 
   it("requires proxies even for the explicitly allowed NBKR feed", () => {
     expect(() => new ProxyTransport({ routes: [], dataDir: tmpdir() })).toThrow("proxies");

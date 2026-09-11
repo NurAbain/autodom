@@ -31,7 +31,7 @@ services:
       AUTODOM_CRAWL_DELAY: ${AUTODOM_CRAWL_DELAY:-2}
       AUTODOM_FULL_REFRESH_SECONDS: ${AUTODOM_FULL_REFRESH_SECONDS:-86400}
       AUTODOM_APPROVED_SOURCES: ${AUTODOM_APPROVED_SOURCES:-mashina.kg}
-      AUTODOM_TRUECAR_SEARCH_URL: ${AUTODOM_TRUECAR_SEARCH_URL:-https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/}
+      AUTODOM_TRUECAR_SEARCH_URL: ${AUTODOM_TRUECAR_SEARCH_URL:-https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/location-new-york-ny/}
       AUTODOM_BIDCARS_CATALOG_URL: ${AUTODOM_BIDCARS_CATALOG_URL:-https://bid.cars/en/automobile/page/1}
       SMARTPROXY_USERNAME: ${SMARTPROXY_USERNAME:-}
       SMARTPROXY_PASSWORD: ${SMARTPROXY_PASSWORD:-}
