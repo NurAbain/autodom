@@ -2,8 +2,11 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { SOURCES } from "./source-catalog.js";
 
-export const SOURCE_IDS = ["mashina.kg", "encar.com", "truecar.com", "bid.cars"] as const;
+export const SOURCE_IDS: readonly string[] = SOURCES.filter(
+  (source) => source.adapter === "implemented",
+).map((source) => source.id);
 type Environment = Readonly<Record<string, string | undefined>>;
 const execute = promisify(execFile);
 

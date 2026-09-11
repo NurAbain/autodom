@@ -2,7 +2,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { loadProxyRoutes, loadSettings, loadToken } from "@autodom/core";
+import { loadProxyRoutes, loadSettings, loadToken, sourceCatalog } from "@autodom/core";
 import { ProxyTransport } from "@autodom/sources";
 import { backup, importSqlite, restore, Store } from "@autodom/storage";
 import { syncPages } from "./collector.js";
@@ -18,6 +18,7 @@ Usage: pnpm autodom <command> [options]
   bot                         Telegram and notifications only; singleton poller
   worker                      Durable Redis/BullMQ source collection only
   sync [--pages 3]             Bounded collection through mandatory proxies
+  sources                     Offline source registry, access evidence and coverage gaps (JSON)
   status [--role run]          Aggregate counters and per-source state; no user data
   health [--role run]          Exit 0 only with fresh heartbeats and dependencies
   migrate                     Apply guarded PostgreSQL schema migrations
@@ -32,6 +33,8 @@ Both SMARTPROXY tiers are required by run/worker/sync; no direct scraping fallba
 Only mashina.kg is enabled by default. Foreign sources require explicit permission
 and AUTODOM_APPROVED_SOURCES opt-in. No import or auction cost is invented.
 Backups include profiles: keep them private; seven-day local retention is not off-site protection.
+The sources command needs no database, Redis, Telegram token or proxy; it never contacts providers.
+Candidate entries cannot be enabled. Published membership fees are not data-license prices.
 Stop the old poller before cutover. This CLI never replaces an existing Telegram webhook.
 `;
 
@@ -64,6 +67,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         "worker",
         "sync",
         "status",
+        "sources",
         "health",
         "migrate",
         "import-sqlite",
@@ -84,6 +88,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       throw new Error("--destination is only valid for restore");
     if (values.role !== undefined && !["status", "health"].includes(command))
       throw new Error("--role is only valid for status and health");
+    if (command === "sources") {
+      process.stdout.write(`${JSON.stringify(sourceCatalog())}\n`);
+      return 0;
+    }
     const role = values.role ?? "run";
     if (!["bot", "worker", "run"].includes(role))
       throw new Error("--role must be bot, worker, or run");

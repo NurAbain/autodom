@@ -1,22 +1,45 @@
 import { approvedSources } from "./config.js";
 import type { MetadataStore } from "./rates.js";
+import { COVERAGE, SOURCES, type SourceSpec, VEHICLE_HISTORY_COVERAGE } from "./source-catalog.js";
 
-export interface SourceSpec {
-  id: string;
-  name: string;
-  market: string;
-  hosts: readonly string[];
+const implementedSources = SOURCES.filter((source) => source.adapter === "implemented");
+
+/** Offline planning report. Enabled means operator opt-in, not a provider license or live health. */
+export function sourceCatalog() {
+  const approved = approvedSources();
+  return {
+    access_notice:
+      "Запись в реестре, публичная доступность и включение оператором не подтверждают право сбора/повторного показа. Стоимость unknown не равна нулю. Кандидаты не участвуют в сборе, поиске и уведомлениях.",
+    sources: SOURCES.map((source) => ({
+      ...source,
+      enabled: source.adapter === "implemented" && approved.includes(source.id),
+    })),
+    coverage: COVERAGE.map((coverage) => {
+      const sources = SOURCES.filter((source) => source.group === coverage.group);
+      return {
+        ...coverage,
+        source_ids: sources.map((source) => source.id),
+        implemented_sources: sources
+          .filter((source) => source.adapter === "implemented")
+          .map((source) => source.id),
+        enabled_sources: sources
+          .filter((source) => source.adapter === "implemented" && approved.includes(source.id))
+          .map((source) => source.id),
+      };
+    }),
+    vehicle_history: VEHICLE_HISTORY_COVERAGE.map((coverage) => ({
+      ...coverage,
+      official_report_access: "not_connected",
+      enabled_listing_sources: coverage.listing_sources.filter((source) =>
+        approved.includes(source.source_id),
+      ),
+    })),
+  };
 }
-export const SOURCES: readonly SourceSpec[] = [
-  { id: "mashina.kg", name: "Mashina.kg", market: "KG", hosts: ["mashina.kg"] },
-  { id: "encar.com", name: "Encar", market: "KR", hosts: ["fem.encar.com"] },
-  { id: "truecar.com", name: "TrueCar", market: "US", hosts: ["www.truecar.com"] },
-  { id: "bid.cars", name: "Bid.Cars · Copart / IAAI", market: "US", hosts: ["bid.cars"] },
-];
 
 export function enabledSources(): readonly SourceSpec[] {
   const approved = approvedSources();
-  return SOURCES.filter((source) => approved.includes(source.id));
+  return implementedSources.filter((source) => approved.includes(source.id));
 }
 export function enabledMarkets(): readonly string[] {
   return [...new Set(enabledSources().map((source) => source.market))];
@@ -33,7 +56,9 @@ export function listingUrlAllowed(sourceId: string, url: string): boolean {
       !parsed.username &&
       !parsed.password &&
       (parsed.port === "" || parsed.port === "443") &&
-      SOURCES.some((source) => source.id === sourceId && source.hosts.includes(parsed.hostname))
+      implementedSources.some(
+        (source) => source.id === sourceId && source.hosts.includes(parsed.hostname),
+      )
     );
   } catch {
     return false;
@@ -60,7 +85,7 @@ export async function sourceStatus(store: SourceStatusStore): Promise<SourceStat
   const approved = approvedSources();
   const statuses: SourceStatus[] = [];
   // A caller may hold an advisory lease backed by one pg.Client.
-  for (const source of SOURCES) {
+  for (const source of implementedSources) {
     const prefix = `source:${source.id}:`;
     const observed = counts[source.id];
     const last_sync = await store.getMeta(`${prefix}last_sync_at`);
