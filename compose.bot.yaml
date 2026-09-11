@@ -2,6 +2,8 @@
 # Select this file, not compose.yaml; deploy/rollback it independently of the parser.
 # Use existing Autodom PostgreSQL and the bot token. No Redis/scraper-proxy dependency.
 # Route the Mini App HTTPS domain to bot:8080, preserving /miniapp/ paths.
+# Alternatively, Cloudflare Tunnel can reach the dedicated host listener below.
+# Set AUTODOM_MINI_APP_PUBLISH to the server's LAN IP:port; never publish metrics.
 # A Telegram poller is singleton: stop the old bot at the initial cutover, never scale it.
 # Reuse the existing snapshots volume explicitly; external:true rejects a missing volume.
 services:
@@ -33,6 +35,7 @@ services:
       AUTODOM_MINI_APP_PORT: "8080"
       AUTODOM_APPROVED_SOURCES: ${AUTODOM_APPROVED_SOURCES:-mashina.kg}
     expose: ["8080", "9901"]
+    ports: ["${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"]
     networks: [default, proxy]
     volumes: [snapshots:/backups]
     healthcheck:
