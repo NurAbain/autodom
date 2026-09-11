@@ -29,6 +29,10 @@ ENV NODE_ENV=production \
     AUTODOM_DATA_DIR=/data \
     AUTODOM_BACKUP_DIR=/backups \
     AUTODOM_METRICS_PORT=9901
+# Crawlee's process-memory sampler needs ps on Linux.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /app/apps/runtime/dist ./apps/runtime/dist
