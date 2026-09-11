@@ -17,7 +17,7 @@ import type { ImpitResponse } from "impit";
 import pLimit, { type LimitFunction } from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { DETAIL_DELAY_SECONDS } from "./bidcars.js";
-import { BidCarsBrowser, type BrowserClient } from "./bidcars-browser.js";
+import { BidCarsBrowser, type BrowserClient, REFRESH_COOLDOWN_MS } from "./bidcars-browser.js";
 import { RiskBypass, RiskBypassError } from "./riskbypass.js";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -120,7 +120,10 @@ async function readBody(response: Response | ImpitResponse): Promise<string> {
 export class ProxyTransport implements DocumentTransport {
   readonly #options: ProxyTransportOptions;
   readonly #dispatchers = new Map<string, Dispatcher>();
-  readonly #browserClients = new Map<string, BrowserClient>();
+  readonly #browserClients = new Map<number, Map<number, BrowserClient>>();
+  readonly #browserNextPage = new Map<number, number>();
+  readonly #browserUnavailable = new Map<number, Map<number, number>>();
+  #preferredBrowserRoute = 0;
   readonly #nextRequest = new Map<string, number>();
   readonly #abort = new AbortController();
   readonly #limit: LimitFunction;
@@ -151,6 +154,8 @@ export class ProxyTransport implements DocumentTransport {
     await Promise.all([...this.#dispatchers.values()].map((dispatcher) => dispatcher.close()));
     this.#dispatchers.clear();
     this.#browserClients.clear();
+    this.#browserNextPage.clear();
+    this.#browserUnavailable.clear();
   }
 
   private dispatcher(route: ProxyRoute, page: number, index: number): Dispatcher {
@@ -179,11 +184,15 @@ export class ProxyTransport implements DocumentTransport {
   }
 
   private browserClient(route: ProxyRoute, page: number, index: number): BrowserClient {
-    const key = `${index}:${route.urlFor(page)}`;
-    const cached = this.#browserClients.get(key);
+    let clients = this.#browserClients.get(index);
+    if (!clients) {
+      clients = new Map();
+      this.#browserClients.set(index, clients);
+    }
+    const cached = clients.get(page);
     if (cached) {
-      this.#browserClients.delete(key);
-      this.#browserClients.set(key, cached);
+      clients.delete(page);
+      clients.set(page, cached);
       return cached;
     }
     const client =
@@ -191,11 +200,11 @@ export class ProxyTransport implements DocumentTransport {
       new BidCarsBrowser(route, page, {
         solve: (url, proxy, signal) => this.solver(route).solve(url, proxy, signal),
       });
-    this.#browserClients.set(key, client);
-    // Retain hot clearance sessions without accumulating every rotating proxy port.
-    if (this.#browserClients.size > 16) {
-      const oldest = this.#browserClients.keys().next().value;
-      if (oldest !== undefined) this.#browserClients.delete(oldest);
+    clients.set(page, client);
+    // A rotating tier must not evict another tier's established sessions.
+    if (clients.size > 16) {
+      const oldest = clients.keys().next().value;
+      if (oldest !== undefined) clients.delete(oldest);
     }
     return client;
   }
@@ -285,22 +294,52 @@ export class ProxyTransport implements DocumentTransport {
     }
   }
 
+  private browserPage(route: ProxyRoute, index: number): number | undefined {
+    const count = Math.max(1, route.port_count);
+    const unavailable = this.#browserUnavailable.get(index);
+    const now = Date.now();
+    let page = this.#browserNextPage.get(index) ?? 1;
+    for (let checked = 0; checked < count; checked++) {
+      const next = (page % count) + 1;
+      this.#browserNextPage.set(index, next);
+      if ((unavailable?.get(page) ?? 0) <= now) {
+        unavailable?.delete(page);
+        return page;
+      }
+      page = next;
+    }
+    return undefined;
+  }
+
   private async fetchThroughRoutes<T>(
     request: DocumentRequest<T>,
     batchSignal: AbortSignal,
   ): Promise<T> {
     const failures: string[] = [];
     const { options } = request;
-    const page = options.page ?? 1;
     const signals = [this.#abort.signal, batchSignal];
     if (this.#options.signal) signals.push(this.#options.signal);
     if (options.signal) signals.push(options.signal);
     const signal = AbortSignal.any(signals);
-    for (const [index, route] of this.#options.routes.entries()) {
+    const routes = this.#options.routes;
+    const browserRequest = options.source === "bid.cars";
+    const preferred = browserRequest ? this.#preferredBrowserRoute : 0;
+    let alternatePorts: Set<number> | undefined;
+    // At most one alternate port per tier, only after an unresolved managed challenge.
+    for (let offset = 0; offset < routes.length * (browserRequest ? 2 : 1); offset++) {
+      const index = (preferred + offset) % routes.length;
+      if (offset >= routes.length && !alternatePorts?.has(index)) continue;
+      const route = routes[index];
+      if (!route) throw new SourceError("Configured proxy route is missing");
+      const page = browserRequest ? this.browserPage(route, index) : (options.page ?? 1);
+      if (page === undefined) {
+        failures.push(`${route.tier}: Bid.Cars proxy sessions are cooling down`);
+        continue;
+      }
       let reported = false;
+      let challenged = false;
       try {
-        const browser =
-          options.source === "bid.cars" ? this.browserClient(route, page, index) : undefined;
+        const browser = browserRequest ? this.browserClient(route, page, index) : undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           signal.throwIfAborted();
           const instant = Date.now();
@@ -340,6 +379,7 @@ export class ProxyTransport implements DocumentTransport {
               ? await browser.fetch(url, init)
               : await fetch(url, { ...init, dispatcher: this.dispatcher(route, page, index) });
             if (browser && response.headers.get("cf-mitigated") === "challenge") {
+              challenged = true;
               await response.body?.cancel();
               if (attempt !== 0 || !browser.refresh)
                 throw new SourceError("Bid.Cars Cloudflare challenge remains unresolved");
@@ -359,6 +399,7 @@ export class ProxyTransport implements DocumentTransport {
                 throw new SourceError(`${options.source} returned HTTP ${response.status}`);
               }
               const result = request.parse(await readBody(response));
+              if (browser) this.#preferredBrowserRoute = index;
               this.#options.onRequest?.({
                 source: options.source,
                 tier: route.tier,
@@ -385,6 +426,18 @@ export class ProxyTransport implements DocumentTransport {
         if (!reported)
           this.#options.onRequest?.({ source: options.source, tier: route.tier, outcome: "error" });
         if (error instanceof RiskBypassError) throw error;
+        if (challenged) {
+          let unavailable = this.#browserUnavailable.get(index);
+          if (!unavailable) {
+            unavailable = new Map();
+            this.#browserUnavailable.set(index, unavailable);
+          }
+          unavailable.set(page, Date.now() + REFRESH_COOLDOWN_MS);
+          if (route.port_count > 1) {
+            alternatePorts ??= new Set();
+            alternatePorts.add(index);
+          }
+        }
         const reason =
           error instanceof SourceError
             ? error.message

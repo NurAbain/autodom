@@ -187,6 +187,21 @@ describe("Bid.Cars detail", () => {
     });
     expect(listingPrice(listing, "USD")).toBeNull();
   });
+  it("accepts a single displayed estimate only when both declared bounds agree", () => {
+    const html = detail({ ended: true })
+      .replace("<b>$475</b> - <b>$9,000</b>", "<b>$475</b>")
+      .replace("var estimatedAmount2 = 9000", "var estimatedAmount2 = 475");
+    const listing = parseDetail(html, URL)!;
+    expect(listing).toMatchObject({
+      estimated_min_minor: 47_500,
+      estimated_max_minor: 47_500,
+      auction_status: "ended",
+    });
+    expect(listingPrice(listing, "USD")).toBeNull();
+    expect(() =>
+      parseDetail(html.replace("var estimatedAmount2 = 475", "var estimatedAmount2 = 9000"), URL),
+    ).toThrow(SourceError);
+  });
   it("accepts evidenced archived results without live status or estimate, not unrelated archive text", () => {
     const listing = parseDetail(archivedDetail(), URL)!;
     expect(listing).toMatchObject({

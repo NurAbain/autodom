@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
-import { type Dispatcher, fetch, MockAgent } from "undici";
+import { CookieJar } from "tough-cookie";
+import { type Dispatcher, fetch, MockAgent, Response } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BrowserClient } from "../src/bidcars-browser.js";
 import { ProxyTransport, retryAfterSeconds } from "../src/http.js";
@@ -21,6 +22,7 @@ afterEach(async () => {
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 async function transportWith(
@@ -141,6 +143,179 @@ describe("mandatory proxy document transport", () => {
     expect(first).toBeDefined();
     expect(second).toBeDefined();
     expect(Number(second) - Number(first)).toBeGreaterThanOrEqual(1900);
+  });
+
+  it("distributes BidCars details across the proxy pool between batches", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-bidcars-pool-"));
+    directories.push(dataDir);
+    const agents = Array.from({ length: 3 }, () => {
+      const agent = new MockAgent();
+      agent.disableNetConnect();
+      browserAgents.add(agent);
+      const origin = agent.get("https://bid.cars");
+      origin.intercept({ path: "/en/lot/example" }).reply(200, '{"available":true}');
+      origin
+        .intercept({ path: "/en/lot/example" })
+        .reply(429, "Proxy request allowance exhausted", { headers: { "retry-after": "120" } })
+        .persist();
+      return agent;
+    });
+    const transport = new ProxyTransport({
+      routes: [
+        new ProxyRoute("residential", "http://proxy.test:7000", "Basic ZGVtbzpkZW1v", 7000, 3),
+      ],
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const agent = agents[Number(new URL(route.urlFor(page)).port) - 7000];
+        if (!agent) throw new Error("Missing test proxy");
+        return { fetch: (url, init) => fetch(url, { ...init, dispatcher: agent }) };
+      },
+    });
+    transports.push(transport);
+    const request = {
+      url: "https://bid.cars/en/lot/example",
+      parse: JSON.parse,
+      options: { source: "bid.cars" },
+    };
+    await expect(transport.fetchDocuments([request, request])).resolves.toEqual([
+      { available: true },
+      { available: true },
+    ]);
+    await expect(
+      transport.fetchDocument(request.url, request.parse, request.options),
+    ).resolves.toEqual({ available: true });
+  });
+
+  it("keeps a working BidCars route across subsequent document batches", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first.get("https://bid.cars").intercept({ path: "/en/lot/example" }).reply(403, "blocked");
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/lot/example" })
+      .reply(429, "Do not repeat requests on this route", { headers: { "retry-after": "120" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/lot/example" })
+      .reply(200, '{"available":true}')
+      .times(2);
+    const transport = await transportWith([first, second]);
+    for (let batch = 0; batch < 2; batch++)
+      await expect(
+        transport.fetchDocument("https://bid.cars/en/lot/example", JSON.parse, {
+          source: "bid.cars",
+        }),
+      ).resolves.toEqual({ available: true });
+    second.assertNoPendingInterceptors();
+    expect(first.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("quarantines a challenged BidCars port while keeping healthy sessions usable", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-bidcars-health-"));
+    directories.push(dataDir);
+    const agents = Array.from({ length: 3 }, () => {
+      const agent = new MockAgent();
+      agent.disableNetConnect();
+      browserAgents.add(agent);
+      return agent;
+    });
+    const first = agents[0];
+    if (!first) throw new Error("Missing test proxy");
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/lot/example" })
+      .reply(403, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    for (const agent of agents)
+      agent
+        .get("https://bid.cars")
+        .intercept({ path: "/en/lot/example" })
+        .reply(200, '{"available":true}')
+        .persist();
+    const refresh = vi.fn(async () => {
+      throw new SourceError("Target session unavailable");
+    });
+    const transport = new ProxyTransport({
+      routes: [
+        new ProxyRoute("residential", "http://proxy.test:7000", "Basic ZGVtbzpkZW1v", 7000, 3),
+      ],
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const agent = agents[Number(new URL(route.urlFor(page)).port) - 7000];
+        if (!agent) throw new Error("Missing test proxy");
+        return {
+          async fetch(url, init) {
+            const response = await fetch(url, { ...init, dispatcher: agent });
+            vi.setSystemTime(Date.now() + 2000);
+            return response;
+          },
+          refresh,
+        };
+      },
+    });
+    transports.push(transport);
+    for (let document = 0; document < 6; document++)
+      await expect(
+        transport.fetchDocument("https://bid.cars/en/lot/example", JSON.parse, {
+          source: "bid.cars",
+        }),
+      ).resolves.toEqual({ available: true });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(first.pendingInterceptors()).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 300_000);
+    for (let document = 0; document < 3; document++)
+      await transport.fetchDocument("https://bid.cars/en/lot/example", JSON.parse, {
+        source: "bid.cars",
+      });
+    first.assertNoPendingInterceptors();
+  });
+
+  it("preserves authenticated BidCars sessions across both ten-port tiers", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-bidcars-sessions-"));
+    directories.push(dataDir);
+    const transport = new ProxyTransport({
+      routes: ["datacenter", "residential"].map(
+        (tier) => new ProxyRoute(tier, "http://proxy.test:7000", "Basic ZGVtbzpkZW1v", 7000, 10),
+      ),
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const jar = new CookieJar();
+        const session = `session=${route.tier}-${page}`;
+        return {
+          async fetch(url) {
+            vi.setSystemTime(Date.now() + 2000);
+            if (!url.pathname.includes(`/${route.tier}/`))
+              return new Response("This route is unavailable for this document", { status: 503 });
+            if (url.pathname.endsWith("/catalog")) await jar.setCookie(session, url.href);
+            else if ((await jar.getCookieString(url.href)) !== session)
+              return new Response("The established session cookie is required", { status: 403 });
+            return new Response('{"available":true}');
+          },
+        };
+      },
+    });
+    transports.push(transport);
+    for (let round = 0; round < 10; round++)
+      for (const tier of ["datacenter", "residential"])
+        await transport.fetchDocument(`https://bid.cars/en/${tier}/catalog`, JSON.parse, {
+          source: "bid.cars",
+        });
+    for (const tier of ["datacenter", "residential"])
+      await expect(
+        transport.fetchDocument(`https://bid.cars/en/${tier}/detail`, JSON.parse, {
+          source: "bid.cars",
+        }),
+      ).resolves.toEqual({ available: true });
   });
 
   it("does not rotate around a source rate limit", async () => {

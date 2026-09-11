@@ -454,7 +454,12 @@ export function parseDetail(text: string, url: string): Listing | null {
       .find("b")
       .toArray()
       .map((node) => amount(nodeText($(node)), true) || null);
-    if (amounts.length !== 2 || amounts[0] !== estimateMin || amounts[1] !== estimateMax) {
+    if (
+      amounts.length < 1 ||
+      amounts.length > 2 ||
+      amounts[0] !== estimateMin ||
+      amounts.at(-1) !== estimateMax
+    ) {
       throw new SourceError("Bid.Cars labeled estimate conflicts with declaration");
     }
   });

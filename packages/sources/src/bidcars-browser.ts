@@ -22,7 +22,7 @@ export interface BrowserClient {
   refresh?(url: URL, expectedGeneration: number, signal: AbortSignal): Promise<void>;
 }
 
-const REFRESH_COOLDOWN_MS = 300_000;
+export const REFRESH_COOLDOWN_MS = 300_000;
 
 function publicIPv4(address: string): boolean {
   if (!isIPv4(address)) return false;
