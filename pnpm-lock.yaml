@@ -120,6 +120,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/storage
 
+  apps/vin:
+    dependencies:
+      '@autodom/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@autodom/sources':
+        specifier: workspace:*
+        version: link:../../packages/sources
+
   apps/worker:
     dependencies:
       '@autodom/core':

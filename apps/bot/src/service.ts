@@ -1,5 +1,6 @@
 import type { Server } from "node:http";
 import type { BotSettings } from "@autodom/core";
+import type { VinLookup } from "@autodom/core/vin";
 import { maintain } from "@autodom/runtime/maintenance";
 import { Metrics } from "@autodom/runtime/metrics";
 import { runtimeStatus } from "@autodom/runtime/status";
@@ -100,6 +101,7 @@ export interface BotServiceContext {
   miniAppUrl?: string;
   assetsDirectory?: string;
   signal?: AbortSignal;
+  checkVin?: VinLookup;
 }
 
 export function metricsPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -231,6 +233,7 @@ export async function runBotService(
         publicUrl: miniAppUrl,
         ...listener,
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
+        ...(context.checkVin ? { checkVin: context.checkVin } : {}),
         ready,
         // Request errors can contain private Telegram initData or profile values.
         onError: () => logger.warn("Mini App request failed"),

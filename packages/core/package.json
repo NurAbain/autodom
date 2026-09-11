@@ -7,6 +7,18 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./vin": {
+      "types": "./src/vin.ts",
+      "default": "./src/vin.ts"
+    },
+    "./vin-client": {
+      "types": "./src/vin-client.ts",
+      "default": "./src/vin-client.ts"
+    },
+    "./vin-request": {
+      "types": "./src/vin-request.ts",
+      "default": "./src/vin-request.ts"
     }
   },
   "dependencies": {}

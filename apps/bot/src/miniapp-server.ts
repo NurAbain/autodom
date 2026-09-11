@@ -10,11 +10,14 @@ import {
   MARKETS,
   money,
 } from "@autodom/core";
+import type { VinLookup } from "@autodom/core/vin";
+import { readVinRequest, VinRequestError } from "@autodom/core/vin-request";
 import type { Store } from "@autodom/storage";
 import { listingText } from "./conversation.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
+import { VIN_NOT_ENABLED } from "./vin-text.js";
 
 class RequestError extends Error {
   constructor(
@@ -66,6 +69,7 @@ export interface MiniAppServerOptions {
   assetsDirectory?: string;
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
+  checkVin?: VinLookup;
 }
 
 export async function startMiniAppServer(options: MiniAppServerOptions): Promise<Server> {
@@ -127,7 +131,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           response.end(request.method === "HEAD" ? undefined : asset.body);
           return;
         }
-        if (url.pathname !== "/miniapp/api/car")
+        if (url.pathname !== "/miniapp/api/car" && url.pathname !== "/miniapp/api/vin")
           throw new RequestError(404, "Страница не найдена.");
         if (
           (request.headers.origin && request.headers.origin !== origin) ||
@@ -143,6 +147,47 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             401,
             "Сессия истекла. Закройте карточку и откройте её заново в Telegram.",
           );
+        if (url.pathname === "/miniapp/api/vin") {
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "POST");
+            throw new VinRequestError(
+              405,
+              "method_not_allowed",
+              "Проверка VIN доступна только через POST.",
+            );
+          }
+          if (url.search)
+            throw new VinRequestError(
+              400,
+              "invalid_request",
+              "Передайте один VIN только в теле запроса.",
+            );
+          const vin = await readVinRequest(request);
+          if (!options.checkVin) {
+            respond(response, 503, { code: "vin_not_enabled", error: VIN_NOT_ENABLED });
+            return;
+          }
+          const controller = new AbortController();
+          const onClose = () => controller.abort();
+          response.once("close", onClose);
+          if (response.destroyed) controller.abort();
+          try {
+            const result = await options.checkVin(vin, controller.signal);
+            if (!response.destroyed) respond(response, 200, result);
+          } catch {
+            if (!response.destroyed) {
+              options.onError?.(new Error("VIN API request failed"));
+              respond(response, 503, {
+                code: "vin_unavailable",
+                error:
+                  "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите позже.",
+              });
+            }
+          } finally {
+            response.off("close", onClose);
+          }
+          return;
+        }
         if (request.method !== "GET") {
           response.setHeader("Allow", "GET");
           throw new RequestError(405, "Карточка доступна только для чтения.");
@@ -169,7 +214,9 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         respond(response, 200, carView(listing, profile.currency));
       })().catch((error: unknown) => {
         if (response.destroyed || response.headersSent) return;
-        if (error instanceof RequestError)
+        if (error instanceof VinRequestError)
+          respond(response, error.status, { code: error.code, error: error.message });
+        else if (error instanceof RequestError)
           respond(response, error.status, { error: error.message });
         else {
           options.onError?.(error);

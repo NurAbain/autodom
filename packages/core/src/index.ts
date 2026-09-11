@@ -7,3 +7,4 @@ export * from "./rates.js";
 export * from "./registry.js";
 export * from "./source-catalog.js";
 export * from "./transport.js";
+export * from "./vin.js";

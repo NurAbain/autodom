@@ -27,5 +27,7 @@ export async function fetchSourcePage(
 }
 
 export { DETAIL_DELAY_SECONDS } from "./bidcars.js";
+export { checkCar365, parseCar365Record } from "./car365.js";
+export { checkCarHistory, parseCarHistoryAvailability } from "./carhistory.js";
 export type { ProxyTransportOptions } from "./http.js";
 export { ProxyTransport, retryAfterSeconds } from "./http.js";

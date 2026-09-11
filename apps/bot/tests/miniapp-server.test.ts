@@ -4,6 +4,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeListing, makeProfile } from "@autodom/core";
+import type { VinCheckResult, VinLookup } from "@autodom/core/vin";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMiniAppServer } from "../src/miniapp-server.js";
 
@@ -32,6 +33,22 @@ const listing = makeListing({
   availability: "В наличии",
   vin: "JTDBR32E720000001",
 });
+const vinResult: VinCheckResult = {
+  vin: "KMHDU41DBAU123456",
+  checked_at: 1_789_000_000,
+  carhistory: {
+    status: "available",
+    source_url: "https://www.carhistory.or.kr/",
+    checked_at: 1_789_000_000,
+  },
+  car365: {
+    status: "unavailable",
+    source_url: "https://www.car365.go.kr/",
+    checked_at: 1_789_000_000,
+    data: null,
+  },
+};
+const checkVin = vi.fn<VinLookup>(async () => vinResult);
 
 function authorization(userId = 42): string {
   const params = new URLSearchParams({
@@ -63,6 +80,7 @@ beforeAll(async () => {
     host: "127.0.0.1",
     port: 0,
     assetsDirectory: directory,
+    checkVin,
     ready: async () => {
       if (readinessError) throw readinessError;
       return databaseReady;
@@ -165,6 +183,7 @@ it("has no catalog or mutation endpoints and rejects ambiguous car IDs", async (
   ).toBe(405);
   for (const path of [
     "/api/car",
+    "/api/vin",
     "/miniapp/api/cars",
     "/miniapp/api/profile",
     "/miniapp/api/session",
@@ -235,4 +254,139 @@ it("returns a retryable service error without disclosing internal storage failur
   });
   expect(response.status).toBe(503);
   expect(await response.text()).not.toContain(storageError.message);
+});
+
+it("checks VIN without a buyer profile and preserves partial provider failures", async () => {
+  const response = await fetch(`${base}/miniapp/api/vin`, {
+    method: "POST",
+    headers: {
+      Authorization: authorization(44),
+      Origin: PUBLIC_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ vin: ` ${vinResult.vin.toLowerCase()} ` }),
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual(vinResult);
+  expect(response.headers.get("cache-control")).toBe("no-store");
+});
+
+it("never sends unauthorized, ambiguous or invalid VIN requests to the API", async () => {
+  checkVin.mockClear();
+  const valid = JSON.stringify({ vin: vinResult.vin });
+  for (const [headers, body, expected] of [
+    [{}, valid, 401],
+    [{ Authorization: authorization(), Origin: "https://other.example" }, valid, 403],
+    [{ Authorization: authorization(), "Sec-Fetch-Site": "cross-site" }, valid, 403],
+    [
+      { Authorization: authorization() },
+      '{"vin":"KMHDU41DBAU123456","vin":"JTDBR32E720000001"}',
+      400,
+    ],
+    [
+      { Authorization: authorization() },
+      '{"vin":"KMHDU41DBAU123456","v\\u0069n":"JTDBR32E720000001"}',
+      400,
+    ],
+    [{ Authorization: authorization() }, '{"vin":42}', 400],
+    [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU12345I"}', 400],
+    [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU123456","extra":true}', 400],
+    [{ Authorization: authorization() }, `{"vin":"${"A".repeat(2048)}"}`, 413],
+    [{ Authorization: authorization(), "Content-Type": "text/plain" }, valid, 415],
+  ] as const) {
+    const response = await fetch(`${base}/miniapp/api/vin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body,
+    });
+    expect(response.status).toBe(expected);
+  }
+  const headers = { Authorization: authorization(), "Content-Type": "application/json" };
+  const method = await fetch(`${base}/miniapp/api/vin`, { headers });
+  expect(method.status).toBe(405);
+  expect(method.headers.get("allow")).toBe("POST");
+  expect(
+    (
+      await fetch(`${base}/miniapp/api/vin?vin=${vinResult.vin}`, {
+        method: "POST",
+        headers,
+        body: valid,
+      })
+    ).status,
+  ).toBe(400);
+  expect(checkVin).not.toHaveBeenCalled();
+});
+
+it("reports an unconfigured VIN service without fabricating observations", async () => {
+  const disabled = await startMiniAppServer({
+    token: TOKEN,
+    publicUrl: PUBLIC_URL,
+    host: "127.0.0.1",
+    port: 0,
+    assetsDirectory: directory,
+    ready: async () => true,
+    store: { getProfile: async () => null, getListing: async () => null },
+  });
+  try {
+    const address = disabled.address();
+    if (!address || typeof address === "string") throw new Error("No listening address");
+    const response = await fetch(`http://127.0.0.1:${address.port}/miniapp/api/vin`, {
+      method: "POST",
+      headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+      body: JSON.stringify({ vin: vinResult.vin }),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "vin_not_enabled" });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      disabled.close((error) => (error ? reject(error) : resolve()));
+      disabled.closeAllConnections();
+    });
+  }
+});
+
+it("keeps car access and readiness independent of VIN API transport failure", async () => {
+  checkVin.mockRejectedValueOnce(new Error("token=private-vin-api-secret"));
+  const response = await fetch(`${base}/miniapp/api/vin`, {
+    method: "POST",
+    headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+    body: JSON.stringify({ vin: vinResult.vin }),
+  });
+  expect(response.status).toBe(503);
+  const body = await response.json();
+  expect(body).toMatchObject({ code: "vin_unavailable" });
+  expect(body.error).toMatch(/неизвестен/);
+  expect(body.error).not.toContain("private-vin-api-secret");
+  expect(
+    (
+      await fetch(`${base}/miniapp/api/car?id=${encodeURIComponent(listing.id)}`, {
+        headers: { Authorization: authorization() },
+      })
+    ).status,
+  ).toBe(200);
+  expect((await fetch(`${base}/ready`)).status).toBe(200);
+});
+
+it("cancels the remote lookup when the authenticated client disconnects", async () => {
+  const entered = Promise.withResolvers<void>();
+  const aborted = Promise.withResolvers<void>();
+  checkVin.mockImplementationOnce(async (_vin, signal) => {
+    if (!signal) throw new Error("Missing cancellation signal");
+    signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+    entered.resolve();
+    await aborted.promise;
+    throw signal.reason;
+  });
+  const controller = new AbortController();
+  const response = fetch(`${base}/miniapp/api/vin`, {
+    method: "POST",
+    headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+    body: JSON.stringify({ vin: vinResult.vin }),
+    signal: controller.signal,
+  });
+  const rejection = expect(response).rejects.toMatchObject({ name: "AbortError" });
+  await entered.promise;
+  controller.abort();
+  await rejection;
+  await aborted.promise;
 });

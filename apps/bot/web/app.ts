@@ -1,4 +1,6 @@
+import { normalizeVin, VIN_SOURCE_URLS, type VinCheckResult } from "@autodom/core/vin";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
+import { VIN_CAUTION, VIN_DISCLOSURE, vinSourceText } from "../src/vin-text.js";
 
 type TelegramApp = {
   initData?: string;
@@ -199,6 +201,138 @@ function gallery(car: MiniAppCar): HTMLElement {
   return section;
 }
 
+function vinPanel(car: MiniAppCar): HTMLElement {
+  const panel = element("section", "panel vin-panel");
+  panel.append(
+    element("p", "eyebrow", "История автомобиля"),
+    element("h2", "", "Проверка корейского VIN"),
+    element(
+      "p",
+      car.vin ? "vin" : "muted",
+      car.vin
+        ? `VIN из объявления: ${car.vin}`
+        : "Источник не указал VIN или номер кузова. Введите VIN с автомобиля или документов.",
+    ),
+    element("p", "footnote", VIN_DISCLOSURE),
+    element(
+      "p",
+      "footnote",
+      "Введённый вручную VIN не подтверждён как VIN этого объявления. Даже номер от источника нужно сверить с автомобилем и документами.",
+    ),
+  );
+  const form = element("form", "vin-form");
+  const label = element("label", "", "VIN — 17 латинских букв и цифр, без I, O, Q");
+  label.htmlFor = "vin-input";
+  const input = element("input", "vin-input");
+  input.id = "vin-input";
+  input.name = "vin";
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.maxLength = 64;
+  input.required = true;
+  input.setAttribute("autocapitalize", "characters");
+  input.value = car.vin ?? "";
+  const submit = element("button", "button", "Проверить VIN");
+  submit.type = "submit";
+  const results = element("div", "vin-results");
+  results.setAttribute("role", "status");
+  results.setAttribute("aria-live", "polite");
+  input.addEventListener("input", () => results.replaceChildren());
+  form.append(label, input, submit);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!submit.disabled) void lookup();
+  });
+  async function lookup(): Promise<void> {
+    const vin = normalizeVin(input.value);
+    if (!vin) {
+      results.replaceChildren(
+        element(
+          "p",
+          "",
+          "VIN должен содержать 17 латинских букв и цифр, без I, O, Q. Короткий номер кузова не подходит.",
+        ),
+      );
+      input.focus();
+      return;
+    }
+    if (!telegram?.initData) {
+      results.replaceChildren(
+        element("p", "", "Откройте карточку заново из личного чата в Telegram."),
+      );
+      return;
+    }
+    input.value = vin;
+    input.disabled = true;
+    submit.disabled = true;
+    submit.textContent = "Проверяем…";
+    results.replaceChildren(element("p", "", `Проверяем VIN ${vin} у подключённых провайдеров…`));
+    const controller = new AbortController();
+    const onHide = () => controller.abort();
+    window.addEventListener("pagehide", onHide, { once: true });
+    try {
+      const response = await fetch("/miniapp/api/vin", {
+        method: "POST",
+        headers: { Authorization: `tma ${telegram.initData}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ vin }),
+        cache: "no-store",
+        credentials: "omit",
+        redirect: "error",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        let message = "Проверка временно недоступна. Результат неизвестен; повторите позже.";
+        try {
+          const error: unknown = await response.json();
+          if (
+            error &&
+            typeof error === "object" &&
+            "error" in error &&
+            typeof error.error === "string"
+          )
+            message = error.error;
+        } catch {
+          // An upstream proxy may return a non-JSON error.
+        }
+        results.replaceChildren(element("p", "", message));
+        return;
+      }
+      const result = (await response.json()) as VinCheckResult;
+      if (result.vin !== vin) throw new Error("VIN result mismatch");
+      results.replaceChildren(element("p", "vin", `Результат для VIN ${result.vin}`));
+      for (const provider of ["carhistory", "car365"] as const) {
+        const section = element("section", "vin-source");
+        section.dataset.status = result[provider].status;
+        section.append(
+          element("p", "vin-observation", vinSourceText(provider, result)),
+          sourceLink(
+            VIN_SOURCE_URLS[provider],
+            provider === "carhistory" ? "Источник: CarHistory" : "Источник: Car365",
+          ),
+        );
+        results.append(section);
+      }
+    } catch {
+      results.replaceChildren(
+        element(
+          "p",
+          "",
+          "Не удалось завершить проверку VIN. Результат неизвестен — это не отсутствие записей. Попробуйте позже.",
+        ),
+      );
+    } finally {
+      window.removeEventListener("pagehide", onHide);
+      input.disabled = false;
+      submit.disabled = false;
+      submit.textContent = "Проверить VIN";
+    }
+  }
+  panel.append(form, results, element("p", "footnote", VIN_CAUTION));
+  return panel;
+}
+
 function showCar(car: MiniAppCar): void {
   const main = shell();
   const heading = element("section", "car-heading");
@@ -222,25 +356,7 @@ function showCar(car: MiniAppCar): void {
     facts.append(fact);
   }
   main.append(facts);
-  const vin = element("section", "panel vin-panel");
-  vin.append(
-    element("p", "eyebrow", "История автомобиля"),
-    element("h2", "", "VIN / номер кузова"),
-  );
-  vin.append(
-    element("p", car.vin ? "vin" : "muted", car.vin ?? "Источник не указал VIN или номер кузова."),
-    element(
-      "p",
-      "",
-      "Провайдер проверки VIN не подключён. Проверенного отчёта об истории автомобиля нет.",
-    ),
-    element(
-      "p",
-      "footnote",
-      "Наличие номера в объявлении не подтверждает его подлинность, отсутствие ДТП, ограничений или залога. Сверьте номер с автомобилем и документами перед покупкой.",
-    ),
-  );
-  main.append(vin);
+  main.append(vinPanel(car));
   const details = element("section", "panel");
   details.append(element("h2", "", "Сведения из объявления"));
   const text = element("div", "details");

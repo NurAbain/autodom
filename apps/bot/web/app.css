@@ -58,6 +58,13 @@ p { line-height: 1.6; }
 .panel { padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); margin-bottom: 20px; }
 .vin-panel { border-top: 4px solid var(--accent); }
 .vin { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 19px; font-weight: 650; letter-spacing: 0.05em; overflow-wrap: anywhere; user-select: all; }
+.vin-form { display: grid; gap: 12px; margin: 20px 0; }
+.vin-form label { font-size: 14px; line-height: 1.5; }
+.vin-input { width: 100%; min-width: 0; min-height: 46px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: inherit; font: 16px ui-monospace, "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }
+.vin-input:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.vin-results { overflow-wrap: anywhere; }
+.vin-source { padding: 16px 0; border-top: 1px solid var(--line); }
+.vin-observation { white-space: pre-wrap; margin-bottom: 8px; }
 .details { white-space: pre-wrap; line-height: 1.7; font-size: 15px; overflow-wrap: anywhere; }
 .details pre { white-space: pre-wrap; }
 .details blockquote { margin: 12px 0; padding-left: 16px; border-left: 3px solid var(--line); }

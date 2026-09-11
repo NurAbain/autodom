@@ -1,4 +1,5 @@
 import { type Listing, makeListing, matches, type Profile } from "@autodom/core";
+import type { VinLookup } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -593,8 +594,10 @@ describe("grammY transport boundaries", () => {
     can_connect_to_business: false,
     has_main_web_app: false,
   };
-  function telegram() {
-    const bot = createTelegramBot(store as unknown as Store, "100:test-token");
+  function telegram(checkVin?: VinLookup) {
+    const bot = createTelegramBot(store as unknown as Store, "100:test-token", {
+      ...(checkVin ? { checkVin } : {}),
+    });
     const calls: { method: string; payload: Record<string, unknown> }[] = [];
     bot.api.config.use(async (_previous, method, payload) => {
       calls.push({ method, payload: payload as unknown as Record<string, unknown> });
@@ -608,6 +611,110 @@ describe("grammY transport boundaries", () => {
     });
     return { bot, calls };
   }
+  it("runs only explicit private VIN commands without changing the buyer draft or requiring a profile", async () => {
+    const checkVin = vi.fn<VinLookup>(async (vin) => ({
+      vin,
+      checked_at: 1_789_000_000,
+      carhistory: {
+        status: "not_found",
+        source_url: "https://www.carhistory.or.kr/",
+        checked_at: 1_789_000_000,
+      },
+      car365: {
+        status: "disabled",
+        source_url: "https://www.car365.go.kr/",
+        checked_at: null,
+        data: null,
+      },
+    }));
+    const { bot, calls } = telegram(checkVin);
+    await bot.init();
+    await begin(conversation);
+    const draft = await store.getDraft(1);
+    const message = {
+      message_id: 1,
+      date: 1,
+      from: { id: 1, is_bot: false, first_name: "Buyer" },
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    for (const text of ["/vin", "/vin invalid", "/vin@another_bot KMHDU41DBAU123456"]) {
+      await bot.handleUpdate({ update_id: 1, message: { ...message, text } });
+    }
+    await bot.handleUpdate({
+      update_id: 2,
+      message: {
+        ...message,
+        chat: { id: -100, type: "group", title: "Group" },
+        text: "/vin KMHDU41DBAU123456",
+      },
+    });
+    await bot.handleUpdate({
+      update_id: 3,
+      message: { ...message, chat: { ...message.chat, id: 2 }, text: "/vin KMHDU41DBAU123456" },
+    });
+    expect(checkVin).not.toHaveBeenCalled();
+    await bot.handleUpdate({
+      update_id: 4,
+      message: { ...message, text: "/vin@autodom_test_bot kmhdu41dbau123456" },
+    });
+    expect(checkVin).toHaveBeenCalledExactlyOnceWith("KMHDU41DBAU123456");
+    expect(await store.getProfile(1)).toBeNull();
+    expect(await store.getDraft(1)).toEqual(draft);
+    const text = String(calls.at(-1)?.payload.text);
+    expect(text).toMatch(/CarHistory[\s\S]*не подтверждена/);
+    expect(text).toMatch(/Car365[\s\S]*отключён/);
+    await bot.handleUpdate({ update_id: 5, message: { ...message, text: "/help" } });
+    expect(String(calls.at(-1)?.payload.text)).toContain("/search");
+    expect(checkVin).toHaveBeenCalledTimes(1);
+  });
+  it("does not infer a check from buyer text and explains an unconfigured explicit command", async () => {
+    const { bot, calls } = telegram();
+    await bot.init();
+    const message = {
+      message_id: 1,
+      date: 1,
+      from: { id: 1, is_bot: false, first_name: "Buyer" },
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    await bot.handleUpdate({
+      update_id: 1,
+      message: { ...message, text: "/vin KMHDU41DBAU123456" },
+    });
+    expect(String(calls.at(-1)?.payload.text)).toMatch(/не подключена/);
+    expect(await store.getDraft(1)).toBeNull();
+    const checkVin = vi.fn<VinLookup>();
+    const enabled = telegram(checkVin);
+    await enabled.bot.init();
+    await enabled.bot.handleUpdate({
+      update_id: 2,
+      message: { ...message, text: "KMHDU41DBAU123456" },
+    });
+    expect(checkVin).not.toHaveBeenCalled();
+  });
+  it("reports remote failure as unknown without exposing secrets or disturbing search", async () => {
+    const { bot, calls } = telegram(async () => {
+      throw new Error("private-api-token");
+    });
+    await bot.init();
+    await begin(conversation);
+    const draft = await store.getDraft(1);
+    const message = {
+      message_id: 1,
+      date: 1,
+      from: { id: 1, is_bot: false, first_name: "Buyer" },
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    await bot.handleUpdate({
+      update_id: 1,
+      message: { ...message, text: "/vin KMHDU41DBAU123456" },
+    });
+    const text = String(calls.at(-1)?.payload.text);
+    expect(text).toMatch(/неизвестен/);
+    expect(text).not.toContain("private-api-token");
+    expect(await store.getDraft(1)).toEqual(draft);
+    await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
+    expect(String(calls.at(-1)?.payload.text)).toContain("/search");
+  });
   it("refuses an existing webhook without replacing it or registering commands", async () => {
     const { bot, calls } = telegram();
     bot.api.config.use(async (previous, method, payload, signal) =>

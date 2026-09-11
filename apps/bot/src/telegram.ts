@@ -1,8 +1,10 @@
+import { normalizeVin, type VinLookup } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
 import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
+import { VIN_HELP, VIN_NOT_ENABLED, vinResultText } from "./vin-text.js";
 
 function replyKeyboard(buttons: Buttons, detailUrl?: string): InlineKeyboard {
   const keyboard = new InlineKeyboard();
@@ -132,7 +134,7 @@ export async function sendReplies(
 export function createTelegramBot(
   store: Store,
   token: string,
-  options: { apiRoot?: string; miniAppUrl?: string } = {},
+  options: { apiRoot?: string; miniAppUrl?: string; checkVin?: VinLookup } = {},
 ): Bot {
   const bot = new Bot(token, {
     client: { timeoutSeconds: 40, ...(options.apiRoot ? { apiRoot: options.apiRoot } : {}) },
@@ -141,6 +143,32 @@ export function createTelegramBot(
   bot.use(sequentialize((context) => (context.from ? `autodom:user:${context.from.id}` : [])));
   bot.on("message", async (context) => {
     if (context.chat.type !== "private" || !context.from || context.from.is_bot) return;
+    const vinCommand = /^\/vin(?:@([a-z0-9_]+))?(?:\s+([\s\S]*))?$/iu.exec(
+      context.message.text ?? "",
+    );
+    if (vinCommand) {
+      if (context.chat.id !== context.from.id) return;
+      if (vinCommand[1] && vinCommand[1].toLowerCase() !== bot.botInfo.username.toLowerCase())
+        return;
+      const vin = normalizeVin(vinCommand[2] ?? "");
+      if (!vin) {
+        await context.reply(VIN_HELP);
+        return;
+      }
+      if (!options.checkVin) {
+        await context.reply(VIN_NOT_ENABLED);
+        return;
+      }
+      let text: string;
+      try {
+        text = vinResultText(await options.checkVin(vin));
+      } catch {
+        text =
+          "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
+      }
+      await context.reply(text, { link_preview_options: { is_disabled: true } });
+      return;
+    }
     await store.withLock(`autodom:user:${context.from.id}`, async () => {
       const replies = await conversation.handle(
         context.from!.id,
@@ -195,6 +223,7 @@ export async function configureTelegramBot(bot: Bot, signal: AbortSignal): Promi
         { command: "resume", description: "Включить бесплатный мониторинг" },
         { command: "pause", description: "Приостановить уведомления" },
         { command: "tips", description: "Советы перед покупкой" },
+        { command: "vin", description: "Проверить VIN: CarHistory и Car365, без покупки" },
         { command: "quiet", description: "Тихие часы: /quiet 23:00-08:00 или off" },
         { command: "privacy", description: "Хранение и удаление моих данных" },
         { command: "status", description: "Состояние каталога" },

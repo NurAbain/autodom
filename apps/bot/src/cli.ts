@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadBotSettings, loadToken, miniAppUrl } from "@autodom/core";
+import { createVinApiLookup } from "@autodom/core/vin-client";
 import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
@@ -19,6 +20,7 @@ Usage: pnpm bot [serve|health] [--help]
 AUTODOM_METRICS_PORT defaults to 9901.
 Set AUTODOM_MINI_APP_URL to enable the Mini App in this same bot process.
 AUTODOM_MINI_APP_HOST defaults to 127.0.0.1; AUTODOM_MINI_APP_PORT defaults to 8080.
+Set AUTODOM_VIN_API_URL and AUTODOM_VIN_API_TOKEN to enable remote VIN checks.
 No parser, worker or proxy configuration is loaded by this command.
 Stop the old Telegram poller before cutover; an existing webhook is never replaced.
 `;
@@ -84,6 +86,7 @@ export async function main(
     process.once("SIGTERM", stop);
     const settings = loadBotSettings(env);
     const publicUrl = miniAppUrl(env);
+    const checkVin = createVinApiLookup(env, abort.signal);
     const token = await loadToken(env);
     logger = createLogger({ ...env, AUTODOM_BOT_TOKEN: token });
     if (!abort.signal.aborted) {
@@ -91,6 +94,7 @@ export async function main(
       if (!abort.signal.aborted) {
         const bot = createTelegramBot(store, token, {
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
+          ...(checkVin ? { checkVin } : {}),
         });
         await runBotService(
           store,
@@ -99,6 +103,7 @@ export async function main(
             bot,
             token,
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
+            ...(checkVin ? { checkVin } : {}),
             signal: abort.signal,
           },
           logger,

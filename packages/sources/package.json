@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./vin": {
+      "types": "./src/vin.ts",
+      "default": "./src/vin.ts"
     }
   },
   "dependencies": {

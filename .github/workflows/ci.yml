@@ -76,25 +76,27 @@ jobs:
           AUTODOM_REDIS_PASSWORD: autodom_ci_redis_password
         run: docker compose config --quiet
 
-      - name: Build independent bot and parser images
+      - name: Build independent bot, parser, and VIN images
         timeout-minutes: 15
         run: |
           docker build --file apps/bot/Dockerfile --tag autodom-bot:ci .
           docker build --file apps/worker/Dockerfile --tag autodom-worker:ci .
+          docker build --file apps/vin/Dockerfile --tag autodom-vin:ci .
 
-      - name: Verify both images use their configured non-root user
+      - name: Verify images use their configured non-root user
         run: |
-          for image in autodom-bot:ci autodom-worker:ci; do
+          for image in autodom-bot:ci autodom-worker:ci autodom-vin:ci; do
             docker run --rm --network none --entrypoint node "$image" \
               -e 'if (process.getuid() !== 10001 || process.getgid() !== 10001) { throw new Error("Expected runtime UID/GID 10001"); } console.log("Runtime UID/GID: 10001:10001");'
           done
 
-      - name: Exercise both entrypoints without network
+      - name: Exercise entrypoints without network
         timeout-minutes: 1
         run: |
           docker run --rm --network none autodom-bot:ci --help
           docker run --rm --network none autodom-worker:ci --help
           docker run --rm --network none autodom-worker:ci sources
+          docker run --rm --network none autodom-vin:ci --help
 
       - name: Migrate isolated PostgreSQL without Redis or a bot token
         timeout-minutes: 2
