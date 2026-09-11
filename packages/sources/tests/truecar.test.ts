@@ -85,11 +85,15 @@ function document(
     extraState = {},
     query,
     extraGraph = [],
+    linkedInventory,
+    rendered = "",
   }: {
     extraRoot?: RecordValue;
     extraState?: RecordValue;
     query?: RecordValue;
     extraGraph?: RecordValue[];
+    linkedInventory?: RecordValue[];
+    rendered?: string;
   } = {},
 ): string {
   const [args, connection, row, linked] = parts;
@@ -118,13 +122,15 @@ function document(
       {
         "@type": "CollectionPage",
         mainEntity: {
-          itemListElement: connection.edges.length ? [{ item: linked }] : [],
+          itemListElement: (linkedInventory ?? (connection.edges.length ? [linked] : [])).map(
+            (item) => ({ item }),
+          ),
         },
       },
       ...extraGraph,
     ],
   };
-  return `<html><script type="application/json" id="__NEXT_DATA__">${JSON.stringify(data)}</script><script type="application/ld+json">${JSON.stringify(ld)}</script></html>`;
+  return `<html>${rendered}<script type="application/json" id="__NEXT_DATA__">${JSON.stringify(data)}</script><script type="application/ld+json">${JSON.stringify(ld)}</script></html>`;
 }
 
 function capturedTransport(html: string, requests: unknown[] = []): DocumentTransport {
@@ -180,6 +186,77 @@ describe("TrueCar connected retail inventory", () => {
       transmission: "Automatic",
       body_type: "SEDAN",
     });
+  });
+
+  it("retains connected inventory omitted from SEO when its rendered asking price agrees", () => {
+    const parts = fixture({ total: 2, size: 2 });
+    const second = structuredClone(parts[2]);
+    second.vehicle.vin = OTHER_VIN;
+    second.vehicle.details.vin = OTHER_VIN;
+    parts[1].edges.push({ cursor: cursor(2), node: { __ref: "second" } });
+    parts[1].pageInfo = { endCursor: cursor(2), hasNextPage: false };
+    const rendered = `<div data-test="usedListing" data-test-item="${OTHER_VIN}">
+      <div data-test="vehicleCardPricing"><div>Advertised price</div><div data-test="vehicleCardPricingPrice">$12,345.67</div></div>
+      <a data-test="cardLinkCover" href="/used-cars-for-sale/listing/${OTHER_VIN}/2020-toyota-camry/?position=0&amp;sourceType=marketplace&amp;sponsored=true">View details</a>
+    </div>`;
+    const result = parsePage(document(parts, { extraState: { second }, rendered }));
+    expect(result.listings.map((car) => car.id)).toEqual([
+      `truecar:${VIN}`,
+      `truecar:${OTHER_VIN}`,
+    ]);
+    expect([result.total, result.pages]).toEqual([2, 1]);
+    expect(result.listings[1]).toMatchObject({
+      title: "2020 Toyota Camry LE",
+      url: `https://www.truecar.com/used-cars-for-sale/listing/${OTHER_VIN}/`,
+      original_currency: "USD",
+      original_price_minor: 1234567,
+      price_usd_minor: 1234567,
+      mileage: "12001 miles",
+      photo_url: null,
+      photo_urls: [],
+    });
+    const contradictory = structuredClone(parts[3]);
+    contradictory.vehicleIdentificationNumber = OTHER_VIN;
+    contradictory.offers.sku = OTHER_VIN;
+    contradictory.offers.url = `https://www.truecar.com/used-cars-for-sale/listing/${OTHER_VIN}/`;
+    contradictory.offers.price = "12345.68";
+    expect(() =>
+      parsePage(
+        document(parts, {
+          extraState: { second },
+          rendered,
+          linkedInventory: [parts[3], contradictory],
+        }),
+      ),
+    ).toThrow(SourceError);
+    contradictory.offers.price = "12345.67";
+    contradictory.vehicleIdentificationNumber = "1ABCDEFGH23456781";
+    expect(() =>
+      parsePage(
+        document(parts, {
+          extraState: { second },
+          rendered,
+          linkedInventory: [parts[3], contradictory],
+        }),
+      ),
+    ).toThrow(SourceError);
+  });
+
+  it.each([
+    ["asking price", "$12,345.68", `/used-cars-for-sale/listing/${VIN}/2020-toyota-camry/`],
+    ["currency", "€12,345.67", `/used-cars-for-sale/listing/${VIN}/2020-toyota-camry/`],
+    ["VIN link", "$12,345.67", `/used-cars-for-sale/listing/${OTHER_VIN}/2020-toyota-camry/`],
+    ["external link", "$12,345.67", `https://evil.test/used-cars-for-sale/listing/${VIN}/`],
+  ])("rejects absent SEO with contradictory rendered %s", (_label, price, href) => {
+    const rendered = `<div data-test="usedListing" data-test-item="${VIN}">
+      <div data-test="vehicleCardPricing">Advertised price
+        <div data-test="vehicleCardPricingPrice">${price}</div>
+      </div>
+      <a data-test="cardLinkCover" href="${href}">View details</a>
+    </div>`;
+    expect(() => parsePage(document(fixture(), { linkedInventory: [], rendered }))).toThrow(
+      SourceError,
+    );
   });
 
   it("does not present generic model artwork as the advertised car photograph", () => {
@@ -453,9 +530,6 @@ describe("TrueCar connected retail inventory", () => {
     ]) {
       expect(() => parsePage(html)).toThrow(SourceError);
     }
-    const parts = fixture();
-    parts[3].vehicleIdentificationNumber = OTHER_VIN;
-    expect(() => parsePage(document(parts))).toThrow(SourceError);
     expect(() =>
       parsePage(
         document(fixture(), {

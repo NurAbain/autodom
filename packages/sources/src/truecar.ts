@@ -7,7 +7,7 @@ import {
   SourceError,
   type SourcePage,
 } from "@autodom/core";
-import { load } from "cheerio";
+import { type CheerioAPI, load } from "cheerio";
 import { Decimal } from "decimal.js";
 
 export const SEARCH_URL = "https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/";
@@ -149,14 +149,65 @@ function history(row: RecordValue, vehicle: RecordValue): string {
   return facts.join("; ");
 }
 
-function listing(row: RecordValue, linked: RecordValue, filters: RecordValue): Listing {
+function corroborateRenderedPurchase(
+  $: CheerioAPI,
+  vin: string,
+  year: number,
+  make: RecordValue,
+  model: RecordValue,
+  price: number,
+): void {
+  const card = $(`[data-test="usedListing"][data-test-item="${vin}"]`);
+  requireValue(card.length === 1, "missing or ambiguous rendered vehicle");
+  const links = card.find('a[data-test="cardLinkCover"]');
+  requireValue(links.length === 1, "missing or ambiguous rendered vehicle link");
+  const href = text(links.attr("href"));
+  const target = sourceUrl(
+    href.startsWith("/") ? `https://www.truecar.com${href}` : href,
+    "www.truecar.com",
+  );
+  const path = `/used-cars-for-sale/listing/${vin}/`;
+  requireValue(
+    target.path === path ||
+      target.path === `${path}${year}-${text(make.slug)}-${text(model.slug)}/`,
+    "noncanonical rendered vehicle URL",
+  );
+  const pricing = card.find('[data-test="vehicleCardPricing"]');
+  const amounts = pricing.find('[data-test="vehicleCardPricingPrice"]');
+  requireValue(
+    pricing.length === 1 &&
+      /^Advertised price\s*\$/.test(pricing.text().trim()) &&
+      amounts.length === 1,
+    "missing rendered asking price",
+  );
+  // TrueCar's US retail cards display USD with "$"; do not accept monthly/foreign prices.
+  const amount = amounts.text().trim();
+  requireValue(
+    /^\$(?:[0-9]+|[1-9][0-9]{0,2}(?:,[0-9]{3})+)(?:\.[0-9]{2})?$/.test(amount),
+    "invalid rendered USD asking price",
+  );
+  requireValue(
+    money(amount.slice(1).replaceAll(",", "")) === price,
+    "inconsistent rendered asking price",
+  );
+}
+
+function listing(
+  row: RecordValue,
+  linked: RecordValue | undefined,
+  filters: RecordValue,
+  $: CheerioAPI,
+): Listing {
   requireValue(row.__typename === "ConsumerSummaryListing", "unexpected listing entity");
   const vehicle = object(row.vehicle);
   const vin = text(vehicle.vin);
   requireValue(VIN.test(vin), "invalid VIN");
   requireValue(
     vehicle.condition === "USED" &&
-      ["UsedCondition", "https://schema.org/UsedCondition"].includes(String(linked.itemCondition)),
+      (linked === undefined ||
+        ["UsedCondition", "https://schema.org/UsedCondition"].includes(
+          String(linked.itemCondition),
+        )),
     "not a used retail listing",
   );
   const pricing = object(row.pricing);
@@ -166,29 +217,28 @@ function listing(row: RecordValue, linked: RecordValue, filters: RecordValue): L
     "unsupported price qualification",
   );
   const price = money(pricing.listPrice);
-  const offer = object(linked.offers);
-  requireValue(
-    offer["@type"] === "Offer" &&
-      offer.priceCurrency === "USD" &&
-      offer.sku === vin &&
-      money(offer.price) === price,
-    "inconsistent USD asking price",
-  );
-  requireValue(
-    !Object.hasOwn(offer, "leaseLength") && !Object.hasOwn(offer, "priceSpecification"),
-    "unsupported offer price type",
-  );
-  requireValue(
-    offer.businessFunction == null ||
-      offer.businessFunction === "Sell" ||
-      offer.businessFunction === "http://purl.org/goodrelations/v1#Sell",
-    "offer is not a retail purchase",
-  );
-  const url = sourceUrl(offer.url, "www.truecar.com").url;
-  requireValue(
-    url === `https://www.truecar.com/used-cars-for-sale/listing/${vin}/`,
-    "noncanonical vehicle URL",
-  );
+  const url = `https://www.truecar.com/used-cars-for-sale/listing/${vin}/`;
+  if (linked !== undefined) {
+    const offer = object(linked.offers);
+    requireValue(
+      offer["@type"] === "Offer" &&
+        offer.priceCurrency === "USD" &&
+        offer.sku === vin &&
+        money(offer.price) === price,
+      "inconsistent USD asking price",
+    );
+    requireValue(
+      !Object.hasOwn(offer, "leaseLength") && !Object.hasOwn(offer, "priceSpecification"),
+      "unsupported offer price type",
+    );
+    requireValue(
+      offer.businessFunction == null ||
+        offer.businessFunction === "Sell" ||
+        offer.businessFunction === "http://purl.org/goodrelations/v1#Sell",
+      "offer is not a retail purchase",
+    );
+    requireValue(sourceUrl(offer.url, "www.truecar.com").url === url, "noncanonical vehicle URL");
+  }
   const make = object(vehicle.make);
   const model = object(vehicle.model);
   const selected = filters.makeModelTrim === undefined ? [] : array(filters.makeModelTrim);
@@ -204,32 +254,44 @@ function listing(row: RecordValue, linked: RecordValue, filters: RecordValue): L
     "listing outside requested make/model",
   );
   const year = integer(vehicle.year, 1886);
-  requireValue(year < 2200 && String(year) === linked.vehicleModelDate, "inconsistent model year");
+  requireValue(
+    year < 2200 && (linked === undefined || String(year) === linked.vehicleModelDate),
+    "inconsistent model year",
+  );
   const trim = text(object(vehicle.style).trimName);
   requireValue(
-    object(linked.brand).name === make.name &&
-      linked.model === model.name &&
-      linked.vehicleConfiguration === trim,
+    linked === undefined ||
+      (object(linked.brand).name === make.name &&
+        linked.model === model.name &&
+        linked.vehicleConfiguration === trim),
     "inconsistent vehicle identity",
   );
   const miles = integer(vehicle.mileage);
   const details = object(vehicle.details);
-  const odometer = object(linked.mileageFromOdometer);
   requireValue(
     details.vin === vin &&
-      (details.mileage instanceof Decimal
-        ? details.mileage.eq(miles)
-        : details.mileage === miles) &&
-      (odometer.value instanceof Decimal ? odometer.value.eq(miles) : odometer.value === miles),
+      (details.mileage instanceof Decimal ? details.mileage.eq(miles) : details.mileage === miles),
     "inconsistent mileage or VIN",
   );
-  requireValue(
-    (odometer.unitCode == null || odometer.unitCode === "SMI") &&
-      (odometer.unitText == null || odometer.unitText === "mi" || odometer.unitText === "miles"),
-    "unsupported odometer units",
-  );
+  if (linked !== undefined) {
+    const odometer = object(linked.mileageFromOdometer);
+    requireValue(
+      odometer.value instanceof Decimal ? odometer.value.eq(miles) : odometer.value === miles,
+      "inconsistent mileage or VIN",
+    );
+    requireValue(
+      (odometer.unitCode == null || odometer.unitCode === "SMI") &&
+        (odometer.unitText == null || odometer.unitText === "mi" || odometer.unitText === "miles"),
+      "unsupported odometer units",
+    );
+  } else {
+    // Sponsored rendering can omit SEO metadata for a vehicle still in the requested connection.
+    requireValue(pricing.discountLabel === "UPFRONT_PRICE", "unsupported price qualification");
+    corroborateRenderedPurchase($, vin, year, make, model, price);
+  }
   const photos: string[] = [];
-  for (const image of Array.isArray(linked.image) ? linked.image : [linked.image]) {
+  const images = linked?.image;
+  for (const image of Array.isArray(images) ? images : [images]) {
     // Static model artwork is not a photograph of this advertised vehicle.
     if (
       typeof image !== "string" ||
@@ -394,7 +456,10 @@ function parseScopedPage(
             const vehicle = object(object(element).item);
             requireValue(vehicle["@type"] === "Vehicle", "invalid JSON-LD inventory");
             const vin = vehicle.vehicleIdentificationNumber;
-            requireValue(typeof vin === "string", "invalid JSON-LD VIN");
+            requireValue(
+              typeof vin === "string" && VIN.test(vin) && object(vehicle.offers).sku === vin,
+              "inconsistent JSON-LD VIN",
+            );
             requireValue(!linked.has(vin), "duplicate JSON-LD vehicle");
             linked.set(vin, vehicle);
           }
@@ -411,7 +476,7 @@ function parseScopedPage(
       const vin = object(row.vehicle).vin;
       requireValue(!seen.has(vin), "duplicate vehicle within search page");
       seen.add(vin);
-      listings.push(listing(row, object(linked.get(vin)), filters));
+      listings.push(listing(row, linked.get(vin), filters, $));
     }
     return makeSourcePage({
       listings,

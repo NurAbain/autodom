@@ -1,3 +1,4 @@
+import { load } from "cheerio";
 import { Decimal } from "decimal.js";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import type { Listing } from "./models.js";
@@ -11,6 +12,10 @@ export interface MetadataStore {
 const FEEDS: Readonly<Record<string, readonly [string, number]>> = {
   USD: ["https://www.nbkr.kg/XML/daily.xml", 4],
   KRW: ["https://www.nbkr.kg/XML/weekly.xml", 7],
+};
+const ARCHIVES: Readonly<Record<string, readonly [string, string]>> = {
+  USD: ["15", "Доллар США"],
+  KRW: ["25", "Вона Республики Корея/южно-корейский вон"],
 };
 const LAST_REFRESH = "nbkr:last_refresh";
 const ExactDecimal = Decimal.clone({ precision: 50, rounding: Decimal.ROUND_HALF_UP });
@@ -58,6 +63,8 @@ export class Quote {
   }
 }
 
+class PrepublishedQuote extends Error {}
+
 function decimal(value: unknown): Decimal {
   if (typeof value !== "string" || value.length > 100) throw new Error("Invalid NBKR amount");
   const text = value.trim().replace(",", ".");
@@ -89,6 +96,7 @@ function quote(
   const unit = decimal(nominal);
   if (!unit.isInteger()) throw new Error("Invalid NBKR nominal");
   const result = new Quote(currency, date, unit, decimal(value), days);
+  if (result.starts_at > now) throw new PrepublishedQuote("NBKR quote is not effective yet");
   if (!result.validAt(now)) throw new Error("Future or expired NBKR quote");
   return result;
 }
@@ -126,6 +134,67 @@ export function parseQuote(text: string, currency: string, now = Date.now() / 10
     return quote(currency, day, entry.Nominal, entry.Value, feed[1], now);
   } catch (cause) {
     throw new SourceError(`Invalid or unavailable NBKR ${currency} quote`, { cause });
+  }
+}
+
+function archiveUrl(currency: string, now: number): string {
+  const url = new URL("https://www.nbkr.kg/index1.jsp");
+  url.searchParams.set("item", "1562");
+  url.searchParams.set("lang", "RUS");
+  url.searchParams.set("valuta_id", ARCHIVES[currency]![0]);
+  // The official archive dates are effective dates in Bishkek, not publication dates.
+  // Request only dates that can still pass the existing freshness limit.
+  for (const [prefix, age] of [
+    ["beg", FEEDS[currency]![1] - 1],
+    ["end", 0],
+  ] as const) {
+    const date = new Date((now + 6 * 3600 - age * 86400) * 1000);
+    url.searchParams.set(`${prefix}_day`, String(date.getUTCDate()).padStart(2, "0"));
+    url.searchParams.set(`${prefix}_month`, String(date.getUTCMonth() + 1).padStart(2, "0"));
+    url.searchParams.set(`${prefix}_year`, String(date.getUTCFullYear()));
+  }
+  return url.href;
+}
+
+function parseArchive(text: string, currency: string, now: number): Quote {
+  try {
+    const [id, name] = ARCHIVES[currency]!;
+    const $ = load(text);
+    const selected = $('select[name="valuta_id"] > option[selected]');
+    const heading = $("center > span[align='center']");
+    const nominal = new RegExp(`^(\\d+) ${name}$`, "u").exec(selected.text().trim())?.[1];
+    if (
+      selected.length !== 1 ||
+      selected.attr("value") !== id ||
+      !nominal ||
+      heading.length !== 1 ||
+      heading.text().trim() !== selected.text().trim()
+    )
+      throw new Error("Unverified NBKR archive currency");
+    const rows = heading.nextAll("table").first().find("tr");
+    const headers = rows.first().children("td");
+    if (
+      headers.length !== 2 ||
+      headers.eq(0).text().replace(/\s+/gu, "") !== "Дата(курсыдействуютсуказанныхдат)" ||
+      headers.eq(1).text().replace(/\s+/gu, "") !== "Курс(ккыргызскомусому)"
+    )
+      throw new Error("Unverified NBKR archive dates");
+    let newest: Quote | undefined;
+    const dates = new Set<string>();
+    for (const row of rows.slice(1)) {
+      const cells = $(row).children("td");
+      const date = /^(\d{2})\.(\d{2})\.(\d{4})$/u.exec(cells.eq(0).text().trim());
+      if (cells.length !== 2 || !date) throw new Error("Invalid NBKR archive row");
+      const day = calendarDate(Number(date[3]), Number(date[2]), Number(date[1]));
+      if (dates.has(day)) throw new Error("Duplicated NBKR archive date");
+      dates.add(day);
+      const candidate = quote(currency, day, nominal, cells.eq(1).text(), FEEDS[currency]![1], now);
+      if (!newest || candidate.date > newest.date) newest = candidate;
+    }
+    if (!newest) throw new Error("No effective NBKR archive quote");
+    return newest;
+  } catch (cause) {
+    throw new SourceError(`Invalid or unavailable NBKR ${currency} archive`, { cause });
   }
 }
 
@@ -177,16 +246,34 @@ export class RateBook {
     this.lastRefresh = now;
     await this.store.setMeta(LAST_REFRESH, String(now));
     for (const [currency, feed] of Object.entries(FEEDS)) {
-      let fetched: Quote;
+      let fetched: Quote | null;
       try {
         fetched = await this.transport.fetchDocument(
           feed[0],
-          (text) => parseQuote(text, currency),
+          (text) => {
+            try {
+              return parseQuote(text, currency);
+            } catch (error) {
+              if (error instanceof SourceError && error.cause instanceof PrepublishedQuote)
+                return null;
+              throw error;
+            }
+          },
           {
             source: "nbkr.kg",
             headers: { Accept: "application/xml,text/xml" },
           },
         );
+        if (fetched === null) {
+          if (this.quotes[currency]?.validAt(now)) continue;
+          // NBKR rules §§6,8: published today, effective next calendar day.
+          // https://www.nbkr.kg/contout.jsp?lang=RUS&material=132534
+          fetched = await this.transport.fetchDocument(
+            archiveUrl(currency, now),
+            (text) => parseArchive(text, currency, Date.now() / 1000),
+            { source: "nbkr.kg", headers: { Accept: "text/html" } },
+          );
+        }
       } catch (error) {
         if (error instanceof SourceRateLimited) break;
         if (error instanceof SourceError) continue;

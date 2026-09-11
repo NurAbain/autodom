@@ -42,6 +42,31 @@ export function retryAfterSeconds(value: string | null, now = Date.now() / 1000)
   return Number.isFinite(instant) ? Math.max(60, Math.trunc(instant - now)) : 300;
 }
 
+function nbkrArchiveAllowed(url: URL): boolean {
+  const query = url.searchParams;
+  if (
+    url.pathname !== "/index1.jsp" ||
+    query.size !== 9 ||
+    query.get("item") !== "1562" ||
+    query.get("lang") !== "RUS" ||
+    !["15", "25"].includes(query.get("valuta_id") ?? "")
+  )
+    return false;
+  const begin = `${query.get("beg_year")}-${query.get("beg_month")}-${query.get("beg_day")}`;
+  const end = `${query.get("end_year")}-${query.get("end_month")}-${query.get("end_day")}`;
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(begin) || !/^\d{4}-\d{2}-\d{2}$/u.test(end)) return false;
+  const first = Date.parse(`${begin}T00:00:00Z`);
+  const last = Date.parse(`${end}T00:00:00Z`);
+  return (
+    Number.isFinite(first) &&
+    Number.isFinite(last) &&
+    new Date(first).toISOString().slice(0, 10) === begin &&
+    new Date(last).toISOString().slice(0, 10) === end &&
+    last >= first &&
+    last - first <= 6 * 86400_000
+  );
+}
+
 function requestUrl(raw: string, options: DocumentOptions): URL {
   if (options.source !== "nbkr.kg") requireSourceAccess(options.source);
   const page = options.page ?? 1;
@@ -56,14 +81,15 @@ function requestUrl(raw: string, options: DocumentOptions): URL {
   if (url.origin !== ORIGINS[options.source] || url.username || url.password || url.hash) {
     throw new SourceError("Source request URL is outside its approved origin");
   }
+  for (const [key, value] of Object.entries(options.params ?? {}))
+    url.searchParams.set(key, String(value));
   if (
     options.source === "nbkr.kg" &&
-    !["/XML/daily.xml", "/XML/weekly.xml"].includes(url.pathname)
+    !["/XML/daily.xml", "/XML/weekly.xml"].includes(url.pathname) &&
+    !nbkrArchiveAllowed(url)
   ) {
     throw new SourceError("Unknown NBKR feed");
   }
-  for (const [key, value] of Object.entries(options.params ?? {}))
-    url.searchParams.set(key, String(value));
   return url;
 }
 

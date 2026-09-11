@@ -70,10 +70,9 @@ const UNSCHEDULED =
 const NO_ADAPTER = "Нет подключённого адаптера и проверенной схемы данных.";
 const NO_AGREEMENT =
   "Договор/письменное разрешение на автоматический сбор и повторный показ не зарегистрированы.";
-const PREPARED_ONLY =
-  "Решение владельца от 2026-09-10: подготовить, но не запускать. Нужны согласование доступа и явное включение в AUTODOM_APPROVED_SOURCES.";
 
 // This is the only source inventory. An entry is not an access grant.
+// Owner lifted the preparation-only hold on 2026-09-11; provider permissions remain unconfirmed.
 export const SOURCES: readonly SourceSpec[] = [
   {
     id: "mashina.kg",
@@ -170,7 +169,6 @@ export const SOURCES: readonly SourceSpec[] = [
       ],
       blockers: [
         NO_AGREEMENT,
-        PREPARED_ONLY,
         "Запросить data partnership через price@encar.com, разрешённый интерфейс, поля, фото, квоты и актуальные общие условия.",
       ],
     },
@@ -231,7 +229,6 @@ export const SOURCES: readonly SourceSpec[] = [
       ],
       blockers: [
         NO_AGREEMENT,
-        PREPARED_ONLY,
         "Уточнить через contact@truecar.com: лицензирование pricing information в FAQ не подтверждает доступность inventory API, прав на фото или истории.",
       ],
     },
@@ -296,7 +293,7 @@ export const SOURCES: readonly SourceSpec[] = [
         "§15.2 условий не передаёт лицензию на материалы и базы. Калькулятор не подтверждает стоимость ввоза в Кыргызстан.",
         "Агрегация Copart/IAA не даёт Autodom прямого доступа к их базам.",
       ],
-      blockers: [NO_AGREEMENT, PREPARED_ONLY],
+      blockers: [NO_AGREEMENT],
     },
     cost: {
       status: "unknown",

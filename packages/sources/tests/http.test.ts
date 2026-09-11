@@ -168,6 +168,29 @@ describe("mandatory proxy document transport", () => {
     ).rejects.toThrow("size limit");
   });
 
+  it("allows only bounded official NBKR currency archives", async () => {
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    agent
+      .get("https://www.nbkr.kg")
+      .intercept({ path: /.*/, method: "GET" })
+      .reply(200, "87.4500")
+      .persist();
+    const transport = await transportWith([agent]);
+    const url =
+      "https://www.nbkr.kg/index1.jsp?item=1562&lang=RUS&valuta_id=15&beg_day=08&beg_month=09&beg_year=2026&end_day=11&end_month=09&end_year=2026";
+    expect(await transport.fetchDocument(url, Number, { source: "nbkr.kg" })).toBe(87.45);
+    await expect(
+      transport.fetchDocument(url, Number, { source: "nbkr.kg", params: { item: "1" } }),
+    ).rejects.toBeInstanceOf(SourceError);
+    await expect(
+      transport.fetchDocument(`${url}&redirect=elsewhere`, Number, { source: "nbkr.kg" }),
+    ).rejects.toBeInstanceOf(SourceError);
+    await expect(
+      transport.fetchDocument(url, Number, { source: "nbkr.kg", params: { beg_year: "2025" } }),
+    ).rejects.toBeInstanceOf(SourceError);
+  });
+
   it("requires proxies even for the explicitly allowed NBKR feed", () => {
     expect(() => new ProxyTransport({ routes: [], dataDir: tmpdir() })).toThrow("proxies");
   });

@@ -247,3 +247,90 @@ it("never replaces a newer valid quote with an older feed", async () => {
   await book.refresh();
   expect(book.convert(car("USD", 100)).price_kgs_minor).toBe(8745);
 });
+
+it("uses the effective archive during prepublication, then changes rates at Bishkek midnight", async () => {
+  const boundary = instant("2026-09-12");
+  vi.setSystemTime((boundary - 3600) * 1000);
+  const book = new RateBook(
+    metadata(),
+    transport((url) => {
+      if (url.includes("daily")) return xml("USD", "87,4500", "12.09.2026");
+      if (url.includes("weekly")) return xml("KRW", "0,0651", "12.09.2026");
+      const params = new URL(url).searchParams;
+      const usd = params.get("valuta_id") === "15";
+      const name = usd ? "1 Доллар США" : "1 Вона Республики Корея/южно-корейский вон";
+      return `<center>
+        <form><select name="valuta_id"><option selected value="${usd ? "15" : "25"}">${name}</option></select></form>
+        <span align="center">${name}</span><br>
+        <table><tr><td>Дата<br>(курсы действуют с указанных дат)</td><td>Курс<br>(к кыргызскому сому)</td></tr>
+        <tr><td class="stat-center"><!--date-->${usd ? "11.09.2026" : "05.09.2026"}<!--date--></td>
+        <td class="stat-right"><!--value-->${usd ? "87,4500" : "0,0647"}<!--value-->&nbsp;&nbsp;</td></tr></table>
+      </center>`;
+    }),
+  );
+  await book.refresh();
+  expect(book.convert(car("KRW", 18500000))).toMatchObject({
+    price_kgs_minor: 119695000,
+    price_usd_minor: 1368725,
+    fx_date: "USD:2026-09-11;KRW:2026-09-05",
+    fx_expires_at: boundary,
+  });
+  vi.setSystemTime((boundary - 1) * 1000);
+  await book.refresh();
+  expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBe(119695000);
+  vi.setSystemTime(boundary * 1000);
+  expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBeNull();
+  await book.refresh();
+  expect(book.convert(car("KRW", 18500000))).toMatchObject({
+    price_kgs_minor: 120435000,
+    fx_date: "USD:2026-09-12;KRW:2026-09-12",
+  });
+});
+
+it.each([
+  { id: "25", date: "12.09.2026", duplicate: false },
+  { id: "25", date: "04.09.2026", duplicate: false },
+  { id: "15", date: "05.09.2026", duplicate: false },
+  { id: "25", date: "05.09.2026", duplicate: true },
+])("rejects an untrustworthy archive during prepublication %#", async ({ id, date, duplicate }) => {
+  vi.setSystemTime(instant("2026-09-11T23:00:00") * 1000);
+  const row = `<tr><td>${date}</td><td>0,0647</td></tr>`;
+  const book = new RateBook(
+    metadata(),
+    transport((url) => {
+      if (url.includes("daily")) return xml("USD", "87,4500", "11.09.2026");
+      if (url.includes("weekly")) return xml("KRW", "0,0651", "12.09.2026");
+      return `<center>
+        <form><select name="valuta_id"><option selected value="${id}">1 Вона Республики Корея/южно-корейский вон</option></select></form>
+        <span align="center">1 Вона Республики Корея/южно-корейский вон</span>
+        <table><tr><td>Дата<br>(курсы действуют с указанных дат)</td><td>Курс<br>(к кыргызскому сому)</td></tr>
+        ${row}${duplicate ? row : ""}</table>
+      </center>`;
+    }),
+  );
+  await book.refresh();
+  expect(book.convert(car("KRW", 18500000))).toMatchObject({
+    price_kgs_minor: null,
+    price_usd_minor: null,
+    fx_date: "",
+    fx_expires_at: null,
+  });
+});
+
+it("honors the origin pause when the effective archive is rate limited", async () => {
+  vi.setSystemTime(instant("2026-09-11T23:00:00") * 1000);
+  const requested: string[] = [];
+  const book = new RateBook(
+    metadata(),
+    transport((url) => {
+      requested.push(url);
+      if (url.includes("daily")) return xml("USD", "87,4500", "12.09.2026");
+      throw new SourceRateLimited(7200);
+    }),
+  );
+  await book.refresh();
+  await book.refresh();
+  expect(requested).toHaveLength(2);
+  expect(requested.some((url) => url.includes("weekly"))).toBe(false);
+  expect(book.convert(car("USD", 100)).price_kgs_minor).toBeNull();
+});
