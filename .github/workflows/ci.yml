@@ -76,25 +76,30 @@ jobs:
           AUTODOM_REDIS_PASSWORD: autodom_ci_redis_password
         run: docker compose config --quiet
 
-      - name: Build runtime image
-        timeout-minutes: 10
-        run: docker build --tag autodom:ci .
+      - name: Build independent bot and parser images
+        timeout-minutes: 15
+        run: |
+          docker build --file apps/bot/Dockerfile --tag autodom-bot:ci .
+          docker build --file apps/worker/Dockerfile --tag autodom-worker:ci .
 
-      - name: Verify image runs as its configured non-root user
-        run: >-
-          docker run --rm --network none --entrypoint node autodom:ci
-          -e 'if (process.getuid() !== 10001 || process.getgid() !== 10001) { throw new Error("Expected runtime UID/GID 10001"); } console.log("Runtime UID/GID: 10001:10001");'
+      - name: Verify both images use their configured non-root user
+        run: |
+          for image in autodom-bot:ci autodom-worker:ci; do
+            docker run --rm --network none --entrypoint node "$image" \
+              -e 'if (process.getuid() !== 10001 || process.getgid() !== 10001) { throw new Error("Expected runtime UID/GID 10001"); } console.log("Runtime UID/GID: 10001:10001");'
+          done
 
-      - name: Exercise image entrypoint help without network
+      - name: Exercise both entrypoints without network
         timeout-minutes: 1
-        run: docker run --rm --network none autodom:ci --help
+        run: |
+          docker run --rm --network none autodom-bot:ci --help
+          docker run --rm --network none autodom-worker:ci --help
+          docker run --rm --network none autodom-worker:ci sources
 
-      - name: Migrate isolated PostgreSQL with built image
+      - name: Migrate isolated PostgreSQL without Redis or a bot token
         timeout-minutes: 2
-        # Settings require a Redis URL, but migrate does not connect to Redis.
         # Health requires active runtime heartbeats; do not start pollers in CI.
         run: >-
-          docker run --rm --network host
+          docker run --rm --network host --entrypoint node
           --env AUTODOM_DATABASE_URL="$AUTODOM_TEST_DATABASE_URL"
-          --env AUTODOM_REDIS_URL=redis://127.0.0.1:6379/0
-          autodom:ci migrate
+          autodom-bot:ci apps/runtime/dist/cli.js migrate

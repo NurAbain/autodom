@@ -8,12 +8,17 @@
   },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "build": "tsup --config tsup.config.ts",
+    "build": "pnpm build:runtime && pnpm build:bot && pnpm build:worker",
+    "build:runtime": "tsup --config tsup.config.ts",
+    "build:bot": "tsup --config apps/bot/tsup.config.ts",
+    "build:worker": "tsup --config apps/worker/tsup.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome check --write .",
-    "autodom": "node apps/runtime/dist/cli.js"
+    "autodom": "node apps/runtime/dist/cli.js",
+    "bot": "node apps/bot/dist/cli.js",
+    "worker": "node apps/worker/dist/cli.js"
   },
   "dependencies": {
     "zod": "4.6.1",

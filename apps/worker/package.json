@@ -1,5 +1,5 @@
 {
-  "name": "@autodom/bot",
+  "name": "@autodom/worker",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -7,15 +7,12 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./monitor": {
-      "types": "./src/monitor.ts",
-      "default": "./src/monitor.ts"
     }
   },
   "dependencies": {
     "@autodom/core": "workspace:*",
-    "@autodom/runtime": "workspace:*",
-    "@autodom/storage": "workspace:*"
+    "@autodom/storage": "workspace:*",
+    "@autodom/sources": "workspace:*",
+    "@autodom/runtime": "workspace:*"
   }
 }

@@ -12,7 +12,7 @@ export interface RuntimeStatus extends StoreStats {
 
 export async function runtimeStatus(
   store: Store,
-  settings: Settings,
+  settings: Pick<Settings, "monitor_seconds"> & { redis_url?: string },
   role: RuntimeRole = "run",
 ): Promise<RuntimeStatus> {
   const now = Date.now() / 1000;
@@ -31,7 +31,9 @@ export async function runtimeStatus(
     0 <= now - Number(monitor) &&
     now - Number(monitor) <= Math.max(120, settings.monitor_seconds * 2);
   let redisReady = true;
-  if (role !== "bot") {
+  if (role !== "bot" && !settings.redis_url) {
+    redisReady = false;
+  } else if (role !== "bot" && settings.redis_url) {
     const redis = new Redis(settings.redis_url, {
       lazyConnect: true,
       maxRetriesPerRequest: 1,

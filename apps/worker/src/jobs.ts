@@ -1,11 +1,11 @@
 import { type DocumentTransport, enabledSources, RateBook, type Settings } from "@autodom/core";
+import type { Metrics } from "@autodom/runtime/metrics";
 import { DETAIL_DELAY_SECONDS } from "@autodom/sources";
 import type { Store } from "@autodom/storage";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import type { Logger } from "pino";
 import { collectTick } from "./collector.js";
-import type { Metrics } from "./metrics.js";
 
 interface SourceJob {
   source: string;

@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import type { RequestOutcome } from "@autodom/sources";
+import type { RequestOutcome } from "@autodom/core";
 import { Counter, collectDefaultMetrics, Registry } from "@prometheus-io/client";
 
 export class Metrics {

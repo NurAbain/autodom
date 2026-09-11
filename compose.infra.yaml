@@ -1,0 +1,47 @@
+# Shared infrastructure, released separately from bot+MiniApp and parsers.
+# Initial cutover: keep the OLD Coolify resource UUID/network and existing volumes.
+# This file replaces only that resource's service definition; NEVER delete its volumes.
+# Stop its old bot/worker during the planned cutover before their new resources start.
+# Set exact existing volume names explicitly; external:true fails instead of creating empty data.
+services:
+  postgres:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: autodom
+      POSTGRES_USER: autodom
+      POSTGRES_PASSWORD: ${AUTODOM_POSTGRES_PASSWORD:?Set a URL-safe Autodom database password}
+    volumes: [postgres-data:/var/lib/postgresql]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U autodom -d autodom"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: [redis-server, --appendonly, "yes", --appendfsync, everysec, --requirepass, "${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}"]
+    environment:
+      REDISCLI_AUTH: ${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 256m
+
+networks:
+  default:
+    name: ${AUTODOM_NETWORK:-autodom}
+    external: true
+
+volumes:
+  postgres-data:
+    name: ${AUTODOM_POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres-data}
+    external: true
+  redis-data:
+    name: ${AUTODOM_REDIS_VOLUME:-${COMPOSE_PROJECT_NAME}_redis-data}
+    external: true

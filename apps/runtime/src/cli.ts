@@ -2,23 +2,15 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { loadProxyRoutes, loadSettings, loadToken, sourceCatalog } from "@autodom/core";
-import { ProxyTransport } from "@autodom/sources";
+import { loadBotSettings, loadSettings } from "@autodom/core";
 import { backup, importSqlite, restore, Store } from "@autodom/storage";
-import { syncPages } from "./collector.js";
 import { createLogger } from "./logging.js";
-import { runService } from "./service.js";
 import { type RuntimeRole, runtimeStatus } from "./status.js";
 
-const HELP = `Autodom: car search and free Telegram monitoring
+const HELP = `Autodom: storage administration and aggregate diagnostics
 
 Usage: pnpm autodom <command> [options]
 
-  run                         Bot, collector, notifications and local snapshots
-  bot                         Telegram and notifications only; singleton poller
-  worker                      Durable Redis/BullMQ source collection only
-  sync [--pages 3]             Bounded collection through mandatory proxies
-  sources                     Offline source registry, access evidence and coverage gaps (JSON)
   status [--role run]          Aggregate counters and per-source state; no user data
   health [--role run]          Exit 0 only with fresh heartbeats and dependencies
   migrate                     Apply guarded PostgreSQL schema migrations
@@ -28,20 +20,17 @@ Usage: pnpm autodom <command> [options]
     [--destination URL]       Explicit new target PostgreSQL URL (prefer environment)
 
 Node 24 and pnpm are required. Configure .env.example and export its values.
-AUTODOM_DATABASE_URL and AUTODOM_REDIS_URL must point to Autodom's own backends.
-Both SMARTPROXY tiers are required by run/worker/sync; no direct scraping fallback.
-Only mashina.kg is enabled by default. Foreign sources require explicit permission
-and AUTODOM_APPROVED_SOURCES opt-in. No import or auction cost is invented.
+AUTODOM_DATABASE_URL must point to Autodom's own database.
+Worker/aggregate diagnostics also require AUTODOM_REDIS_URL; storage commands do not.
+Start the bot and Mini App together with pnpm bot; start parsers with pnpm worker.
+Use pnpm worker sync --pages 3 for bounded collection, pnpm worker sources for the offline registry.
 Backups include profiles: keep them private; seven-day local retention is not off-site protection.
-The sources command needs no database, Redis, Telegram token or proxy; it never contacts providers.
-Candidate entries cannot be enabled. Published membership fees are not data-license prices.
-Stop the old poller before cutover. This CLI never replaces an existing Telegram webhook.
 `;
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   process.umask(0o077);
   let store: Store | undefined;
-  let logger = createLogger();
+  const logger = createLogger();
   try {
     const { values, positionals } = parseArgs({
       args: argv,
@@ -49,7 +38,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       strict: true,
       options: {
         help: { type: "boolean", short: "h" },
-        pages: { type: "string" },
         role: { type: "string" },
         destination: { type: "string" },
       },
@@ -61,19 +49,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const [command, path, ...extra] = positionals;
     if (
       !command ||
-      ![
-        "run",
-        "bot",
-        "worker",
-        "sync",
-        "status",
-        "sources",
-        "health",
-        "migrate",
-        "import-sqlite",
-        "backup",
-        "restore",
-      ].includes(command)
+      !["status", "health", "migrate", "import-sqlite", "backup", "restore"].includes(command)
     ) {
       process.stdout.write(HELP);
       return 2;
@@ -82,31 +58,15 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       throw new Error("Unexpected positional argument");
     if (["import-sqlite", "backup", "restore"].includes(command) && !path)
       throw new Error("A snapshot path is required");
-    if (values.pages !== undefined && command !== "sync")
-      throw new Error("--pages is only valid for sync");
     if (values.destination !== undefined && command !== "restore")
       throw new Error("--destination is only valid for restore");
     if (values.role !== undefined && !["status", "health"].includes(command))
       throw new Error("--role is only valid for status and health");
-    if (command === "sources") {
-      process.stdout.write(`${JSON.stringify(sourceCatalog())}\n`);
-      return 0;
-    }
     const role = values.role ?? "run";
     if (!["bot", "worker", "run"].includes(role))
       throw new Error("--role must be bot, worker, or run");
-    const pageText = values.pages ?? "3";
-    const pages = Number(pageText);
-    if (
-      command === "sync" &&
-      (!/^\d+$/u.test(pageText) || !Number.isSafeInteger(pages) || pages < 1 || pages > 10_000)
-    ) {
-      throw new Error("--pages must be between 1 and 10000");
-    }
-    const settings = loadSettings();
-    const routes = ["run", "worker", "sync"].includes(command) ? loadProxyRoutes() : [];
-    const token = ["run", "bot"].includes(command) ? await loadToken() : "";
-    if (token) logger = createLogger({ ...process.env, AUTODOM_BOT_TOKEN: token });
+    const settings =
+      ["status", "health"].includes(command) && role !== "bot" ? loadSettings() : loadBotSettings();
     if (command === "restore") {
       if (!path) throw new Error("A snapshot path is required");
       await restore(path, values.destination ?? settings.database_url);
@@ -129,28 +89,6 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       const status = await runtimeStatus(store, settings, role as RuntimeRole);
       process.stdout.write(`${JSON.stringify(status)}\n`);
       return command === "health" && !status.healthy ? 1 : 0;
-    } else if (command === "sync") {
-      const abort = new AbortController();
-      const stop = () => abort.abort();
-      process.once("SIGINT", stop);
-      process.once("SIGTERM", stop);
-      const transport = new ProxyTransport({
-        routes,
-        dataDir: settings.data_dir,
-        requestDelaySeconds: settings.crawl_delay,
-        signal: abort.signal,
-      });
-      try {
-        process.stdout.write(
-          `${JSON.stringify(await syncPages(store, pages, transport, settings.crawl_delay, abort.signal))}\n`,
-        );
-      } finally {
-        await transport.close();
-        process.off("SIGINT", stop);
-        process.off("SIGTERM", stop);
-      }
-    } else {
-      await runService(store, settings, command as RuntimeRole, routes, token, logger);
     }
     return 0;
   } catch (err) {

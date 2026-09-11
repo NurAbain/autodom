@@ -1,5 +1,4 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { listingText, menu, packReplies, type Reply } from "@autodom/bot";
 import {
   isPriceDrop,
   type Listing,
@@ -9,6 +8,7 @@ import {
   type Profile,
 } from "@autodom/core";
 import { GrammyError, HttpError } from "grammy";
+import { listingText, menu, packReplies, type Reply } from "./conversation.js";
 
 export interface MonitorStore {
   withLock<T>(key: string, operation: () => Promise<T>): Promise<T>;

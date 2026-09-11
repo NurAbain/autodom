@@ -6,6 +6,7 @@ import {
   type DocumentRequest,
   type DocumentTransport,
   type ProxyRoute,
+  type RequestOutcome,
   requireSourceAccess,
   SourceError,
   SourceRateLimited,
@@ -24,12 +25,6 @@ const ORIGINS: Readonly<Record<string, string>> = {
   "bid.cars": "https://bid.cars",
   "nbkr.kg": "https://www.nbkr.kg",
 };
-
-export interface RequestOutcome {
-  source: string;
-  tier: string;
-  outcome: "success" | "error" | "rate_limited";
-}
 
 export interface ProxyTransportOptions {
   routes: readonly ProxyRoute[];

@@ -21,6 +21,12 @@ export function requireSourceAccess(source: string): void {
   }
 }
 
+export interface RequestOutcome {
+  source: string;
+  tier: string;
+  outcome: "success" | "error" | "rate_limited";
+}
+
 export interface DocumentOptions {
   source: string;
   page?: number;

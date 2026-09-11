@@ -16,7 +16,7 @@ export async function pruneSnapshots(directory: string, now = Date.now() / 1000)
 
 export async function maintain(
   store: Store,
-  settings: Settings,
+  settings: Pick<Settings, "backup_directory">,
   role: "bot" | "worker",
   signal: AbortSignal,
 ): Promise<void> {

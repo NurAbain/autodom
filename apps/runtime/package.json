@@ -7,12 +7,26 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./logging": {
+      "types": "./src/logging.ts",
+      "default": "./src/logging.ts"
+    },
+    "./metrics": {
+      "types": "./src/metrics.ts",
+      "default": "./src/metrics.ts"
+    },
+    "./maintenance": {
+      "types": "./src/maintenance.ts",
+      "default": "./src/maintenance.ts"
+    },
+    "./status": {
+      "types": "./src/status.ts",
+      "default": "./src/status.ts"
     }
   },
   "dependencies": {
     "@autodom/core": "workspace:*",
-    "@autodom/storage": "workspace:*",
-    "@autodom/sources": "workspace:*",
-    "@autodom/bot": "workspace:*"
+    "@autodom/storage": "workspace:*"
   }
 }
