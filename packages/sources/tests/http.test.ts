@@ -6,7 +6,9 @@ import { promisify } from "node:util";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { type Dispatcher, fetch, MockAgent } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BrowserClient } from "../src/bidcars-browser.js";
 import { ProxyTransport, retryAfterSeconds } from "../src/http.js";
+import { RiskBypassError } from "../src/riskbypass.js";
 
 const directories: string[] = [];
 const transports: ProxyTransport[] = [];
@@ -21,7 +23,11 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function transportWith(agents: MockAgent[], browserRoutes = agents) {
+async function transportWith(
+  agents: MockAgent[],
+  browserRoutes = agents,
+  refresh?: BrowserClient["refresh"],
+) {
   const dataDir = await mkdtemp(join(tmpdir(), "autodom-http-test-"));
   directories.push(dataDir);
   for (const agent of browserRoutes) browserAgents.add(agent);
@@ -46,6 +52,7 @@ async function transportWith(agents: MockAgent[], browserRoutes = agents) {
     },
     browserClientFactory: (_route, _page, index) => ({
       fetch: (url, init) => fetch(url, { ...init, dispatcher: browserRoutes[index]! }),
+      ...(refresh ? { refresh } : {}),
     }),
   });
   transports.push(transport);
@@ -157,20 +164,120 @@ describe("mandatory proxy document transport", () => {
     first
       .get("https://bid.cars")
       .intercept({ path: "/en/automobile/page/1" })
-      .reply(429, "limited", { headers: { "retry-after": "180" } });
+      .reply(429, "limited", { headers: { server: "cloudflare", "retry-after": "180" } });
     const second = new MockAgent();
     second.disableNetConnect();
     second
       .get("https://bid.cars")
       .intercept({ path: "/en/automobile/page/1" })
       .reply(200, "must not request");
-    const transport = await transportWith([blocked, blocked], [first, second]);
+    const refresh = vi.fn(async () => {});
+    const transport = await transportWith([blocked, blocked], [first, second], refresh);
     await expect(
       transport.fetchDocument("https://bid.cars/en/automobile/page/1", (text) => text, {
         source: "bid.cars",
       }),
     ).rejects.toMatchObject({ retry_after: 180 });
     expect(second.pendingInterceptors()).toHaveLength(1);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("solves a managed 429 challenge and replays only the real document", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    const origin = agent.get("https://bid.cars");
+    origin
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(429, "Enable JavaScript and cookies", { headers: { "cf-mitigated": "challenge" } });
+    origin.intercept({ path: "/en/automobile/page/1" }).reply(200, '{"available":true}');
+    const refresh = vi.fn(async () => {});
+    const transport = await transportWith([agent], [agent], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).resolves.toEqual({ available: true });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    agent.assertNoPendingInterceptors();
+  });
+
+  it("stops after one unusable clearance instead of repeatedly purchasing solves", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    const origin = agent.get("https://bid.cars");
+    origin
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(429, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    origin
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(403, "still challenged", { headers: { "cf-mitigated": "challenge" } });
+    origin.intercept({ path: "/en/automobile/page/1" }).reply(200, "must not request");
+    const refresh = vi.fn(async () => {});
+    const transport = await transportWith([agent], [agent], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).rejects.toBeInstanceOf(SourceError);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(agent.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("does not repeat a failed solver control operation on another proxy", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(403, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(200, "must not request");
+    const refresh = vi.fn(async () => {
+      throw new RiskBypassError("Control service unavailable");
+    });
+    const transport = await transportWith([first, second], [first, second], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).rejects.toBeInstanceOf(RiskBypassError);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(second.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("uses the configured fallback when a target-specific clearance attempt fails", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(403, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(200, '{"available":true}');
+    const refresh = vi.fn(async () => {
+      throw new SourceError("Target session unavailable");
+    });
+    const transport = await transportWith([first, second], [first, second], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).resolves.toEqual({ available: true });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    first.assertNoPendingInterceptors();
+    second.assertNoPendingInterceptors();
   });
 
   it("rejects browser redirects and oversized documents before parsing", async () => {
