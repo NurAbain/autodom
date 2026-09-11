@@ -1,0 +1,59 @@
+# ONE Coolify resource: Telegram bot + Mini App HTTP/UI + notifications/backups.
+# Select this file, not compose.yaml; deploy/rollback it independently of the parser.
+# Use existing Autodom PostgreSQL and the bot token. No Redis/scraper-proxy dependency.
+# Route the Mini App HTTPS domain to bot:8080, preserving /miniapp/ paths.
+# A Telegram poller is singleton: stop the old bot at the initial cutover, never scale it.
+# Reuse the existing snapshots volume explicitly; external:true rejects a missing volume.
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: apps/bot/Dockerfile
+    image: ${AUTODOM_BOT_IMAGE:-autodom-bot:local}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 120s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    command: [serve]
+    environment:
+      AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:-}
+      AUTODOM_BOT_TOKEN: ${AUTODOM_BOT_TOKEN:-}
+      AUTODOM_BACKUP_DIR: /backups
+      AUTODOM_METRICS_PORT: "9901"
+      AUTODOM_LOG_LEVEL: ${AUTODOM_LOG_LEVEL:-info}
+      AUTODOM_MONITOR_SECONDS: ${AUTODOM_MONITOR_SECONDS:-30}
+      AUTODOM_MINI_APP_URL: ${AUTODOM_MINI_APP_URL:-}
+      AUTODOM_MINI_APP_HOST: "0.0.0.0"
+      AUTODOM_MINI_APP_PORT: "8080"
+      AUTODOM_APPROVED_SOURCES: ${AUTODOM_APPROVED_SOURCES:-mashina.kg}
+    expose: ["8080", "9901"]
+    networks: [default, proxy]
+    volumes: [snapshots:/backups]
+    healthcheck:
+      test: [CMD, node, apps/bot/dist/cli.js, health]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  default:
+    name: ${AUTODOM_NETWORK:-autodom}
+    external: true
+  proxy:
+    name: ${AUTODOM_PROXY_NETWORK:-coolify}
+    external: true
+
+volumes:
+  snapshots:
+    name: ${AUTODOM_SNAPSHOTS_VOLUME:-${COMPOSE_PROJECT_NAME}_snapshots}
+    external: true

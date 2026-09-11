@@ -108,12 +108,13 @@ const car = (id: string, title = "Toyota Camry", extra: Partial<Listing> = {}) =
     availability: "В наличии",
     ...extra,
   });
+const CONSENT_SECRET = "123456:test-consent-signing-secret";
 let store: InteractionStore;
 let conversation: Conversation;
 beforeEach(() => {
   vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
   store = new InteractionStore();
-  conversation = new Conversation(store);
+  conversation = new Conversation(store, CONSENT_SECRET);
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -121,18 +122,92 @@ afterEach(() => {
 });
 
 describe("explicit consent and save safety", () => {
-  it("persists nothing before current explicit consent, including on restart", async () => {
-    const old = button(await conversation.handle(1, 1, "/start"), "Согласен");
-    for (const command of ["/privacy", "/begin", "/edit", "consent:accept", old]) {
+  it("persists nothing before consent and accepts it on another replica after navigation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T00:00:00Z"));
+    const consent = button(await conversation.handle(1, 1, "/start"), "Согласен");
+    for (const command of ["/privacy", "/begin", "/edit", "consent:accept", "Toyota"]) {
       await conversation.handle(1, 1, command);
+      expect(store.drafts.size).toBe(0);
+      expect(store.profiles.size).toBe(0);
+    }
+    vi.setSystemTime(new Date("2026-09-01T00:04:59Z"));
+    await new Conversation(store, CONSENT_SECRET).handle(1, 1, consent);
+    expect((await store.getDraft(1))?.[0]).toBe("currency");
+    expect(await store.getProfile(1)).toBeNull();
+  });
+  it("rejects future and expired consent without consuming a still-valid credential", async () => {
+    vi.useFakeTimers();
+    const issuedAt = new Date("2026-09-01T00:00:00Z").getTime();
+    vi.setSystemTime(issuedAt);
+    const consent = button(await conversation.handle(1, 1, "/start"), "Согласен");
+    const restarted = new Conversation(store, CONSENT_SECRET);
+    for (const now of [issuedAt - 1000, issuedAt + 300_000]) {
+      vi.setSystemTime(now);
+      await restarted.handle(1, 1, consent);
       expect(await store.getDraft(1)).toBeNull();
       expect(await store.getProfile(1)).toBeNull();
     }
-    const fresh = button(await conversation.handle(1, 1, "/privacy"), "Согласен");
-    await new Conversation(store).handle(1, 1, fresh);
-    expect(await store.getDraft(1)).toBeNull();
-    await conversation.handle(1, 1, fresh);
+    vi.setSystemTime(issuedAt);
+    await restarted.handle(1, 1, consent);
     expect((await store.getDraft(1))?.[0]).toBe("currency");
+  });
+  it("binds compact consent to its user, secret and unmodified credential", async () => {
+    const user = Number.MAX_SAFE_INTEGER;
+    const consent = button(await conversation.handle(user, user, "/start"), "Согласен");
+    expect(Buffer.byteLength(consent, "utf8")).toBeLessThanOrEqual(64);
+    const signatureStart = consent.lastIndexOf(":") + 1;
+    const tampered =
+      consent.slice(0, signatureStart) +
+      (consent[signatureStart] === "A" ? "B" : "A") +
+      consent.slice(signatureStart + 1);
+    for (const invalid of [
+      tampered,
+      consent.slice(0, -1),
+      `${consent}:extra`,
+      consent.replace("consent:", "consent:0"),
+      "consent:invalid",
+    ]) {
+      await conversation.handle(user, user, invalid);
+      expect(store.drafts.size).toBe(0);
+      expect(store.profiles.size).toBe(0);
+    }
+    for (const foreignUser of [1, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      await conversation.handle(foreignUser, foreignUser, consent);
+      expect(store.drafts.size).toBe(0);
+      expect(store.profiles.size).toBe(0);
+    }
+    await new Conversation(store, "different-secret").handle(user, user, consent);
+    expect(store.drafts.size).toBe(0);
+    expect(store.profiles.size).toBe(0);
+    await new Conversation(store, CONSENT_SECRET).handle(user, user, consent);
+    expect((await store.getDraft(user))?.[0]).toBe("currency");
+    expect(await store.getProfile(user)).toBeNull();
+  });
+  it("does not let consent replay reset progress, deletion or an existing profile", async () => {
+    const consent = button(await conversation.handle(1, 1, "/start"), "Согласен");
+    const replica = new Conversation(store, CONSENT_SECRET);
+    const currencies = await replica.handle(1, 1, consent);
+    await replica.handle(1, 1, button(currencies, "USD"));
+    await replica.handle(1, 1, "15000");
+    const reviewed = await replica.handle(1, 1, "Honda Accord");
+    const draft = await store.getDraft(1);
+    await conversation.handle(1, 1, consent);
+    expect(await store.getDraft(1)).toEqual(draft);
+    expect(await store.getProfile(1)).toBeNull();
+    await replica.handle(1, 1, "/delete");
+    const deletion = await store.getDraft(1);
+    await conversation.handle(1, 1, consent);
+    expect(await store.getDraft(1)).toEqual(deletion);
+    await replica.handle(1, 1, "/cancel");
+    await replica.handle(1, 1, button(reviewed, "Сохранить"));
+    expect((await store.getProfile(1))?.query).toBe("Honda Accord");
+    expect((await store.getProfile(1))?.monitoring).toBe(false);
+    await replica.handle(1, 1, "/resume");
+    const profile = await store.getProfile(1);
+    await new Conversation(store, CONSENT_SECRET).handle(1, 1, consent);
+    expect(await store.getProfile(1)).toEqual(profile);
+    expect(await store.getDraft(1)).toBeNull();
   });
   it.each(["currency:KGS", "query:unexpected", "!!!", "___", ", ,", "Toyota, !!!"])(
     "does not save invalid query %s",
@@ -162,7 +237,7 @@ describe("explicit consent and save safety", () => {
     const other = await store.getDraft(2);
     await conversation.handle(2, 2, button(city, "пропустить"));
     expect(await store.getDraft(2)).toEqual(other);
-    const restarted = new Conversation(store);
+    const restarted = new Conversation(store, CONSENT_SECRET);
     const currentReview = await restarted.handle(1, 1, button(city, "Назад"));
     await restarted.handle(1, 1, oldSave);
     expect(await store.getProfile(1)).toBeNull();
@@ -172,6 +247,26 @@ describe("explicit consent and save safety", () => {
     expect(saved?.query).toBe("Toyota");
     await restarted.handle(1, 1, currentSave);
     expect(await store.getProfile(1)).toEqual(saved);
+  });
+  it("reopens a review without consent, restart or implicit save and invalidates its old action", async () => {
+    const oldSave = button(await review(conversation, "Honda Accord"), "Сохранить");
+    const reopened = await conversation.current(1);
+    await conversation.handle(1, 1, oldSave);
+    expect(await store.getProfile(1)).toBeNull();
+    expect((await store.getDraft(1))?.[0]).toBe("review");
+    await conversation.handle(1, 1, button(reopened, "Сохранить"));
+    expect((await store.getProfile(1))?.query).toBe("Honda Accord");
+  });
+  it("reopens deletion with a fresh confirmation and preserves the previous draft on cancellation", async () => {
+    await review(conversation, "Honda Accord");
+    const original = await store.getDraft(1);
+    const oldDelete = button(await conversation.handle(1, 1, "/delete"), "Удалить");
+    const reopened = await conversation.current(1);
+    await conversation.handle(1, 1, oldDelete);
+    expect((await store.getDraft(1))?.[0]).toBe("delete_confirm");
+    await conversation.handle(1, 1, button(reopened, "Отмена"));
+    expect(await store.getDraft(1)).toEqual(original);
+    expect(await store.getProfile(1)).toBeNull();
   });
   it("prevents stale and unknown callback payloads becoming free text", async () => {
     const currencies = await conversation.handle(
@@ -218,7 +313,7 @@ describe("editing, monitoring and deletion", () => {
     await conversation.handle(1, 1, old);
     expect((await store.getProfile(1))?.monitoring).toBe(false);
     const fresh = button(await conversation.handle(1, 1, "/profile"), "Включить мониторинг");
-    await new Conversation(store).handle(1, 1, fresh);
+    await new Conversation(store, CONSENT_SECRET).handle(1, 1, fresh);
     expect((await store.getProfile(1))?.monitoring).toBe(true);
     await conversation.handle(1, 1, "/pause");
     expect((await store.getProfile(1))?.monitoring).toBe(false);
@@ -424,6 +519,24 @@ describe("search and safe rendering", () => {
     await conversation.handle(1, 1, "/quiet 22:00-07:00");
     expect(rendered(await conversation.handle(1, 1, next))).not.toContain("/details/");
   });
+  it("pairs each photo only with its own full listing and keeps missing photos readable", async () => {
+    store.listings = [
+      car("first", "Toyota Camry", { photo_url: "https://im.mashina.kg/first.jpg" }),
+      car("second", "Honda Accord", { photo_url: "https://pictures.mashina.kg/second.jpg" }),
+      car("third", "Honda Fit"),
+    ];
+    const replies = await save(conversation, "Toyota, Honda");
+    const listings = replies.filter((reply) => reply.text.includes("/details/"));
+    expect(listings.map((reply) => reply.photoUrl ?? null)).toEqual([
+      "https://im.mashina.kg/first.jpg",
+      "https://pictures.mashina.kg/second.jpg",
+      null,
+    ]);
+    for (const [index, item] of store.listings.entries())
+      expect(listings[index]?.text).toBe(listingText(item, "USD"));
+    expect(listings.slice(0, -1).every((reply) => reply.buttons.length === 0)).toBe(true);
+    expect(button(listings.slice(-1), "Изменить")).toBe("/edit");
+  });
   it("unknown model removes only model filter, not the budget", async () => {
     store.listings = [
       car("affordable", "Honda Fit"),
@@ -587,6 +700,25 @@ describe("grammY transport boundaries", () => {
           call.method === "answerCallbackQuery" && call.payload.callback_query_id === "foreign",
       ),
     ).toBe(true);
+  });
+  it("does not turn non-text service events into draft field values or invalidate the active choice", async () => {
+    const { bot, calls } = telegram();
+    await bot.init();
+    await review(conversation);
+    const previous = await store.getDraft(1);
+    await bot.handleUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private", first_name: "Buyer" },
+        web_app_data: { button_text: "App", data: "Honda Accord" },
+      },
+    });
+    expect(await store.getDraft(1)).toEqual(previous);
+    expect(await store.getProfile(1)).toBeNull();
+    expect(calls.filter((call) => call.method === "sendMessage")).toEqual([]);
   });
   it("orders same-user messages and callbacks without blocking another user", async () => {
     const { bot, calls } = telegram();

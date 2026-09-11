@@ -101,18 +101,30 @@ importers:
       '@autodom/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@autodom/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@autodom/storage':
         specifier: workspace:*
         version: link:../../packages/storage
 
   apps/runtime:
     dependencies:
-      '@autodom/bot':
-        specifier: workspace:*
-        version: link:../bot
       '@autodom/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@autodom/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+
+  apps/worker:
+    dependencies:
+      '@autodom/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@autodom/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@autodom/sources':
         specifier: workspace:*
         version: link:../../packages/sources

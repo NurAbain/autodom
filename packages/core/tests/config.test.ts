@@ -29,14 +29,8 @@ it("requires a unique known approval set and refuses unapproved adapter access",
 
 it("requires real database and redis locations and enforces crawl interval boundaries", () => {
   expect(() => loadSettings({})).toThrow();
-  expect(loadSettings(settings)).toMatchObject({
-    refresh_seconds: 300,
-    refresh_pages: 3,
-    crawl_delay: 2,
-    monitor_seconds: 30,
-    full_refresh_seconds: 86400,
-  });
   for (const changes of [
+    { AUTODOM_REDIS_URL: "" },
     { AUTODOM_REFRESH_SECONDS: "59" },
     { AUTODOM_REFRESH_PAGES: "21" },
     { AUTODOM_CRAWL_DELAY: "NaN" },

@@ -1,106 +1,41 @@
+# Local development topology. Production application nodes use compose.bot.yaml
+# (bot + Mini App) and compose.worker.yaml (parsers), with compose.infra.yaml
+# retaining shared PostgreSQL/Redis separately. Never delete production volumes.
 name: autodom-ts
-
-x-runtime: &runtime
-  build: .
-  image: autodom:ts
-  init: true
-  restart: unless-stopped
-  stop_grace_period: 120s
-  read_only: true
-  tmpfs:
-    - /tmp:size=32m,mode=1777
-  cap_drop: [ALL]
-  security_opt: [no-new-privileges:true]
-  mem_limit: 512m
-  cpus: 1.0
-  logging:
-    driver: json-file
-    options: {max-size: "10m", max-file: "3"}
-  depends_on:
-    postgres: {condition: service_healthy}
-    redis: {condition: service_healthy}
-
-x-environment: &environment
-  AUTODOM_DATABASE_URL: postgresql://autodom:${AUTODOM_POSTGRES_PASSWORD:?Set a URL-safe Autodom database password}@postgres:5432/autodom
-  AUTODOM_REDIS_URL: redis://:${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}@redis:6379/0
-  AUTODOM_DATA_DIR: /data
-  AUTODOM_BACKUP_DIR: /backups
-  AUTODOM_METRICS_PORT: "9901"
-  AUTODOM_REFRESH_SECONDS: ${AUTODOM_REFRESH_SECONDS:-300}
-  AUTODOM_REFRESH_PAGES: ${AUTODOM_REFRESH_PAGES:-3}
-  AUTODOM_CRAWL_DELAY: ${AUTODOM_CRAWL_DELAY:-2}
-  AUTODOM_FULL_REFRESH_SECONDS: ${AUTODOM_FULL_REFRESH_SECONDS:-86400}
-  AUTODOM_MONITOR_SECONDS: ${AUTODOM_MONITOR_SECONDS:-30}
-  AUTODOM_APPROVED_SOURCES: ${AUTODOM_APPROVED_SOURCES:-mashina.kg}
-  AUTODOM_TRUECAR_SEARCH_URL: ${AUTODOM_TRUECAR_SEARCH_URL:-https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/}
-  AUTODOM_BIDCARS_CATALOG_URL: ${AUTODOM_BIDCARS_CATALOG_URL:-https://bid.cars/en/automobile/page/1}
 
 services:
   postgres:
-    image: postgres:18-bookworm
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: autodom
-      POSTGRES_USER: autodom
-      POSTGRES_PASSWORD: ${AUTODOM_POSTGRES_PASSWORD:?Set a URL-safe Autodom database password}
-    volumes: [postgres-data:/var/lib/postgresql]
-    healthcheck:
-      test: [CMD-SHELL, "pg_isready -U autodom -d autodom"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    mem_limit: 512m
+    extends:
+      file: compose.infra.yaml
+      service: postgres
 
   redis:
-    image: redis:7.4-alpine
-    restart: unless-stopped
-    command: [redis-server, --appendonly, "yes", --appendfsync, everysec, --requirepass, "${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}"]
-    environment:
-      REDISCLI_AUTH: ${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}
-    volumes: [redis-data:/data]
-    healthcheck:
-      test: [CMD, redis-cli, ping]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    mem_limit: 256m
+    extends:
+      file: compose.infra.yaml
+      service: redis
 
   bot:
-    <<: *runtime
-    command: [bot]
+    extends:
+      file: compose.bot.yaml
+      service: bot
     environment:
-      <<: *environment
-      AUTODOM_BOT_TOKEN: ${AUTODOM_BOT_TOKEN:-}
-    volumes: [snapshots:/backups]
-    healthcheck:
-      test: [CMD, node, apps/runtime/dist/cli.js, health, --role, bot]
-      interval: 30s
-      timeout: 15s
-      start_period: 90s
-      retries: 3
+      AUTODOM_DATABASE_URL: postgresql://autodom:${AUTODOM_POSTGRES_PASSWORD:?Set a URL-safe Autodom database password}@postgres:5432/autodom
+    depends_on:
+      postgres: {condition: service_healthy}
 
   worker:
-    <<: *runtime
-    command: [worker]
+    extends:
+      file: compose.worker.yaml
+      service: worker
     environment:
-      <<: *environment
-      SMARTPROXY_USERNAME: ${SMARTPROXY_USERNAME:-}
-      SMARTPROXY_PASSWORD: ${SMARTPROXY_PASSWORD:-}
-      SMARTPROXY_DATACENTER_ENDPOINT: ${SMARTPROXY_DATACENTER_ENDPOINT:-dc.decodo.com:10000}
-      SMARTPROXY_DATACENTER_PORT_START: ${SMARTPROXY_DATACENTER_PORT_START:-0}
-      SMARTPROXY_DATACENTER_PORT_COUNT: ${SMARTPROXY_DATACENTER_PORT_COUNT:-0}
-      SMARTPROXY_RESIDENTIAL_USERNAME: ${SMARTPROXY_RESIDENTIAL_USERNAME:-}
-      SMARTPROXY_RESIDENTIAL_PASSWORD: ${SMARTPROXY_RESIDENTIAL_PASSWORD:-}
-      SMARTPROXY_RESIDENTIAL_ENDPOINT: ${SMARTPROXY_RESIDENTIAL_ENDPOINT:-gate.decodo.com:7000}
-      SMARTPROXY_RESIDENTIAL_PORT_START: ${SMARTPROXY_RESIDENTIAL_PORT_START:-0}
-      SMARTPROXY_RESIDENTIAL_PORT_COUNT: ${SMARTPROXY_RESIDENTIAL_PORT_COUNT:-0}
-    volumes: [crawler-data:/data]
-    healthcheck:
-      test: [CMD, node, apps/runtime/dist/cli.js, health, --role, worker]
-      interval: 30s
-      timeout: 15s
-      start_period: 90s
-      retries: 3
+      AUTODOM_DATABASE_URL: postgresql://autodom:${AUTODOM_POSTGRES_PASSWORD:?Set a URL-safe Autodom database password}@postgres:5432/autodom
+      AUTODOM_REDIS_URL: redis://:${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}@redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+networks:
+  proxy: {}
 
 volumes:
   postgres-data:

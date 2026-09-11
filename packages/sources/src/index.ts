@@ -27,5 +27,5 @@ export async function fetchSourcePage(
 }
 
 export { DETAIL_DELAY_SECONDS } from "./bidcars.js";
-export type { ProxyTransportOptions, RequestOutcome } from "./http.js";
+export type { ProxyTransportOptions } from "./http.js";
 export { ProxyTransport, retryAfterSeconds } from "./http.js";

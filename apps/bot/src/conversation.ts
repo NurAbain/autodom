@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   BODY_TYPES,
   BUDGET_SCOPES,
@@ -19,12 +19,14 @@ import {
   USE_CASES,
 } from "@autodom/core";
 import type { Store } from "@autodom/storage";
+import { listingPhotoUrl } from "./media.js";
 
 export type Button = readonly [string, string];
 export type Buttons = readonly (readonly Button[])[];
 export interface Reply {
   text: string;
   buttons: Buttons;
+  photoUrl?: string;
 }
 export type ConversationStore = Pick<
   Store,
@@ -110,7 +112,8 @@ export function privacyText(): string {
       .map((source) => escapeHtml(source.name))
       .join(", ")}. ` +
     "Иностранные адаптеры без согласованного доступа не собирают и не показывают объявления. Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; доступность экспорта не подтверждена. Платные услуги не подключены.\n\n" +
-    "После вашего согласия сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки уведомлений. Это нужно для поиска и бесплатного мониторинга. Бюджет и контакты партнёрам не передаются; профиль и уведомления доступны только в личном чате. Данные хранятся до удаления: /delete удаляет профиль и незавершённый ввод из рабочей базы. Локальные резервные копии хранятся до 7 дней; удалённые данные могут оставаться в них до истечения этого срока.\n\n" +
+    "После вашего согласия сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки уведомлений. Это нужно для поиска и бесплатного мониторинга. Бюджет и контакты партнёрам не передаются; профиль доступен только вам — в личном чате и Mini App с проверенной сессией Telegram. Уведомления отправляю в личный чат. Данные хранятся до удаления: /delete удаляет профиль и незавершённый ввод из рабочей базы. Локальные резервные копии хранятся до 7 дней; удалённые данные могут оставаться в них до истечения этого срока.\n\n" +
+    "В Mini App избранное (до 100 ID объявлений) хранится на устройстве отдельно для вашего Telegram-аккаунта, а сравнение — только в текущем сеансе. Хранилище избранного не содержит бюджета или данных авторизации. Удаление данных внутри Mini App очищает избранное на текущем устройстве; /delete в чате не очищает хранилища устройств. Фотографии загружаются с серверов площадок: им виден IP вашего устройства, но бюджет и профиль не передаются. Через кнопку «Поделиться объявлением» отправляется только публичное объявление.\n\n" +
     "Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. Мониторинг включается отдельно. /privacy — это описание; /cancel — отмена ввода. До нажатия «Согласен на хранение» новый черновик не сохраняется."
   );
 }
@@ -299,20 +302,50 @@ export function tips(profile: Profile): string {
 }
 
 export class Conversation {
-  // Consent is deliberately the only pre-persistence state. Restart invalidates it.
-  private readonly consents = new Map<number, string>();
-  constructor(private readonly store: ConversationStore) {}
+  constructor(
+    private readonly store: ConversationStore,
+    private readonly consentSecret: string,
+  ) {
+    if (typeof consentSecret !== "string" || !consentSecret.trim())
+      throw new Error("A stable consent signing secret is required");
+  }
+
+  private consentSignature(userId: number, issuedAt: string): Buffer {
+    return createHmac("sha256", this.consentSecret)
+      .update(`autodom:storage-consent:v1:${userId}:${issuedAt}`)
+      .digest();
+  }
+
+  private validConsent(userId: number, callback: string): boolean {
+    const parts = /^consent:([0-9a-z]{1,11}):([A-Za-z0-9_-]{43})$/.exec(callback);
+    if (!parts) return false;
+    const issuedAt = Number.parseInt(parts[1]!, 36);
+    const age = Math.floor(Date.now() / 1000) - issuedAt;
+    if (
+      !Number.isSafeInteger(issuedAt) ||
+      issuedAt.toString(36) !== parts[1] ||
+      age < 0 ||
+      age >= 300
+    )
+      return false;
+    const signature = Buffer.from(parts[2]!, "base64url");
+    return (
+      signature.toString("base64url") === parts[2] &&
+      timingSafeEqual(signature, this.consentSignature(userId, parts[1]!))
+    );
+  }
 
   private privacy(userId: number, profile: Profile | null): Reply[] {
     if (profile) return packReplies(privacyText(), [], menu(profile));
-    const nonce = randomBytes(12).toString("base64url");
-    this.consents.delete(userId);
-    this.consents.set(userId, nonce);
-    if (this.consents.size > 2048) this.consents.delete(this.consents.keys().next().value!);
+    if (!Number.isSafeInteger(userId) || userId <= 0)
+      throw new RangeError("Telegram user ID must be a positive safe integer");
+    // Only Telegram holds this credential; replicas need no pre-consent user state.
+    const issuedAt = Math.floor(Date.now() / 1000).toString(36);
+    const signature = this.consentSignature(userId, issuedAt).toString("base64url");
     return packReplies(
       privacyText(),
       [],
-      [[["Согласен на хранение — начать подбор", `consent:${nonce}`]]],
+      [[["Согласен на хранение — начать подбор", `consent:${issuedAt}:${signature}`]]],
     );
   }
   private async begin(userId: number, profile: Profile | null): Promise<Reply[]> {
@@ -514,15 +547,29 @@ export class Conversation {
         [["Ещё варианты", `page:${profile.revision}:${offset + listings.length}`]],
         ...buttons,
       ];
-    return packReplies(
-      heading,
-      listings.map((listing) => listingText(listing, profile.currency)),
-      buttons,
-    );
+    return [
+      ...packReplies(heading, []),
+      ...listings.map((listing, index): Reply => {
+        const photoUrl = listingPhotoUrl(listing);
+        return {
+          text: listingText(listing, profile.currency),
+          buttons: index === listings.length - 1 ? buttons : [],
+          ...(photoUrl ? { photoUrl } : {}),
+        };
+      }),
+    ];
+  }
+
+  async current(userId: number): Promise<Reply[]> {
+    const draft = await this.store.getDraft(userId);
+    if (draft?.[0] === "delete_confirm") return this.handle(userId, userId, "/delete");
+    if (draft) return this.prompt(userId, draft[0], draft[1]);
+    const profile = await this.store.getProfile(userId);
+    return profile ? this.handle(userId, userId, "/profile") : this.privacy(userId, null);
   }
 
   async handle(userId: number, chatId: number, input: string): Promise<Reply[]> {
-    if (chatId !== userId)
+    if (!Number.isSafeInteger(userId) || userId <= 0 || chatId !== userId)
       return [
         {
           text: "Бюджет, профиль и уведомления доступны только в личном чате с ботом.",
@@ -533,10 +580,8 @@ export class Conversation {
     let profile = await this.store.getProfile(userId);
     let command = text.split(/\s+/, 1)[0]?.split("@", 1)[0]?.toLowerCase() ?? "";
     const draft = await this.store.getDraft(userId);
-    const consent = this.consents.get(userId);
-    this.consents.delete(userId);
     if (text.startsWith("consent:")) {
-      if (profile || !consent || text !== `consent:${consent}`)
+      if (profile || draft || !this.validConsent(userId, text))
         return packReplies(
           "Согласие не принято: откройте актуальное описание /privacy.",
           [],
@@ -625,7 +670,7 @@ export class Conversation {
     }
     if (command === "/help")
       return packReplies(
-        "/start — начать или открыть поиск\n/search — подходящие автомобили\n/profile — бюджет и пожелания\n/edit — изменить поиск\n/resume — включить бесплатный мониторинг\n/pause — приостановить\n/quiet HH:MM-HH:MM — тихие часы (Бишкек, UTC+6); /quiet off — отключить\n/privacy — хранение данных и согласие\n/tips — советы перед покупкой\n/status — состояние каталога\n/cancel — отменить ввод\n/delete — удалить мои данные\n\nБюджет можно ввести как 15000, 15к или 10000–15000. Модели — через запятую: Toyota Camry, Honda Accord. Внутри одного варианта все слова обязательны. Можно выбрать «Пока не знаю».",
+        "/start — начать или открыть поиск\n/app — открыть Mini App, если он подключён: пожелания, автомобили и фотографии\n/search — подходящие автомобили с фото источника, если оно доступно\n/profile — бюджет и пожелания\n/edit — изменить поиск\n/resume — включить бесплатный мониторинг\n/pause — приостановить\n/quiet HH:MM-HH:MM — тихие часы (Бишкек, UTC+6); /quiet off — отключить\n/privacy — хранение данных и согласие\n/tips — советы перед покупкой\n/status — состояние каталога\n/cancel — отменить ввод\n/delete — удалить мои данные\n\nБюджет можно ввести как 15000, 15к или 10000–15000. Модели — через запятую: Toyota Camry, Honda Accord. Внутри одного варианта все слова обязательны. Можно выбрать «Пока не знаю».",
         [],
         profile ? menu(profile) : START_BUTTONS,
       );

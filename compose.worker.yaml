@@ -1,0 +1,66 @@
+# A DIFFERENT Coolify resource from compose.bot.yaml, in the same Autodom project.
+# Parser-only releases never deploy the bot/Mini App, PostgreSQL or Redis resources.
+# Use the existing Autodom PostgreSQL/Redis URLs and both authorized proxy tiers.
+# No Telegram token, HTTP Mini App, poller, monitor or snapshots volume.
+# Reuse crawler-data explicitly and keep Redis durable; external:true rejects a missing volume.
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: ${AUTODOM_WORKER_IMAGE:-autodom-worker:local}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 120s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    command: [serve]
+    environment:
+      AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:-}
+      AUTODOM_REDIS_URL: ${AUTODOM_REDIS_URL:-}
+      AUTODOM_DATA_DIR: /data
+      AUTODOM_METRICS_PORT: "9901"
+      AUTODOM_LOG_LEVEL: ${AUTODOM_LOG_LEVEL:-info}
+      AUTODOM_REFRESH_SECONDS: ${AUTODOM_REFRESH_SECONDS:-300}
+      AUTODOM_REFRESH_PAGES: ${AUTODOM_REFRESH_PAGES:-3}
+      AUTODOM_CRAWL_DELAY: ${AUTODOM_CRAWL_DELAY:-2}
+      AUTODOM_FULL_REFRESH_SECONDS: ${AUTODOM_FULL_REFRESH_SECONDS:-86400}
+      AUTODOM_APPROVED_SOURCES: ${AUTODOM_APPROVED_SOURCES:-mashina.kg}
+      AUTODOM_TRUECAR_SEARCH_URL: ${AUTODOM_TRUECAR_SEARCH_URL:-https://www.truecar.com/used-cars-for-sale/listings/toyota/camry/}
+      AUTODOM_BIDCARS_CATALOG_URL: ${AUTODOM_BIDCARS_CATALOG_URL:-https://bid.cars/en/automobile/page/1}
+      SMARTPROXY_USERNAME: ${SMARTPROXY_USERNAME:-}
+      SMARTPROXY_PASSWORD: ${SMARTPROXY_PASSWORD:-}
+      SMARTPROXY_DATACENTER_ENDPOINT: ${SMARTPROXY_DATACENTER_ENDPOINT:-dc.decodo.com:10000}
+      SMARTPROXY_DATACENTER_PORT_START: ${SMARTPROXY_DATACENTER_PORT_START:-0}
+      SMARTPROXY_DATACENTER_PORT_COUNT: ${SMARTPROXY_DATACENTER_PORT_COUNT:-0}
+      SMARTPROXY_RESIDENTIAL_USERNAME: ${SMARTPROXY_RESIDENTIAL_USERNAME:-}
+      SMARTPROXY_RESIDENTIAL_PASSWORD: ${SMARTPROXY_RESIDENTIAL_PASSWORD:-}
+      SMARTPROXY_RESIDENTIAL_ENDPOINT: ${SMARTPROXY_RESIDENTIAL_ENDPOINT:-gate.decodo.com:7000}
+      SMARTPROXY_RESIDENTIAL_PORT_START: ${SMARTPROXY_RESIDENTIAL_PORT_START:-0}
+      SMARTPROXY_RESIDENTIAL_PORT_COUNT: ${SMARTPROXY_RESIDENTIAL_PORT_COUNT:-0}
+    expose: ["9901"]
+    volumes: [crawler-data:/data]
+    healthcheck:
+      test: [CMD, node, apps/worker/dist/cli.js, health]
+      interval: 30s
+      timeout: 6s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+networks:
+  default:
+    name: ${AUTODOM_NETWORK:-autodom}
+    external: true
+
+volumes:
+  crawler-data:
+    name: ${AUTODOM_CRAWLER_VOLUME:-${COMPOSE_PROJECT_NAME}_crawler-data}
+    external: true
