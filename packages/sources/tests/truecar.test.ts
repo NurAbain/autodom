@@ -1,4 +1,4 @@
-import { type DocumentTransport, SourceError } from "@autodom/core";
+import { type DocumentTransport, makeProfile, matches, SourceError } from "@autodom/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchPage, parsePage, SEARCH_URL } from "../src/truecar.js";
 
@@ -240,6 +240,56 @@ describe("TrueCar connected retail inventory", () => {
         }),
       ),
     ).toThrow(SourceError);
+  });
+
+  it("retains explicitly unpriced vehicles without blocking priced inventory or inventing a budget price", () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "truecar.com");
+    const parts = fixture({ total: 2, size: 2 });
+    const second = fixture({ vin: OTHER_VIN });
+    second[2].pricing = { listPrice: null, exclusion: "NOT_PRICED", discountLabel: null };
+    second[3].offers.price = "0.00";
+    parts[1].edges.push({ cursor: cursor(2), node: { __ref: "unpriced" } });
+    parts[1].pageInfo = { endCursor: cursor(2), hasNextPage: false };
+    const rendered = `<div data-test="usedListing" data-test-item="${OTHER_VIN}">
+      <span>Price Not Available</span><span>See your actual price</span>
+      <a data-test="cardLinkCover" href="/used-cars-for-sale/listing/${OTHER_VIN}/2020-toyota-camry/">View details</a>
+    </div>`;
+    const html = () =>
+      document(parts, {
+        extraState: { unpriced: second[2] },
+        linkedInventory: [parts[3], second[3]],
+        rendered,
+      });
+    const page = parsePage(html());
+    expect(page.listings.map((car) => car.id)).toEqual([`truecar:${VIN}`, `truecar:${OTHER_VIN}`]);
+    expect(page.listings[1]).toMatchObject({
+      price_kind: "unknown",
+      original_currency: "USD",
+      original_price_minor: null,
+      price_usd_minor: null,
+      price_kgs_minor: null,
+    });
+    const profile = makeProfile({
+      user_id: 0,
+      chat_id: 0,
+      market: "US",
+      currency: "USD",
+      budget_min_minor: 0,
+      budget_max_minor: 2_000_000,
+      budget_scope: "car",
+      allow_import: true,
+    });
+    expect(page.listings.filter((car) => matches(profile, car)).map((car) => car.id)).toEqual([
+      `truecar:${VIN}`,
+    ]);
+    expect(() =>
+      parsePage(html().replace("Price Not Available", "Advertised price $1.00")),
+    ).toThrow(SourceError);
+    second[3].offers.price = "1.00";
+    expect(() => parsePage(html())).toThrow(SourceError);
+    second[3].offers.price = "0.00";
+    second[2].pricing.listPrice = "12345.67";
+    expect(() => parsePage(html())).toThrow(SourceError);
   });
 
   it.each([

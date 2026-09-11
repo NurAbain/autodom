@@ -118,7 +118,7 @@ function canonicalJson(value: unknown): string {
   );
 }
 
-function history(row: RecordValue, vehicle: RecordValue): string {
+function history(row: RecordValue, vehicle: RecordValue, priced: boolean): string {
   const facts = ["TrueCar: USED (подержанный автомобиль)"];
   const certified = vehicle.certifiedPreOwned;
   if (certified != null) {
@@ -146,7 +146,11 @@ function history(row: RecordValue, vehicle: RecordValue): string {
       ? "TrueCar: статус title — неизвестно"
       : `TrueCar сообщает: clean title — ${title ? "да" : "нет"}`,
   );
-  facts.push("TrueCar: advertised asking price; NO_EXCLUSION; не итоговая стоимость");
+  facts.push(
+    priced
+      ? "TrueCar: advertised asking price; NO_EXCLUSION; не итоговая стоимость"
+      : "TrueCar: цена не опубликована (NOT_PRICED)",
+  );
   return facts.join("; ");
 }
 
@@ -156,7 +160,7 @@ function corroborateRenderedPurchase(
   year: number,
   make: RecordValue,
   model: RecordValue,
-  price: number,
+  price: number | null,
 ): void {
   const card = $(`[data-test="usedListing"][data-test-item="${vin}"]`);
   requireValue(card.length === 1, "missing or ambiguous rendered vehicle");
@@ -173,6 +177,14 @@ function corroborateRenderedPurchase(
       target.path === `${path}${year}-${text(make.slug)}-${text(model.slug)}/`,
     "noncanonical rendered vehicle URL",
   );
+  if (price === null) {
+    requireValue(
+      card.text().includes("Price Not Available") &&
+        card.find('[data-test="vehicleCardPricingPrice"]').length === 0,
+      "inconsistent rendered unavailable price",
+    );
+    return;
+  }
   const pricing = card.find('[data-test="vehicleCardPricing"]');
   const amounts = pricing.find('[data-test="vehicleCardPricingPrice"]');
   requireValue(
@@ -212,12 +224,15 @@ function listing(
     "not a used retail listing",
   );
   const pricing = object(row.pricing);
+  const unpriced = pricing.exclusion === "NOT_PRICED";
   requireValue(
-    pricing.exclusion === "NO_EXCLUSION" &&
-      (pricing.discountLabel == null || pricing.discountLabel === "UPFRONT_PRICE"),
+    unpriced
+      ? pricing.listPrice === null && pricing.discountLabel == null
+      : pricing.exclusion === "NO_EXCLUSION" &&
+          (pricing.discountLabel == null || pricing.discountLabel === "UPFRONT_PRICE"),
     "unsupported price qualification",
   );
-  const price = money(pricing.listPrice);
+  const price = unpriced ? null : money(pricing.listPrice);
   const url = `https://www.truecar.com/used-cars-for-sale/listing/${vin}/`;
   if (linked !== undefined) {
     const offer = object(linked.offers);
@@ -225,7 +240,7 @@ function listing(
       offer["@type"] === "Offer" &&
         offer.priceCurrency === "USD" &&
         offer.sku === vin &&
-        money(offer.price) === price,
+        (price === null ? offer.price === "0.00" : money(offer.price) === price),
       "inconsistent USD asking price",
     );
     requireValue(
@@ -285,9 +300,13 @@ function listing(
         (odometer.unitText == null || odometer.unitText === "mi" || odometer.unitText === "miles"),
       "unsupported odometer units",
     );
-  } else {
-    // Sponsored rendering can omit SEO metadata for a vehicle still in the requested connection.
-    requireValue(pricing.discountLabel === "UPFRONT_PRICE", "unsupported price qualification");
+  }
+  if (linked === undefined || unpriced) {
+    // Rendered evidence distinguishes an unavailable-price placeholder from a free car.
+    requireValue(
+      unpriced || pricing.discountLabel === "UPFRONT_PRICE",
+      "unsupported price qualification",
+    );
     corroborateRenderedPurchase($, vin, year, make, model, price);
   }
   const photos: string[] = [];
@@ -332,9 +351,9 @@ function listing(
     original_currency: "USD",
     original_price_minor: price,
     trim,
-    condition: history(row, vehicle),
+    condition: history(row, vehicle, !unpriced),
     search_aliases: `${make.name} ${model.name} ${trim}`,
-    price_kind: "asking",
+    price_kind: unpriced ? "unknown" : "asking",
   });
 }
 
