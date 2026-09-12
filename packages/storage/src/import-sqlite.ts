@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { makeListing, makeProfile } from "@autodom/core";
 import { getTableColumns } from "drizzle-orm";
-import { DATA_TABLES, type DataTable, schema } from "./schema.js";
+import { type DataTable, LEGACY_DATA_TABLES, schema } from "./schema.js";
 import { insertSnapshotRow } from "./snapshots.js";
 import { listingRecord, type Store } from "./store.js";
 
@@ -86,8 +86,8 @@ export async function importSqlite(path: string, store: Store): Promise<Record<s
       .all()
       .map((row) => String(row.name));
     if (
-      tableNames.length !== DATA_TABLES.length ||
-      DATA_TABLES.some((table) => !tableNames.includes(table))
+      tableNames.length !== LEGACY_DATA_TABLES.length ||
+      LEGACY_DATA_TABLES.some((table) => !tableNames.includes(table))
     )
       throw new Error("Unsupported legacy SQLite tables");
     const counts: Record<string, number> = {
@@ -99,7 +99,7 @@ export async function importSqlite(path: string, store: Store): Promise<Record<s
     };
     await store.transaction(async () => {
       await store.requireEmpty();
-      for (const table of DATA_TABLES) {
+      for (const table of LEGACY_DATA_TABLES) {
         const statement = source.prepare(
           `SELECT * FROM ${table} ORDER BY ${table === "metadata" ? "key" : table === "profiles" || table === "drafts" ? "user_id" : "id"}`,
         );

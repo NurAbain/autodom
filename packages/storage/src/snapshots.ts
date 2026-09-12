@@ -3,14 +3,15 @@ import { createReadStream, type ReadStream } from "node:fs";
 import { mkdir, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { makeListing, makeProfile } from "@autodom/core";
+import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import { getTableColumns, sql } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
-import { DATA_TABLES, type DataTable, schema } from "./schema.js";
+import { DATA_TABLES, type DataTable, LEGACY_DATA_TABLES, schema } from "./schema.js";
 import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -78,6 +79,19 @@ export async function insertSnapshotRow(
     );
     validateQuietHours(p.quiet_start_minute, p.quiet_end_minute);
   }
+  if (table === "owner_vehicles") {
+    const card = { ...row };
+    for (const name of [
+      "user_id",
+      "chat_id",
+      "mileage_km",
+      "sale_price_minor",
+      "cash_minor",
+      "monthly_minor",
+    ])
+      if (card[name] !== null) card[name] = safeNumber(card[name]);
+    validateOwnerVehicle(card as unknown as OwnerVehicle);
+  }
   const values = names.map((name) =>
     columns[name]!.dataType === "json"
       ? sql`${JSON.stringify(row[name])}::jsonb`
@@ -103,6 +117,7 @@ export async function backup(store: Store, destination: string): Promise<void> {
       profiles: 0,
       drafts: 0,
       metadata: 0,
+      owner_vehicles: 0,
     };
     const emit = async (value: unknown, digest = true) => {
       const line = `${JSON.stringify(value)}\n`;
@@ -119,7 +134,7 @@ export async function backup(store: Store, destination: string): Promise<void> {
       for (const table of DATA_TABLES) {
         // Server cursor bounds memory independently of catalog size, within one MVCC snapshot.
         await store.database.execute(
-          sql`DECLARE snapshot_rows NO SCROLL CURSOR FOR SELECT * FROM ${sql.identifier(table)} ORDER BY ${sql.identifier(table === "metadata" ? "key" : table === "profiles" || table === "drafts" ? "user_id" : "id")}`,
+          sql`DECLARE snapshot_rows NO SCROLL CURSOR FOR SELECT * FROM ${sql.identifier(table)} ORDER BY ${sql.identifier(table === "metadata" ? "key" : table === "profiles" || table === "drafts" || table === "owner_vehicles" ? "user_id" : "id")}`,
         );
         try {
           for (;;) {
@@ -178,10 +193,13 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, SCHEMA_VERSION].includes(header.schema_version as number) ||
-      JSON.stringify(header.tables) !== JSON.stringify(DATA_TABLES)
+      ![1, 2, 3, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      JSON.stringify(header.tables) !==
+        JSON.stringify(header.schema_version === SCHEMA_VERSION ? DATA_TABLES : LEGACY_DATA_TABLES)
     )
       throw new Error("Unsupported Autodom snapshot format");
+    const snapshotTables: readonly DataTable[] =
+      header.schema_version === SCHEMA_VERSION ? DATA_TABLES : LEGACY_DATA_TABLES;
     store = await Store.open(databaseUrl);
     const target = store;
     await target.transaction(async () => {
@@ -193,6 +211,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         profiles: 0,
         drafts: 0,
         metadata: 0,
+        owner_vehicles: 0,
       };
       let finished = false;
       let sequences: Record<string, unknown> | undefined;
@@ -210,8 +229,8 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
             !sequences ||
             record.sha256 !== hash.digest("hex") ||
             !object(declaredCounts) ||
-            Object.keys(declaredCounts).length !== DATA_TABLES.length ||
-            DATA_TABLES.some((table) => declaredCounts[table] !== counts[table])
+            Object.keys(declaredCounts).length !== snapshotTables.length ||
+            snapshotTables.some((table) => declaredCounts[table] !== counts[table])
           )
             throw new Error("Incomplete or corrupt snapshot");
           finished = true;
@@ -238,12 +257,12 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         const table = record.table as DataTable;
         if (
           sequences ||
-          !DATA_TABLES.includes(table) ||
+          !snapshotTables.includes(table) ||
           !object(record.row) ||
           Object.keys(record).length !== 2
         )
           throw new Error("Unknown snapshot table or record");
-        const index = DATA_TABLES.indexOf(table);
+        const index = snapshotTables.indexOf(table);
         if (index < lastTable) throw new Error("Snapshot tables are out of order");
         lastTable = index;
         let row = record.row;

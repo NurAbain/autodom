@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./owner-vehicle": {
+      "types": "./src/owner-vehicle.ts",
+      "default": "./src/owner-vehicle.ts"
     }
   },
   "dependencies": {}

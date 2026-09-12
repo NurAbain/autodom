@@ -25,6 +25,7 @@ import {
   TRANSMISSIONS,
   USE_CASES,
 } from "@autodom/core";
+import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
   and,
   asc,
@@ -42,7 +43,16 @@ import {
 } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { DATA_TABLES, drafts, events, listings, metadata, profiles, schema } from "./schema.js";
+import {
+  DATA_TABLES,
+  drafts,
+  events,
+  listings,
+  metadata,
+  ownerVehicles,
+  profiles,
+  schema,
+} from "./schema.js";
 
 const LOCK_NAMESPACE = 0x4155544f;
 const FRESH_SECONDS = 48 * 3600;
@@ -281,6 +291,7 @@ export class Store {
         "0002_mileage_bigint.sql",
         "0003_advertising_consent.sql",
         "0004_remove_advertising_consent.sql",
+        "0005_owner_vehicles.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
@@ -623,10 +634,34 @@ export class Store {
       await this.database.delete(drafts).where(eq(drafts.user_id, userId));
     });
   }
+  async getOwnerVehicle(userId: number): Promise<OwnerVehicle | null> {
+    const [row] = await this.database
+      .select()
+      .from(ownerVehicles)
+      .where(eq(ownerVehicles.user_id, userId));
+    return row ? validateOwnerVehicle(row) : null;
+  }
+  async saveOwnerVehicle(input: OwnerVehicle): Promise<OwnerVehicle> {
+    const card = validateOwnerVehicle(input);
+    return this.transaction(async () => {
+      const [saved] = await this.database
+        .insert(ownerVehicles)
+        .values(card)
+        .onConflictDoUpdate({ target: ownerVehicles.user_id, set: card })
+        .returning();
+      return saved!;
+    });
+  }
+  async deleteOwnerVehicle(userId: number): Promise<void> {
+    await this.transaction(async () => {
+      await this.database.delete(ownerVehicles).where(eq(ownerVehicles.user_id, userId));
+    });
+  }
   async deleteUser(userId: number): Promise<void> {
     await this.transaction(async () => {
       await this.database.delete(drafts).where(eq(drafts.user_id, userId));
       await this.database.delete(profiles).where(eq(profiles.user_id, userId));
+      await this.database.delete(ownerVehicles).where(eq(ownerVehicles.user_id, userId));
     });
   }
   async getMeta(key: string, defaultValue: string | null = null): Promise<string | null> {
