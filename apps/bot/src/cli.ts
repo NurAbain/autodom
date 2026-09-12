@@ -8,6 +8,8 @@ import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
 import { Conversation } from "./conversation.js";
+import { loadFinikGatewaySettings, PaymentService } from "./payments.js";
+import { runPaymentsCommand } from "./payments-cli.js";
 import { SellerConversation } from "./seller-conversation.js";
 import { metricsPort, runBotService } from "./service.js";
 import { createTelegramBot } from "./telegram.js";
@@ -15,10 +17,11 @@ import { createPhotoRecognizer } from "./vin-photo.js";
 
 const HELP = `Autodom Telegram bot and Mini App
 
-Usage: pnpm bot [serve|health] [--help]
+Usage: pnpm bot [serve|health|payments COMMAND] [--help]
 
   serve    Telegram polling, notifications, backups and optional Mini App (default)
   health   Probe this process's local metrics /health; no Store or token initialization
+  payments Manage explicit inspection offers and refund requests; payments --help
 
 AUTODOM_METRICS_PORT defaults to 9901.
 Set AUTODOM_MINI_APP_URL to enable the Mini App in this same bot process.
@@ -34,6 +37,7 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
   process.umask(0o077);
+  if (argv[0] === "payments") return runPaymentsCommand(argv.slice(1), env);
   let logger: Logger | undefined;
   let store: Store | undefined;
   let code = 0;
@@ -98,8 +102,10 @@ export async function main(
       store = await Store.open(settings.database_url);
       if (!abort.signal.aborted) {
         const conversation = new Conversation(store, { seller: new SellerConversation(store) });
+        const payments = new PaymentService(store, loadFinikGatewaySettings(env));
         const bot = createTelegramBot(store, token, {
           conversation,
+          payments,
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
           ...(checkVin ? { checkVin } : {}),
           ...(photoRecognizer ? { photoRecognizer } : {}),
@@ -111,6 +117,7 @@ export async function main(
             bot,
             token,
             conversation,
+            payments,
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
             ...(checkVin ? { checkVin } : {}),
             signal: abort.signal,

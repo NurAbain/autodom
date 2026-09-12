@@ -14,82 +14,25 @@ import type { VinLookup } from "@autodom/core/vin";
 import { readVinRequest, VinRequestError } from "@autodom/core/vin-request";
 import type { Store } from "@autodom/storage";
 import { listingText, type Reply } from "./conversation.js";
+import { RequestError, readFlatJson } from "./http-body.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
+import { PaymentRequestError, type PaymentService } from "./payments.js";
+import { handlePaymentRequest } from "./payments-http.js";
 import { VIN_NOT_ENABLED } from "./vin-text.js";
 
-class RequestError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
 async function readDialogueRequest(request: IncomingMessage): Promise<string> {
-  const maxBytes = 8192;
-  if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json")
-    throw new RequestError(415, "Отправьте ответ в формате JSON.");
-  if (request.headers["content-encoding"] && request.headers["content-encoding"] !== "identity")
-    throw new RequestError(415, "Сжатые запросы не поддерживаются.");
-  if (Number(request.headers["content-length"]) > maxBytes)
-    throw new RequestError(413, "Ответ слишком длинный.");
-  const bytes = await new Promise<Buffer>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const cleanup = () => {
-      clearTimeout(timer);
-      request.off("data", onData);
-      request.off("end", onEnd);
-      request.off("error", onError);
-      request.off("aborted", onError);
-    };
-    const fail = (status: number, message: string) => {
-      cleanup();
-      chunks.length = 0;
-      request.resume();
-      reject(new RequestError(status, message));
-    };
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > maxBytes) fail(413, "Ответ слишком длинный.");
-      else chunks.push(chunk);
-    };
-    const onEnd = () => {
-      cleanup();
-      resolve(Buffer.concat(chunks, size));
-    };
-    const onError = () => fail(400, "Не удалось прочитать ответ. Попробуйте ещё раз.");
-    const timer = setTimeout(() => fail(408, "Время отправки ответа истекло."), 10_000);
-    timer.unref();
-    request.on("data", onData);
-    request.once("end", onEnd);
-    request.once("error", onError);
-    request.once("aborted", onError);
-    if (request.destroyed) onError();
-  });
-  try {
-    const body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    // As with VIN input, do not let JSON.parse silently discard duplicate members.
-    if (!/^\s*\{\s*"(?:[^"\\]|\\.)*"\s*:\s*"(?:[^"\\]|\\.)*"\s*\}\s*$/u.test(body))
-      throw new Error();
-    const value: unknown = JSON.parse(body);
-    if (
-      !value ||
-      typeof value !== "object" ||
-      !("text" in value) ||
-      typeof value.text !== "string" ||
-      !value.text.trim() ||
-      value.text.length > 2048 ||
-      /[[\p{Cc}&&\p{ASCII}]--[\t\n\r]]/v.test(value.text)
-    )
-      throw new Error();
-    return value.text.trim();
-  } catch {
+  const value = await readFlatJson(request, 8192);
+  if (
+    Object.keys(value).length !== 1 ||
+    typeof value.text !== "string" ||
+    !value.text.trim() ||
+    value.text.length > 2048 ||
+    /[[\p{Cc}&&\p{ASCII}]--[\t\n\r]]/v.test(value.text)
+  )
     throw new RequestError(400, "Нужен один непустой ответ text, не длиннее 2048 символов.");
-  }
+  return value.text.trim();
 }
 
 function carView(listing: Listing, currency: string): MiniAppCar {
@@ -135,6 +78,7 @@ export interface MiniAppServerOptions {
   onError?: (error: unknown) => void;
   checkVin?: VinLookup;
   dialogue?: (userId: number, text: string) => Promise<Reply[]>;
+  payments?: PaymentService;
 }
 
 export async function startMiniAppServer(options: MiniAppServerOptions): Promise<Server> {
@@ -197,7 +141,14 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           return;
         }
         if (
-          !["/miniapp/api/car", "/miniapp/api/vin", "/miniapp/api/dialogue"].includes(url.pathname)
+          ![
+            "/miniapp/api/car",
+            "/miniapp/api/vin",
+            "/miniapp/api/dialogue",
+            "/miniapp/api/orders",
+            "/miniapp/api/orders/checkout",
+            "/miniapp/api/orders/cancel",
+          ].includes(url.pathname)
         )
           throw new RequestError(404, "Страница не найдена.");
         if (
@@ -214,6 +165,10 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             401,
             "Сессия истекла. Закройте карточку и откройте её заново в Telegram.",
           );
+        if (url.pathname.startsWith("/miniapp/api/orders")) {
+          await handlePaymentRequest(request, response, url, user.id, options.payments);
+          return;
+        }
         if (url.pathname === "/miniapp/api/dialogue") {
           if (request.method !== "POST") {
             response.setHeader("Allow", "POST");
@@ -296,7 +251,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         if (response.destroyed || response.headersSent) return;
         if (error instanceof VinRequestError)
           respond(response, error.status, { code: error.code, error: error.message });
-        else if (error instanceof RequestError)
+        else if (error instanceof RequestError || error instanceof PaymentRequestError)
           respond(response, error.status, { error: error.message });
         else {
           options.onError?.(error);

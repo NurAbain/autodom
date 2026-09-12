@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./payments": {
+      "types": "./src/payments.ts",
+      "default": "./src/payments.ts"
     }
   },
   "dependencies": {

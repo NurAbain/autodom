@@ -38,9 +38,17 @@ services:
       AUTODOM_VIN_API_TOKEN: ${AUTODOM_VIN_API_TOKEN:-}
       AUTODOM_OCR_API_URL: ${AUTODOM_OCR_API_URL:-}
       AUTODOM_OCR_API_TOKEN: ${AUTODOM_OCR_API_TOKEN:-}
-    expose: ["8080", "9901"]
+      AUTODOM_PAYMENTS_GATEWAY_URL: ${AUTODOM_PAYMENTS_GATEWAY_URL:-}
+      AUTODOM_PAYMENTS_GATEWAY_TOKEN: ${AUTODOM_PAYMENTS_GATEWAY_TOKEN:-}
+      AUTODOM_PAYMENTS_CALLBACK_TOKEN: ${AUTODOM_PAYMENTS_CALLBACK_TOKEN:-}
+      AUTODOM_PAYMENTS_CALLBACK_HOST: "0.0.0.0"
+      AUTODOM_PAYMENTS_CALLBACK_PORT: "8081"
+    expose: ["8080", "8081", "9901"]
     ports: ["${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"]
-    networks: [default, proxy]
+    networks:
+      default: {}
+      proxy:
+        aliases: [autodom-payment-events]
     volumes: [snapshots:/backups]
     healthcheck:
       test: [CMD, node, apps/bot/dist/cli.js, health]

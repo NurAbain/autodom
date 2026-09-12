@@ -1,10 +1,13 @@
 import { randomBytes } from "node:crypto";
+import { money } from "@autodom/core";
 import { normalizeVin, type VinLookup, vinGoogleSearchUrl } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
 import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
+import { paymentOrderStatus } from "./payment-text.js";
+import type { PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
   VIN_GOOGLE_SEARCH_LABEL,
@@ -161,6 +164,7 @@ export function createTelegramBot(
     checkVin?: VinLookup;
     conversation?: Conversation;
     photoRecognizer?: PhotoRecognizer;
+    payments?: PaymentService;
   } = {},
 ): AutodomBot {
   const bot = new Bot(token, {
@@ -239,6 +243,35 @@ export function createTelegramBot(
     }
   }
   bot.use(sequentialize((context) => (context.from ? `autodom:user:${context.from.id}` : [])));
+  bot.command("orders", async (context) => {
+    if (
+      context.chat.type !== "private" ||
+      !context.from ||
+      context.from.is_bot ||
+      context.chat.id !== context.from.id
+    )
+      return;
+    if (!options.payments) {
+      await context.reply("Заказы сейчас недоступны. Поиск, уведомления и проверка VIN бесплатны.");
+      return;
+    }
+    const orders = await options.payments.ledger.listOrders(context.from.id);
+    const replies = packReplies(
+      "<b>Мои заказы</b>\n\n" +
+        (orders.length
+          ? "Оплата и выполнение услуги — разные статусы. Состав, продавец, исполнитель и условия доступны в приложении."
+          : "Заказов пока нет. Платёж появляется только для отдельно согласованной физической услуги. Поиск, уведомления и проверка VIN бесплатны."),
+      orders
+        .slice(0, 10)
+        .map((order) =>
+          escapeHtml(
+            `${order.title} · ${money(order.amount, "KGS")}\n${paymentOrderStatus(order)}\nНомер: ${order.id}\nПоддержка: ${order.supportUrl}`,
+          ),
+        ),
+    );
+    if (options.miniAppUrl && replies.length) replies[replies.length - 1]!.miniAppView = "orders";
+    await sendReplies(bot, context.chat.id, replies, options);
+  });
   bot.on("message", async (context) => {
     if (
       context.chat.type !== "private" ||
@@ -439,6 +472,7 @@ export async function configureTelegramBot(bot: Bot, signal: AbortSignal): Promi
         { command: "pause", description: "Приостановить уведомления" },
         { command: "tips", description: "Советы перед покупкой" },
         { command: "vin", description: "Проверить VIN: CarHistory и Car365, без покупки" },
+        { command: "orders", description: "Мои заказы, оплата и поддержка услуг" },
         { command: "quiet", description: "Тихие часы: /quiet 23:00-08:00 или off" },
         { command: "privacy", description: "Хранение и удаление моих данных" },
         { command: "status", description: "Состояние каталога" },
