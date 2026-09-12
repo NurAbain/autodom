@@ -71,6 +71,24 @@ describe("remote VIN API consumer", () => {
       plant_country: "SOUTH KOREA",
     },
   };
+  const globalDecoder = {
+    status: "available",
+    source_url: VIN_SOURCE_URLS.autodev,
+    checked_at: result.checked_at,
+    data: {
+      vin: VIN,
+      make: "Hyundai",
+      model: null,
+      model_year: 1999,
+      trim: null,
+      body_class: null,
+      engine: null,
+      drive: null,
+      transmission: null,
+      origin_country: "South Korea",
+      ambiguous: false,
+    },
+  };
 
   it("preserves independently failed sources rather than rejecting a useful partial result", async () => {
     const check = await upstream(result);
@@ -92,6 +110,18 @@ describe("remote VIN API consumer", () => {
     });
   });
 
+  it("accepts global partial decoding alongside unavailable history sources", async () => {
+    const check = await upstream({
+      ...result,
+      autodev: globalDecoder,
+    });
+    const actual = await check(VIN);
+    expect(actual).toMatchObject({
+      autodev: { status: "available", data: { make: "Hyundai", model: null, model_year: 1999 } },
+      car365: { status: "unavailable", data: null },
+    });
+  });
+
   it.each([
     { ...result, vin: "KMFXKN7BPXU258801" },
     { ...result, carhistory: { ...result.carhistory, source_url: "https://attacker.invalid/" } },
@@ -104,6 +134,11 @@ describe("remote VIN API consumer", () => {
     { ...result, nhtsa_vpic: { ...decoder, source_url: "https://attacker.invalid/" } },
     { ...result, nhtsa_vpic: { ...decoder, status: "not_found" } },
     { ...result, nhtsa_vpic: { ...decoder, checked_at: null } },
+    {
+      ...result,
+      autodev: { ...globalDecoder, data: { ...globalDecoder.data, vin: "KMFXKN7BPXU258801" } },
+    },
+    { ...result, autodev: { ...globalDecoder, status: "not_found" } },
   ])("rejects an untrustworthy observation instead of displaying it", async (body) => {
     const check = await upstream(body);
     await expect(check(VIN)).rejects.toThrow();

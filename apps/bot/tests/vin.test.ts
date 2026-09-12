@@ -150,4 +150,54 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(disabled).toMatch(/отключён; запрос не отправлен/);
     expect(disabled).not.toMatch(/Проверено:/);
   });
+
+  it("marks ambiguous global specifications and never substitutes history or an untrusted link", () => {
+    const decoded: VinCheckResult = {
+      ...result,
+      autodev: {
+        status: "available",
+        source_url: "https://attacker.invalid/",
+        checked_at: result.checked_at,
+        data: {
+          vin: result.vin,
+          make: "Hyundai",
+          model: null,
+          model_year: 2010,
+          trim: null,
+          body_class: null,
+          engine: null,
+          drive: "Front Wheel Drive",
+          transmission: null,
+          origin_country: "South Korea",
+          ambiguous: true,
+        },
+      },
+    };
+    const section = vinSourceText("autodev", decoded);
+    expect(section).toContain("Auto.dev");
+    expect(section).toContain("Hyundai");
+    expect(section).toContain("2010");
+    expect(section).toMatch(/неоднозначн/);
+    expect(section).toMatch(/не история ДТП/);
+    expect(section).toMatch(/происхождени.*South Korea/);
+    expect(section).not.toMatch(/0 км|2024-05-02|null|undefined|Двигатель:/);
+    const text = vinResultText(decoded);
+    expect(text).toContain("https://docs.auto.dev/v2/products/vin-decode");
+    expect(text).not.toContain("attacker.invalid");
+  });
+
+  it("does not mislabel missing global specifications as missing government history", () => {
+    const section = vinSourceText("autodev", {
+      ...result,
+      autodev: {
+        status: "not_found",
+        source_url: "https://docs.auto.dev/v2/products/vin-decode",
+        checked_at: result.checked_at,
+        data: null,
+      },
+    });
+    expect(section).toMatch(/Декодер.*характеристики/);
+    expect(section).not.toMatch(/государственная запись|экспорте/);
+    expect(section).toMatch(/не подтверждает отсутствие ДТП/);
+  });
 });

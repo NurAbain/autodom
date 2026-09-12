@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { normalizeVin, VIN_SOURCE_URLS, type VinCheckResult, type VinLookup } from "./vin.js";
+import {
+  normalizeVin,
+  VIN_PROVIDERS,
+  VIN_SOURCE_URLS,
+  type VinCheckResult,
+  type VinLookup,
+} from "./vin.js";
 
 const status = z.enum(["available", "not_found", "unavailable", "disabled"]);
 const instant = z.number().nonnegative().max(8_640_000_000_000);
@@ -25,6 +31,21 @@ const nhtsaRecord = z
     plant_country: z.string().max(512).nullable(),
   })
   .strict();
+const autoDevRecord = z
+  .object({
+    vin: z.string(),
+    make: z.string().max(512).nullable(),
+    model: z.string().max(512).nullable(),
+    model_year: z.number().int().min(1886).max(9999).nullable(),
+    trim: z.string().max(512).nullable(),
+    body_class: z.string().max(512).nullable(),
+    engine: z.string().max(512).nullable(),
+    drive: z.string().max(512).nullable(),
+    transmission: z.string().max(512).nullable(),
+    origin_country: z.string().max(512).nullable(),
+    ambiguous: z.boolean(),
+  })
+  .strict();
 const resultSchema = z
   .object({
     vin: z.string(),
@@ -35,6 +56,10 @@ const resultSchema = z
       .strict(),
     nhtsa_vpic: observation
       .extend({ source_url: z.literal(VIN_SOURCE_URLS.nhtsa_vpic), data: nhtsaRecord.nullable() })
+      .strict()
+      .optional(),
+    autodev: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.autodev), data: autoDevRecord.nullable() })
       .strict()
       .optional(),
   })
@@ -111,20 +136,18 @@ export function createVinApiLookup(
         reader.releaseLock();
       }
       const result = resultSchema.parse(JSON.parse(body));
-      const decoder = result.nhtsa_vpic;
-      if (
-        result.vin !== vin ||
-        (result.car365.data !== null && result.car365.data.vin !== vin) ||
-        (result.car365.status === "available") !== (result.car365.data !== null) ||
-        (decoder !== undefined &&
-          ((decoder.data !== null && decoder.data.vin !== vin) ||
-            (decoder.status === "available") !== (decoder.data !== null) ||
-            (decoder.status === "disabled") !== (decoder.checked_at === null))) ||
-        [result.carhistory, result.car365].some(
-          (item) => (item.status === "disabled") !== (item.checked_at === null),
+      if (result.vin !== vin) throw new Error("VIN API result identity mismatch");
+      for (const provider of VIN_PROVIDERS) {
+        const item = result[provider];
+        if (
+          item !== undefined &&
+          ((item.status === "disabled") !== (item.checked_at === null) ||
+            ("data" in item &&
+              ((item.status === "available") !== (item.data !== null) ||
+                (item.data !== null && item.data.vin !== vin))))
         )
-      )
-        throw new Error("VIN API result identity or observation state mismatch");
+          throw new Error("VIN API observation identity or state mismatch");
+      }
       return result;
     } catch {
       // Neither the credential, service URL nor an upstream error body reaches the user/logs.

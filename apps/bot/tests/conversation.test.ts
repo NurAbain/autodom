@@ -729,6 +729,54 @@ describe("grammY transport boundaries", () => {
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
   });
+  it("delivers long decoder results within Telegram limits without parsing source text as markup", async () => {
+    const literal = "<literal & data>".repeat(32);
+    const { bot, calls } = telegram(async (vin) => ({
+      vin,
+      checked_at: 1_789_000_000,
+      carhistory: { status: "disabled", source_url: "", checked_at: null },
+      car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+      autodev: {
+        status: "available",
+        source_url: "https://docs.auto.dev/v2/products/vin-decode",
+        checked_at: 1_789_000_000,
+        data: {
+          vin,
+          make: literal,
+          model: literal,
+          model_year: 2010,
+          trim: literal,
+          body_class: literal,
+          engine: literal,
+          drive: literal,
+          transmission: literal,
+          origin_country: literal,
+          ambiguous: false,
+        },
+      },
+    }));
+    await bot.init();
+    await bot.handleUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private", first_name: "Buyer" },
+        text: "/vin KMHDU41DBAU123456",
+      },
+    });
+    const sent = calls.filter((call) => call.method === "sendMessage");
+    expect(sent.every((call) => String(call.payload.text).length <= 4096)).toBe(true);
+    expect(sent.every((call) => call.payload.parse_mode === "HTML")).toBe(true);
+    const html = sent.map((call) => String(call.payload.text)).join("");
+    expect(html).not.toContain("<literal");
+    expect(html.match(/&lt;literal &amp; data&gt;/g)).toHaveLength(32 * 8);
+    expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
+    expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+    });
+  });
   it("refuses an existing webhook without replacing it or registering commands", async () => {
     const { bot, calls } = telegram();
     bot.api.config.use(async (previous, method, payload, signal) =>

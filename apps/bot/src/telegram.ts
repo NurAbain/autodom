@@ -3,7 +3,7 @@ import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
-import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
+import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
 import {
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
@@ -171,10 +171,16 @@ export function createTelegramBot(
             "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
         }
       }
-      await context.reply(`${text}\n\n${VIN_GOOGLE_SEARCH_NOTICE}`, {
-        link_preview_options: { is_disabled: true },
-        reply_markup: new InlineKeyboard().url(VIN_GOOGLE_SEARCH_LABEL, searchUrl),
-      });
+      const replies = packReplies(escapeHtml(`${text}\n\n${VIN_GOOGLE_SEARCH_NOTICE}`), []);
+      for (const [index, reply] of replies.entries()) {
+        await context.reply(reply.text, {
+          parse_mode: "HTML",
+          link_preview_options: { is_disabled: true },
+          ...(index === replies.length - 1
+            ? { reply_markup: new InlineKeyboard().url(VIN_GOOGLE_SEARCH_LABEL, searchUrl) }
+            : {}),
+        });
+      }
       return;
     }
     await store.withLock(`autodom:user:${context.from.id}`, async () => {

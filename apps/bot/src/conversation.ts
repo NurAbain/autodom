@@ -96,7 +96,7 @@ const USE_CASE_TIPS: Record<string, string> = {
   travel:
     "Для дальних поездок проверьте запасное колесо, тормоза и историю обслуживания перед выездом.",
 };
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text.replace(
     /[&<>"']/g,
     (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" })[char]!,

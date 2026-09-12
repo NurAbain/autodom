@@ -1,4 +1,4 @@
-export const VIN_PROVIDERS = ["carhistory", "car365", "nhtsa_vpic"] as const;
+export const VIN_PROVIDERS = ["carhistory", "car365", "nhtsa_vpic", "autodev"] as const;
 export type VinProvider = (typeof VIN_PROVIDERS)[number];
 export type VinSourceStatus = "available" | "not_found" | "unavailable" | "disabled";
 
@@ -7,6 +7,7 @@ export const VIN_SOURCE_URLS: Readonly<Record<VinProvider, string>> = {
   carhistory: "https://www.carhistory.or.kr/search/carhistory/search.car",
   car365: "https://www.car365.go.kr/ccpt/carlife/scrcar/schdcarXportView.do",
   nhtsa_vpic: "https://vpic.nhtsa.dot.gov/api/",
+  autodev: "https://docs.auto.dev/v2/products/vin-decode",
 };
 
 export interface VinObservation {
@@ -36,6 +37,21 @@ export interface NhtsaVpicRecord {
   plant_country: string | null;
 }
 
+/** Global technical decoding; origin and ambiguity are not vehicle-history evidence. */
+export interface AutoDevRecord {
+  vin: string;
+  make: string | null;
+  model: string | null;
+  model_year: number | null;
+  trim: string | null;
+  body_class: string | null;
+  engine: string | null;
+  drive: string | null;
+  transmission: string | null;
+  origin_country: string | null;
+  ambiguous: boolean;
+}
+
 export interface VinCheckResult {
   vin: string;
   checked_at: number;
@@ -43,6 +59,8 @@ export interface VinCheckResult {
   car365: VinObservation & { data: Car365Record | null };
   /** Omitted when not configured, including responses from an older API release. */
   nhtsa_vpic?: (VinObservation & { data: NhtsaVpicRecord | null }) | undefined;
+  /** Omitted when not configured, including responses from an older API release. */
+  autodev?: (VinObservation & { data: AutoDevRecord | null }) | undefined;
 }
 
 export type VinLookup = (vin: string, signal?: AbortSignal) => Promise<VinCheckResult>;
