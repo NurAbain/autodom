@@ -4,14 +4,32 @@ import { mkdir, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { makeListing, makeProfile } from "@autodom/core";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
+import {
+  finikPaymentId,
+  type PaymentEvent,
+  validatePaymentAmount,
+  validatePaymentEvent,
+  validatePaymentOffer,
+  validatePaymentText,
+  validatePaymentTimestamp,
+  validatePaymentUrl,
+} from "@autodom/core/payments";
 import { getTableColumns, sql } from "drizzle-orm";
 import type { PgColumn } from "drizzle-orm/pg-core";
-import { DATA_TABLES, type DataTable, LEGACY_DATA_TABLES, schema } from "./schema.js";
+import { decodePaymentOrder, paymentEventFingerprint } from "./payments.js";
+import {
+  DATA_TABLES,
+  type DataTable,
+  LEGACY_DATA_TABLES,
+  OWNER_DATA_TABLES,
+  type paymentOrders,
+  schema,
+} from "./schema.js";
 import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -92,6 +110,61 @@ export async function insertSnapshotRow(
       if (card[name] !== null) card[name] = safeNumber(card[name]);
     validateOwnerVehicle(card as unknown as OwnerVehicle);
   }
+  if (table === "payment_orders") {
+    const order = decodePaymentOrder({
+      ...row,
+      user_id: safeNumber(row.user_id),
+      amount: safeNumber(row.amount),
+    } as typeof paymentOrders.$inferSelect);
+    finikPaymentId(order.id);
+    validatePaymentOffer(order);
+    validatePaymentTimestamp(order.createdAt);
+    if (order.acceptedAt !== null) {
+      validatePaymentTimestamp(order.acceptedAt);
+      if (
+        Date.parse(order.acceptedAt) < Date.parse(order.createdAt) ||
+        Date.parse(order.acceptedAt) >= Date.parse(order.expiresAt)
+      )
+        throw new Error("Invalid order acceptance timestamp");
+    }
+    if (order.invoiceUrl !== null) {
+      validatePaymentUrl(order.invoiceUrl);
+      if (!order.acceptedAt) throw new Error("Invoice requires accepted order");
+    }
+    if (order.chargeId !== null) validatePaymentText(order.chargeId, "charge ID", 300);
+    if (
+      (order.invoiceStatus === "offered" && order.acceptedAt !== null) ||
+      (order.invoiceStatus === "pending" && order.acceptedAt === null)
+    )
+      throw new Error("Invalid order invoice state");
+  }
+  if (table === "payment_events") {
+    const event = row.data as unknown as PaymentEvent;
+    validatePaymentEvent(event);
+    finikPaymentId(String(row.id));
+    validatePaymentTimestamp(String(row.received_at));
+    if (
+      row.provider !== event.provider ||
+      row.event_id !== event.eventId ||
+      row.charge_id !== event.chargeId ||
+      row.order_id !== event.orderId ||
+      row.fingerprint !== paymentEventFingerprint(event)
+    )
+      throw new Error("Payment event identity does not match its snapshot row");
+    if (row.review_reason !== null)
+      validatePaymentText(String(row.review_reason), "review reason", 300);
+  }
+  if (table === "payment_refunds") {
+    finikPaymentId(String(row.id));
+    finikPaymentId(String(row.order_id));
+    validatePaymentAmount(safeNumber(row.amount));
+    validatePaymentText(String(row.reason), "refund reason", 2000);
+    validatePaymentTimestamp(String(row.created_at));
+    validatePaymentTimestamp(String(row.updated_at));
+    if (Date.parse(String(row.updated_at)) < Date.parse(String(row.created_at)))
+      throw new Error("Invalid refund timestamp");
+    if (row.note !== null) validatePaymentText(String(row.note), "refund note", 2000);
+  }
   const values = names.map((name) =>
     columns[name]!.dataType === "json"
       ? sql`${JSON.stringify(row[name])}::jsonb`
@@ -118,6 +191,9 @@ export async function backup(store: Store, destination: string): Promise<void> {
       drafts: 0,
       metadata: 0,
       owner_vehicles: 0,
+      payment_orders: 0,
+      payment_events: 0,
+      payment_refunds: 0,
     };
     const emit = async (value: unknown, digest = true) => {
       const line = `${JSON.stringify(value)}\n`;
@@ -193,13 +269,23 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
-        JSON.stringify(header.schema_version === SCHEMA_VERSION ? DATA_TABLES : LEGACY_DATA_TABLES)
+        JSON.stringify(
+          header.schema_version === SCHEMA_VERSION
+            ? DATA_TABLES
+            : header.schema_version === 4
+              ? OWNER_DATA_TABLES
+              : LEGACY_DATA_TABLES,
+        )
     )
       throw new Error("Unsupported Autodom snapshot format");
     const snapshotTables: readonly DataTable[] =
-      header.schema_version === SCHEMA_VERSION ? DATA_TABLES : LEGACY_DATA_TABLES;
+      header.schema_version === SCHEMA_VERSION
+        ? DATA_TABLES
+        : header.schema_version === 4
+          ? OWNER_DATA_TABLES
+          : LEGACY_DATA_TABLES;
     store = await Store.open(databaseUrl);
     const target = store;
     await target.transaction(async () => {
@@ -212,6 +298,9 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         drafts: 0,
         metadata: 0,
         owner_vehicles: 0,
+        payment_orders: 0,
+        payment_events: 0,
+        payment_refunds: 0,
       };
       let finished = false;
       let sequences: Record<string, unknown> | undefined;
@@ -277,6 +366,36 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         counts[table]++;
       }
       if (!finished || !sequences) throw new Error("Truncated Autodom snapshot");
+      const invalidFinancialState = await target.database.execute(sql`
+        SELECT id FROM payment_orders o
+        WHERE (o.payment_status = 'paid' AND NOT EXISTS (
+          SELECT 1 FROM payment_events e WHERE e.order_id = o.id AND e.charge_id = o.charge_id
+            AND e.data->>'currency' = o.currency AND (e.data->>'amount')::numeric = o.amount
+            AND (e.outcome = 'applied' OR e.review_reason = 'late_or_cancelled_payment')
+        )) OR EXISTS (
+          SELECT 1 FROM payment_refunds r WHERE r.order_id = o.id
+          GROUP BY r.order_id HAVING o.payment_status <> 'paid'
+            OR sum(CASE WHEN r.status <> 'failed' THEN r.amount ELSE 0 END) > o.amount
+            OR max(r.amount) > o.amount
+        )
+        OR (NOT o.needs_review AND EXISTS (
+          SELECT 1 FROM payment_events e WHERE e.outcome = 'review' AND (
+            e.order_id = o.id OR e.charge_id = o.charge_id OR EXISTS (
+              SELECT 1 FROM payment_events related
+              WHERE related.order_id = o.id AND related.provider = e.provider
+                AND (related.event_id = e.event_id OR related.charge_id = e.charge_id)
+            )
+          )
+        ))
+        UNION ALL
+        SELECT e.id FROM payment_events e
+        WHERE (e.outcome = 'applied' OR e.review_reason = 'late_or_cancelled_payment') AND NOT EXISTS (
+          SELECT 1 FROM payment_orders o WHERE o.id = e.order_id AND o.charge_id = e.charge_id
+            AND o.payment_status = 'paid'
+        )
+        LIMIT 1
+      `);
+      if (invalidFinancialState.rows.length) throw new Error("Inconsistent financial snapshot");
       await target.resetSequences(sequences.events as string, sequences.revisions as string);
     });
   } finally {

@@ -292,6 +292,7 @@ export class Store {
         "0003_advertising_consent.sql",
         "0004_remove_advertising_consent.sql",
         "0005_owner_vehicles.sql",
+        "0006_payments.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
