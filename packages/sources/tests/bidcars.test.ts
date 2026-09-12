@@ -496,6 +496,17 @@ describe("Bid.Cars fetch", () => {
     expect(calls).toEqual([CATALOG_URL, URL]);
     expect(batch).toHaveBeenCalledTimes(1);
   });
+  it("decodes structured title entities before matching the catalog without interpreting markup", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const encoded = "1969 Alfa Romeo Duetto, 5&#039;7&nbsp;&amp;&nbsp;&lt;Prototype&gt;";
+    const result = await fetchPage({
+      transport: transportFor({
+        [CATALOG_URL]: catalog([row(URL, "1-66587646", encoded)]),
+        [URL]: detail().replaceAll("1969 Alfa Romeo Duetto", encoded),
+      }),
+    });
+    expect(result.listings[0]?.title).toBe("1969 Alfa Romeo Duetto, 5'7 & <Prototype>");
+  });
   it("uses the full detail identity when the catalog visibly truncates the trim", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
     vi.useFakeTimers();

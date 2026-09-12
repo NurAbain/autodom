@@ -9,6 +9,7 @@ import {
 } from "@autodom/core";
 import { type Cheerio, type CheerioAPI, load } from "cheerio";
 import type { AnyNode } from "domhandler";
+import { decodeHTMLStrict } from "entities";
 
 export const CATALOG_URL = "https://bid.cars/en/automobile/page/1";
 /** The shared Crawlee transport owns source pacing, including this legacy detail interval. */
@@ -468,7 +469,9 @@ export function parseDetail(text: string, url: string): Listing | null {
   const year = identity.vehicleModelDate;
   if (typeof year !== "string" || !/^[12][0-9]{3}$/.test(year))
     throw new SourceError("Bid.Cars vehicle year schema changed");
-  const name = optional(identity.name);
+  const name = optional(
+    typeof identity.name === "string" ? decodeHTMLStrict(identity.name) : identity.name,
+  );
   const suffix = ` | ${vin} | ${archived ? "Bid History | " : ""}BidCars`;
   if (!name.endsWith(suffix) || !name.startsWith(`${year} `))
     throw new SourceError("Bid.Cars vehicle title identity mismatch");
