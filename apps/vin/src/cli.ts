@@ -20,6 +20,8 @@ Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
 free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
 not vehicle history. Auto.dev Free is capped at 1,000 calls/month; no paid upgrades.
+Configured Korean providers run first. Decoders run only after all return not_found,
+or directly if no Korean provider is configured. Korean hits/errors skip both decoders.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
 AUTODOM_VIN_API_MAX_IN_FLIGHT defaults to 10; AUTODOM_CRAWL_DELAY to 2 seconds.
 health needs only host/port. No database, Redis or Telegram configuration is used.

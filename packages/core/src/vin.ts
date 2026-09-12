@@ -57,9 +57,9 @@ export interface VinCheckResult {
   checked_at: number;
   carhistory: VinObservation;
   car365: VinObservation & { data: Car365Record | null };
-  /** Omitted when not configured, including responses from an older API release. */
+  /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
   nhtsa_vpic?: (VinObservation & { data: NhtsaVpicRecord | null }) | undefined;
-  /** Omitted when not configured, including responses from an older API release. */
+  /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
   autodev?: (VinObservation & { data: AutoDevRecord | null }) | undefined;
 }
 

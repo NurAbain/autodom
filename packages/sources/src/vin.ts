@@ -63,6 +63,15 @@ export class VinCheckService {
     const vin = normalizeVin(value);
     if (!vin) throw new RangeError("VIN must contain 17 letters and digits, without I, O or Q");
     signal?.throwIfAborted();
+    // Both phases share the existing lookup budget; fallback must not extend it.
+    const fallbackSignal =
+      this.#enabled.nhtsa_vpic || this.#enabled.autodev
+        ? AbortSignal.any([
+            this.#signal,
+            AbortSignal.timeout(this.#timeoutMs),
+            ...(signal ? [signal] : []),
+          ])
+        : undefined;
     const result: VinCheckResult = {
       vin,
       checked_at: Date.now() / 1000,
@@ -105,6 +114,18 @@ export class VinCheckService {
           result.car365.status = "unavailable";
         }
       })(),
+    ]);
+    signal?.throwIfAborted();
+    // A failed Korean lookup is not absence and must not trigger decoder egress.
+    if (
+      !fallbackSignal ||
+      this.#signal.aborted ||
+      (this.#enabled.carhistory && result.carhistory.status !== "not_found") ||
+      (this.#enabled.car365 && result.car365.status !== "not_found")
+    ) {
+      return result;
+    }
+    await Promise.all([
       (async () => {
         if (!this.#enabled.nhtsa_vpic) return;
         const observation: NonNullable<VinCheckResult["nhtsa_vpic"]> = {
@@ -114,11 +135,7 @@ export class VinCheckService {
           data: null,
         };
         result.nhtsa_vpic = observation;
-        const task = checkNhtsaVpic(
-          vin,
-          signal ? AbortSignal.any([this.#signal, signal]) : this.#signal,
-          this.#timeoutMs,
-        );
+        const task = checkNhtsaVpic(vin, fallbackSignal, this.#timeoutMs);
         this.#active.add(task);
         try {
           observation.data = await task;
@@ -139,12 +156,7 @@ export class VinCheckService {
           data: null,
         };
         result.autodev = observation;
-        const task = checkAutoDev(
-          vin,
-          this.#autoDevApiKey,
-          signal ? AbortSignal.any([this.#signal, signal]) : this.#signal,
-          this.#timeoutMs,
-        );
+        const task = checkAutoDev(vin, this.#autoDevApiKey, fallbackSignal, this.#timeoutMs);
         this.#active.add(task);
         try {
           observation.data = await task;

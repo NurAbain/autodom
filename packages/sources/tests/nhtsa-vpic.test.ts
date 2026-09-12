@@ -1,4 +1,4 @@
-import { ProxyRoute, SourceError } from "@autodom/core";
+import { SourceError } from "@autodom/core";
 import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseNhtsaVpicRecord } from "../src/nhtsa-vpic.js";
@@ -154,52 +154,12 @@ describe("NHTSA independent direct lookup", () => {
     expect((await lookup.check(VIN)).nhtsa_vpic?.status).toBe("unavailable");
   });
 
-  it("retains the decode when a Korean workflow fails", async () => {
-    reply(200, payload());
-    const korean = new MockAgent();
-    korean.disableNetConnect();
-    korean
-      .get("https://www.carhistory.or.kr")
-      .intercept({ path: "/search/carhistory/search.car" })
-      .reply(200, "<h1>Maintenance</h1>");
-    const result = await service({
-      providers: ["carhistory", "nhtsa_vpic"],
-      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
-      requestDelaySeconds: 0,
-      dispatcherFactory: () => korean,
-    }).check(VIN);
-    expect(result.carhistory.status).toBe("unavailable");
-    expect(result.nhtsa_vpic?.status).toBe("available");
-  });
-
   it("bounds a stalled direct request without reporting decode absence", async () => {
     reply(200, payload()).delay(200);
     expect((await service({ timeoutMs: 10 }).check(VIN)).nhtsa_vpic).toMatchObject({
       status: "unavailable",
       data: null,
     });
-  });
-
-  it("retains Korean mileage when the decoder returns malformed evidence", async () => {
-    reply(200, payload({ VIN: "1HGCM82633A004353" }));
-    const korean = new MockAgent();
-    korean.disableNetConnect();
-    korean
-      .get("https://www.car365.go.kr")
-      .intercept({ path: "/ccpt/carlife/scrcar/schdcarXportView.do" })
-      .reply(200, '<script>const _CSRF_TOKEN = "anonymous-token";</script>');
-    korean
-      .get("https://www.car365.go.kr")
-      .intercept({ path: "/ccpt/carlife/scrcar/selectSchdcarXportList.do", method: "POST" })
-      .reply(200, JSON.stringify({ vin: VIN, drvngDstnc: "79,434" }));
-    const result = await service({
-      providers: ["car365", "nhtsa_vpic"],
-      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
-      requestDelaySeconds: 0,
-      dispatcherFactory: () => korean,
-    }).check(VIN);
-    expect(result.car365).toMatchObject({ status: "available", data: { last_mileage_km: 79434 } });
-    expect(result.nhtsa_vpic).toMatchObject({ status: "unavailable", data: null });
   });
 
   it("classifies network failure as unavailable instead of a missing decode", async () => {

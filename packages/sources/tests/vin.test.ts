@@ -1,6 +1,6 @@
 import { ProxyRoute } from "@autodom/core";
-import { MockAgent } from "undici";
-import { describe, expect, it } from "vitest";
+import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VinCheckService } from "../src/vin.js";
 
 const VIN = "KMFXKN7BPXU258800";
@@ -75,4 +75,198 @@ describe("VIN lookup source independence", () => {
       await service.close();
     }
   });
+});
+
+describe("Korean-first VIN lookup", () => {
+  const originalDispatcher = getGlobalDispatcher();
+  const services: VinCheckService[] = [];
+  let direct: MockAgent;
+
+  beforeEach(() => {
+    direct = new MockAgent();
+    direct.disableNetConnect();
+    setGlobalDispatcher(direct);
+  });
+
+  afterEach(async () => {
+    await Promise.all(services.splice(0).map((service) => service.close()));
+    setGlobalDispatcher(originalDispatcher);
+    await direct.close();
+  });
+
+  type Outcome = "available" | "not_found" | "unavailable";
+  function fixture(
+    carhistory: Outcome,
+    car365: Outcome,
+    options: { koreanDelay?: number; directDelay?: number; timeoutMs?: number } = {},
+  ) {
+    const events: string[] = [];
+    const directRequests: string[] = [];
+    const korean = [new MockAgent(), new MockAgent()];
+    const entry = `<form method="post" name="searchForm" action="initSearch.car">
+      <select name="carnumSel"><option value="1">VIN</option></select>
+      <input name="carbodynum"><input name="carnum"><input name="carnum2"><input name="realm">
+    </form>`;
+    const found = carhistory === "available";
+    const historyBody = `<div class="sec-search-initSearch"><section class="sec1${found ? "" : " error"}">
+      <h2 class="title">${found ? "조회 가능한 차량입니다" : "차량번호 오류"}</h2>
+      <div class="number-box">${VIN}</div><div class="deco">
+      <img src="/img/character/${found ? "initSearch" : "initSearch-noResult"}.png"></div>
+    </section></div>`;
+    for (const [index, mock] of korean.entries()) {
+      mock.disableNetConnect();
+      const history = index === 0;
+      const provider = history ? "carhistory" : "car365";
+      const outcome = history ? carhistory : car365;
+      const pool = mock.get(history ? "https://www.carhistory.or.kr" : "https://www.car365.go.kr");
+      pool
+        .intercept({
+          path: history
+            ? "/search/carhistory/search.car"
+            : "/ccpt/carlife/scrcar/schdcarXportView.do",
+        })
+        .reply(
+          200,
+          outcome === "unavailable"
+            ? "Maintenance"
+            : history
+              ? entry
+              : '<script>const _CSRF_TOKEN = "anonymous-token";</script>',
+        );
+      if (outcome !== "unavailable") {
+        const response = pool
+          .intercept({
+            path: history
+              ? "/search/carhistory/initSearch.car"
+              : "/ccpt/carlife/scrcar/selectSchdcarXportList.do",
+            method: "POST",
+          })
+          .reply(() => {
+            events.push(provider);
+            return {
+              statusCode: 200,
+              data: history
+                ? historyBody
+                : car365 === "available"
+                  ? JSON.stringify({ vin: VIN, drvngDstnc: "79,434" })
+                  : "",
+            };
+          });
+        if (!history && options.koreanDelay) response.delay(options.koreanDelay);
+      }
+    }
+    for (const provider of ["nhtsa_vpic", "autodev"] as const) {
+      const nhtsa = provider === "nhtsa_vpic";
+      const response = direct
+        .get(nhtsa ? "https://vpic.nhtsa.dot.gov" : "https://api.auto.dev")
+        .intercept({
+          path: nhtsa ? `/api/vehicles/DecodeVinValues/${VIN}?format=json` : `/vin/${VIN}`,
+        })
+        .reply(() => {
+          directRequests.push(provider);
+          events.push(provider);
+          return {
+            statusCode: 200,
+            data: JSON.stringify(
+              nhtsa
+                ? {
+                    Count: 1,
+                    Results: [
+                      { VIN, ErrorCode: "0", Make: "HYUNDAI", Model: "Porter", ModelYear: "1999" },
+                    ],
+                  }
+                : {
+                    vin: VIN,
+                    vinValid: true,
+                    make: "Hyundai",
+                    model: "Porter",
+                    year: 1999,
+                    ambiguous: false,
+                  },
+            ),
+            responseOptions: { headers: { "content-type": "application/json" } },
+          };
+        });
+      if (options.directDelay) response.delay(options.directDelay);
+    }
+    const lookup = new VinCheckService({
+      providers: ["carhistory", "car365", "nhtsa_vpic", "autodev"],
+      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
+      requestDelaySeconds: 0,
+      autoDevApiKey: "not-a-production-test-key",
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      dispatcherFactory: (_route, page) => {
+        const mock = korean[page - 1];
+        if (!mock) throw new Error("Unexpected Korean workflow");
+        return mock;
+      },
+    });
+    services.push(lookup);
+    return { lookup, directRequests, events };
+  }
+
+  it.each([
+    ["available", "not_found"],
+    ["not_found", "available"],
+    ["unavailable", "not_found"],
+    ["not_found", "unavailable"],
+  ] as const)(
+    "does not contact either decoder for Korean outcomes %s / %s",
+    async (carhistory, car365) => {
+      const { lookup, directRequests } = fixture(carhistory, car365);
+      const result = await lookup.check(VIN);
+      expect(result.carhistory.status).toBe(carhistory);
+      expect(result.car365.status).toBe(car365);
+      expect(directRequests).toEqual([]);
+      expect(result).not.toHaveProperty("nhtsa_vpic");
+      expect(result).not.toHaveProperty("autodev");
+    },
+  );
+
+  it("waits for both Korean misses before contacting both decoders", async () => {
+    const { lookup, events, directRequests } = fixture("not_found", "not_found", {
+      koreanDelay: 300,
+    });
+    const pending = lookup.check(VIN);
+    await expect.poll(() => events.includes("car365")).toBe(true);
+    expect(directRequests).toEqual([]);
+    const result = await pending;
+    expect(result.carhistory.status).toBe("not_found");
+    expect(result.car365.status).toBe("not_found");
+    expect(directRequests.toSorted()).toEqual(["autodev", "nhtsa_vpic"]);
+    expect(result.nhtsa_vpic).toMatchObject({ status: "available", data: { vin: VIN } });
+    expect(result.autodev).toMatchObject({ status: "available", data: { vin: VIN } });
+  });
+
+  it("does not give the decoder phase a fresh whole-lookup timeout", async () => {
+    const { lookup, directRequests } = fixture("not_found", "not_found", {
+      koreanDelay: 150,
+      directDelay: 350,
+      timeoutMs: 400,
+    });
+    const result = await lookup.check(VIN);
+    expect(result.carhistory.status).toBe("not_found");
+    expect(result.car365.status).toBe("not_found");
+    expect(directRequests.toSorted()).toEqual(["autodev", "nhtsa_vpic"]);
+    expect(result.nhtsa_vpic).toMatchObject({ status: "unavailable", data: null });
+    expect(result.autodev).toMatchObject({ status: "unavailable", data: null });
+  });
+
+  it.each(["caller", "close"] as const)(
+    "does not start the decoder phase after %s cancellation in Korea",
+    async (action) => {
+      const { lookup, events, directRequests } = fixture("not_found", "not_found", {
+        koreanDelay: 300,
+      });
+      const caller = new AbortController();
+      const pending = lookup.check(VIN, caller.signal);
+      const settled = Promise.allSettled([pending]);
+      await expect.poll(() => events.includes("car365")).toBe(true);
+      if (action === "caller") caller.abort(new Error("caller stopped"));
+      else await lookup.close();
+      const [result] = await settled;
+      expect(result?.status).toBe(action === "caller" ? "rejected" : "fulfilled");
+      expect(directRequests).toEqual([]);
+    },
+  );
 });
