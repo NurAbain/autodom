@@ -106,6 +106,75 @@ describe("proxy-only VIN sessions", () => {
     for (const mock of mocks) mock.assertNoPendingInterceptors();
   });
 
+  it("runs ten isolated workflows across both providers and queues the eleventh", async () => {
+    const fixtures = Array.from({ length: 11 }, (_, index) => {
+      const provider = index % 2 === 0 ? "carhistory" : "car365";
+      return {
+        provider,
+        vin: String(index + 1).padStart(17, "0"),
+        origin: provider === "carhistory" ? ORIGIN : "https://www.car365.go.kr",
+        entry: provider === "carhistory" ? ENTRY : "/ccpt/carlife/scrcar/schdcarXportView.do",
+        lookup:
+          provider === "carhistory" ? LOOKUP : "/ccpt/carlife/scrcar/selectSchdcarXportList.do",
+      } as const;
+    });
+    const release = Promise.withResolvers<void>();
+    let entered = 0;
+    let active = 0;
+    let peakActive = 0;
+    const transport = new VinTransport({
+      routes: routes.slice(0, 1),
+      requestDelaySeconds: 0,
+      dispatcherFactory: (_route, page) => {
+        const fixture = fixtures[page - 1];
+        if (!fixture) throw new Error("Unexpected workflow");
+        const mock = new MockAgent();
+        mock.disableNetConnect();
+        const pool = mock.get(fixture.origin);
+        pool.intercept({ path: fixture.entry }).reply(200, "entry", {
+          headers: { "set-cookie": `session=${page}; Path=/; Secure` },
+        });
+        pool
+          .intercept({
+            path: fixture.lookup,
+            method: "POST",
+            headers: { cookie: `session=${page}` },
+            body: `vin=${fixture.vin}`,
+          })
+          .reply(200, fixture.vin);
+        return mock;
+      },
+    });
+    transports.push(transport);
+    const checks = fixtures.map((fixture) =>
+      transport.run(fixture.provider, async (session) => {
+        active++;
+        peakActive = Math.max(peakActive, active);
+        try {
+          await session.request(fixture.entry);
+          entered++;
+          await release.promise;
+          return (
+            await session.request(fixture.lookup, {
+              method: "POST",
+              form: { vin: fixture.vin },
+            })
+          ).body;
+        } finally {
+          active--;
+        }
+      }),
+    );
+    try {
+      await expect.poll(() => entered).toBe(10);
+    } finally {
+      release.resolve();
+      await Promise.allSettled(checks);
+    }
+    expect(await Promise.all(checks)).toEqual(fixtures.map((fixture) => fixture.vin));
+    expect(peakActive).toBe(10);
+  });
+
   it("does not bypass a provider's rate limit by changing proxies or starting another lookup", async () => {
     const { transport, mocks } = setup();
     (mocks[0] as MockAgent)

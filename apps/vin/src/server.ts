@@ -21,7 +21,7 @@ export function validateVinApiOptions(options: Omit<VinApiServerOptions, "checkV
     throw new Error("AUTODOM_VIN_API_HOST must be a host name or IP address.");
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535)
     throw new Error("AUTODOM_VIN_API_PORT must be a valid TCP port.");
-  const limit = options.maxInFlight ?? 4;
+  const limit = options.maxInFlight ?? 10;
   if (!Number.isSafeInteger(limit) || limit < 1)
     throw new Error("AUTODOM_VIN_API_MAX_IN_FLIGHT must be a positive integer.");
 }
@@ -44,7 +44,7 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
   options.signal?.throwIfAborted();
   const expectedToken = createHash("sha256").update(`Bearer ${options.apiToken}`).digest();
   const active = new Set<AbortController>();
-  const maxInFlight = options.maxInFlight ?? 4;
+  const maxInFlight = options.maxInFlight ?? 10;
   const server = createServer(
     { maxHeaderSize: 8192, headersTimeout: 10_000, requestTimeout: 15_000 },
     (request, response) => {

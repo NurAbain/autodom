@@ -21,7 +21,7 @@ free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
 not vehicle history. Auto.dev Free is capped at 1,000 calls/month; no paid upgrades.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
-AUTODOM_VIN_API_MAX_IN_FLIGHT defaults to 4; AUTODOM_CRAWL_DELAY to 2 seconds.
+AUTODOM_VIN_API_MAX_IN_FLIGHT defaults to 10; AUTODOM_CRAWL_DELAY to 2 seconds.
 health needs only host/port. No database, Redis or Telegram configuration is used.
 Never expose this service or its authentication token to a browser.
 `;
@@ -66,7 +66,7 @@ export async function main(
       });
       return response.status === 200 ? 0 : 1;
     }
-    const maxText = env.AUTODOM_VIN_API_MAX_IN_FLIGHT ?? "4";
+    const maxText = env.AUTODOM_VIN_API_MAX_IN_FLIGHT ?? "10";
     if (!/^\d+$/u.test(maxText))
       throw new Error("AUTODOM_VIN_API_MAX_IN_FLIGHT must be a positive integer.");
     const options = {

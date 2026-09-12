@@ -37,7 +37,7 @@ afterEach(async () => {
   );
 });
 
-async function start(checkVin: VinLookup, maxInFlight = 4) {
+async function start(checkVin: VinLookup, maxInFlight?: number) {
   const shutdown = new AbortController();
   shutdowns.push(shutdown);
   const server = await startVinApiServer({
@@ -45,7 +45,7 @@ async function start(checkVin: VinLookup, maxInFlight = 4) {
     port: 0,
     apiToken: token,
     checkVin,
-    maxInFlight,
+    ...(maxInFlight === undefined ? {} : { maxInFlight }),
     signal: shutdown.signal,
   });
   servers.push(server);
@@ -105,26 +105,38 @@ describe("private VIN API", () => {
     expect(checked).toEqual([vin]);
   });
 
-  it("refuses excess checks then recovers after the active workflow completes", async () => {
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<VinCheckResult>();
-    let calls = 0;
-    const { url } = await start(async () => {
-      calls++;
-      entered.resolve();
-      return release.promise;
-    }, 1);
-    const active = post(url);
-    await entered.promise;
-    const overload = await post(url);
-    expect(overload.status).toBe(429);
-    expect(Number(overload.headers.get("retry-after"))).toBeGreaterThan(0);
-    expect(calls).toBe(1);
-    release.resolve(result);
-    expect((await active).status).toBe(200);
-    expect((await post(url)).status).toBe(200);
-    expect(calls).toBe(2);
-  });
+  it.each([
+    { maxInFlight: undefined, capacity: 10 },
+    { maxInFlight: 1, capacity: 1 },
+  ])(
+    "admits $capacity concurrent checks, rejects excess and recovers capacity",
+    async ({ maxInFlight, capacity }) => {
+      const release = Promise.withResolvers<VinCheckResult>();
+      let calls = 0;
+      const { url } = await start(async () => {
+        calls++;
+        return release.promise;
+      }, maxInFlight);
+      const active: Promise<Response>[] = [];
+      let responses: Response[] = [];
+      try {
+        for (let index = 0; index < capacity; index++) {
+          active.push(post(url));
+          await expect.poll(() => calls).toBe(index + 1);
+        }
+        const overload = await post(url);
+        expect(overload.status).toBe(429);
+        expect(Number(overload.headers.get("retry-after"))).toBeGreaterThan(0);
+        expect(calls).toBe(capacity);
+      } finally {
+        release.resolve(result);
+        responses = await Promise.all(active);
+      }
+      expect(responses.map((response) => response.status)).toEqual(Array(capacity).fill(200));
+      expect((await post(url)).status).toBe(200);
+      expect(calls).toBe(capacity + 1);
+    },
+  );
 
   it("aborts an active workflow when its client disconnects and releases capacity", async () => {
     const entered = Promise.withResolvers<void>();

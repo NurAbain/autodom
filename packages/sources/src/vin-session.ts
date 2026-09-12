@@ -50,7 +50,7 @@ class VinRequestError extends SourceError {}
 export class VinTransport {
   readonly #options: VinTransportOptions;
   readonly #abort = new AbortController();
-  readonly #limit = pLimit(2);
+  readonly #limit = pLimit(10);
   readonly #active = new Set<Promise<unknown>>();
   readonly #nextRequest = new Map<KoreanVinProvider, number>();
   readonly #rateLimitedUntil = new Map<KoreanVinProvider, number>();
