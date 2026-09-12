@@ -694,6 +694,7 @@ export async function fetchPage({ page = 1, transport }: FetchPageOptions): Prom
     listings: details.filter((listing): listing is Listing => listing !== null),
     page,
     pages: catalog.pages,
+    pages_exact: page >= catalog.pages,
     total: null,
     scope: `США: аукционы Copart/IAAI; каталог ${base}; экспорт не подтверждён`,
   });
