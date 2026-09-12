@@ -1,5 +1,3 @@
-export const KOREAN_REPORT_PRICE_KGS = 499;
-
 type ReportFact = { label: string; korean: string; value: string; pages: number[] };
 type ReportSection = {
   id: string;

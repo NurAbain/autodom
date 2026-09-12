@@ -1,3 +1,4 @@
+import type { PaymentOrder } from "@autodom/core/payments";
 import {
   normalizeVin,
   VIN_PROVIDERS,
@@ -6,8 +7,9 @@ import {
   vinGoogleSearchUrl,
 } from "@autodom/core/vin";
 import type { Reply } from "../src/conversation.js";
-import { KOREAN_REPORT_EXAMPLE, KOREAN_REPORT_PRICE_KGS } from "../src/korean-report-example.js";
+import { KOREAN_REPORT_EXAMPLE } from "../src/korean-report-example.js";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
+import { PAYMENT_PRIVACY_NOTICE, paymentOrderStatus } from "../src/payment-text.js";
 import {
   VIN_CAUTION,
   VIN_DISCLOSURE,
@@ -31,7 +33,7 @@ type TelegramApp = {
 const telegram = (window as Window & { Telegram?: { WebApp?: TelegramApp } }).Telegram?.WebApp;
 const root = document.getElementById("app")!;
 
-type View = "home" | "vin" | "buy" | "sell" | "report-example" | "car";
+type View = "home" | "vin" | "buy" | "sell" | "report-example" | "car" | "orders";
 let currentView: View = "home";
 let generation = 0;
 const pending = new Set<AbortController>();
@@ -49,6 +51,7 @@ function navigate(view: View, carId?: string): void {
   const url = new URL(window.location.href);
   url.searchParams.delete("car");
   url.searchParams.delete("view");
+  url.searchParams.delete("order_id");
   if (view === "car" && carId) url.searchParams.set("car", carId);
   else if (view !== "home") url.searchParams.set("view", view);
   window.history.pushState(null, "", url);
@@ -282,6 +285,7 @@ function showHome(): void {
       "footnote home-note",
       "Выберите только то, что нужно сейчас. Для проверки VIN не нужна анкета покупателя.",
     ),
+    button("Мои заказы и оплата услуг", () => navigate("orders"), "back-link"),
   );
 }
 
@@ -289,7 +293,7 @@ function premiumPanel(): HTMLElement {
   const panel = element("section", "panel premium-panel");
   panel.append(
     element("p", "eyebrow", "Следующий уровень проверки"),
-    element("h2", "", `Полный корейский отчёт · ${KOREAN_REPORT_PRICE_KGS} KGS`),
+    element("h2", "", "Как выглядит корейский отчёт"),
     element(
       "p",
       "",
@@ -298,7 +302,7 @@ function premiumPanel(): HTMLElement {
     element(
       "p",
       "footnote",
-      "Планируемая цена. Покупка пока недоступна, деньги не списываются. Доступность и состав отчёта зависят от автомобиля и провайдера.",
+      "Покупка и выдача нового отчёта не подключены. Finik не используется для цифровых VIN-отчётов в Telegram.",
     ),
     button("Посмотреть реальный пример", () => navigate("report-example"), "button button-quiet"),
     element(
@@ -804,6 +808,151 @@ function showCar(car: MiniAppCar): void {
   );
 }
 
+async function showOrders(): Promise<void> {
+  const started = generation;
+  showState("Мои заказы", "Загружаем подтверждённые сервером статусы…");
+  try {
+    const { orders } = await request<{ orders: PaymentOrder[] }>("/miniapp/api/orders");
+    if (started !== generation) return;
+    const main = shell();
+    main.append(
+      element("p", "eyebrow", "Отдельные физические услуги"),
+      element("h1", "", "Мои заказы"),
+      element("p", "muted", "Бесплатный поиск, уведомления и проверка VIN не требуют покупки."),
+      button("Обновить статус", () => void load(), "button button-quiet"),
+    );
+    if (!orders.length) {
+      const empty = element("section", "state");
+      empty.append(
+        element("h2", "", "Заказов пока нет"),
+        element(
+          "p",
+          "",
+          "Здесь появится отдельно согласованная услуга с реальным исполнителем, составом, ценой и условиями. Счета без такого заказа не создаются.",
+        ),
+      );
+      main.append(empty);
+    }
+    for (const order of orders) {
+      const panel = element("section", "panel");
+      panel.id = `order-${order.id}`;
+      const status = element("p", "badge", paymentOrderStatus(order));
+      status.setAttribute("role", "status");
+      const price = `${(order.amount / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} KGS`;
+      panel.append(
+        status,
+        element("h2", "", order.title),
+        element("p", "price", price),
+        element("p", "reply-text", order.description),
+        element("p", "reply-text", `Продавец: ${order.seller}\nИсполнитель: ${order.executor}`),
+        element(
+          "p",
+          "footnote",
+          `Заказ ${order.id}\nПредложение до ${new Date(order.expiresAt).toLocaleString("ru-RU")}`,
+        ),
+      );
+      const terms = element("details", "disclosure");
+      terms.append(
+        element("summary", "", "Условия услуги и возврата"),
+        element("p", "reply-text", order.terms),
+      );
+      panel.append(terms);
+      const support = new URL(order.supportUrl);
+      if (support.protocol === "https:")
+        panel.append(sourceLink(safeUrl(support.href), "Поддержка по заказу"));
+      else if (support.protocol === "mailto:") {
+        const link = element("a", "source-link", "Поддержка по заказу");
+        link.href = support.href;
+        panel.append(link);
+      }
+      const active =
+        order.paymentStatus === "unpaid" &&
+        !order.needsReview &&
+        order.invoiceStatus !== "cancelled" &&
+        Date.parse(order.expiresAt) > Date.now();
+      if (active) {
+        const form = element("form", "vin-form");
+        const consent = element("label", "payment-consent");
+        const checkbox = element("input");
+        checkbox.type = "checkbox";
+        checkbox.required = true;
+        consent.append(
+          checkbox,
+          document.createTextNode(
+            ` Подтверждаю состав, исполнителя, итог ${price} и условия услуги, включая возврат и хранение платёжных данных.`,
+          ),
+        );
+        const submit = element("button", "button", "Перейти к оплате Finik");
+        submit.type = "submit";
+        const notice = element("p", "footnote");
+        notice.setAttribute("role", "status");
+        form.append(consent, submit, notice);
+        let cancelButton: HTMLButtonElement | undefined;
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          if (!checkbox.checked || submit.disabled) return;
+          submit.disabled = true;
+          notice.textContent = "Подтверждаем счёт. Статус оплаты проверяем только на сервере.";
+          void request<{ order: PaymentOrder }>("/miniapp/api/orders/checkout", {
+            orderId: order.id,
+            acceptTerms: true,
+          })
+            .then(({ order: latest }) => {
+              if (started !== generation) return;
+              const url = safeUrl(latest.invoiceUrl);
+              if (!url)
+                throw new Error("Платёжная ссылка не подтверждена. Обновите статус заказа.");
+              status.textContent = paymentOrderStatus(latest);
+              if (latest.acceptedAt) cancelButton?.remove();
+              const link = sourceLink(url, "Открыть подтверждённую страницу Finik");
+              notice.replaceChildren(
+                document.createTextNode("Если уже оплатили — не платите повторно. "),
+                link,
+              );
+              if (telegram?.openLink) telegram.openLink(url);
+              // Outside Telegram, a user-initiated anchor avoids blocked async popups.
+            })
+            .catch((error: unknown) => {
+              if (started === generation) notice.textContent = errorText(error);
+            })
+            .finally(() => {
+              if (started === generation) submit.disabled = false;
+            });
+        });
+        panel.append(element("p", "footnote", PAYMENT_PRIVACY_NOTICE), form);
+        if (!order.acceptedAt) {
+          cancelButton = button(
+            "Отказаться от предложения",
+            () => {
+              void request("/miniapp/api/orders/cancel", { orderId: order.id })
+                .then(() => {
+                  if (started === generation) void load();
+                })
+                .catch((error: unknown) => {
+                  if (started === generation) notice.textContent = errorText(error);
+                });
+            },
+            "button button-quiet",
+          );
+          panel.append(cancelButton);
+        }
+      }
+      main.append(panel);
+    }
+    main.append(
+      element(
+        "p",
+        "footnote",
+        "Finik подтверждает платёж, а не выполнение осмотра. Возвращение из банковского приложения или сообщение платёжной страницы не заменяют серверное подтверждение.",
+      ),
+    );
+    const focused = new URLSearchParams(window.location.search).get("order_id");
+    if (focused) document.getElementById(`order-${focused}`)?.scrollIntoView({ block: "start" });
+  } catch (error) {
+    if (started === generation) showState("Заказы недоступны", errorText(error), true);
+  }
+}
+
 async function load(): Promise<void> {
   cancelRequests();
   const started = generation;
@@ -811,7 +960,11 @@ async function load(): Promise<void> {
   const view = params.get("view");
   const id = params.get("car");
   currentView =
-    view === "vin" || view === "buy" || view === "sell" || view === "report-example"
+    view === "vin" ||
+    view === "buy" ||
+    view === "sell" ||
+    view === "report-example" ||
+    view === "orders"
       ? view
       : id !== null
         ? "car"
@@ -819,6 +972,10 @@ async function load(): Promise<void> {
   window.scrollTo(0, 0);
   if (currentView === "home") {
     showHome();
+    return;
+  }
+  if (currentView === "orders") {
+    await showOrders();
     return;
   }
   if (currentView === "vin") {

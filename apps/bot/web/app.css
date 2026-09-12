@@ -151,3 +151,6 @@ details[open] > summary { margin-bottom: 14px; }
   .goal { transition: none; }
   .goal:active { transform: none; }
 }
+
+.payment-consent { display: flex; align-items: flex-start; gap: 10px; }
+.payment-consent input { flex: none; width: 18px; height: 18px; margin: 2px 0 0; }

@@ -19,6 +19,8 @@ import type { Logger } from "pino";
 import type { Conversation } from "./conversation.js";
 import { startMiniAppServer } from "./miniapp-server.js";
 import { monitor } from "./monitor.js";
+import type { PaymentService } from "./payments.js";
+import { loadPaymentListenerSettings, startPaymentListener } from "./payments-http.js";
 import { type AutodomBot, configureTelegramBot, sendReplies } from "./telegram.js";
 
 export function startPolling(bot: Bot): RunnerHandle {
@@ -104,6 +106,7 @@ export interface BotServiceContext {
   signal?: AbortSignal;
   checkVin?: VinLookup;
   conversation?: Conversation;
+  payments?: PaymentService;
 }
 
 export function metricsPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -148,6 +151,9 @@ export async function runBotService(
   const { bot, token, miniAppUrl } = context;
   const port = metricsPort(env);
   const listener = miniAppUrl ? miniAppListener(env) : undefined;
+  const paymentListener = loadPaymentListenerSettings(env);
+  if (paymentListener && !context.payments)
+    throw new Error("Payment callback listener requires the payment service");
   const abort = new AbortController();
   let stopping = false;
   const stop = () => {
@@ -162,6 +168,7 @@ export async function runBotService(
   let runner: RunnerHandle | undefined;
   let metricsServer: Server | undefined;
   let miniAppServer: Server | undefined;
+  let paymentServer: Server | undefined;
   let failure: unknown;
   let failed = false;
   const tasks: Promise<void>[] = [];
@@ -234,6 +241,7 @@ export async function runBotService(
         token,
         publicUrl: miniAppUrl,
         ...listener,
+        ...(context.payments ? { payments: context.payments } : {}),
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
         ...(context.conversation
@@ -252,12 +260,18 @@ export async function runBotService(
       watchServer(miniAppServer, "Mini App");
       abort.signal.throwIfAborted();
     }
+    if (paymentListener && context.payments) {
+      paymentServer = await startPaymentListener(context.payments, paymentListener);
+      watchServer(paymentServer, "Payment events");
+      abort.signal.throwIfAborted();
+    }
     metricsServer = await metrics.serve(
       port,
       async () =>
         !abort.signal.aborted &&
         !!runner?.isRunning() &&
         (!listener || !!miniAppServer?.listening) &&
+        (!paymentListener || !!paymentServer?.listening) &&
         (await runtimeStatus(store, settings, "bot")).healthy,
     );
     watchServer(metricsServer, "Metrics");
@@ -298,6 +312,7 @@ export async function runBotService(
       const drains = await Promise.allSettled([
         runner?.stop(),
         closeServer(miniAppServer),
+        closeServer(paymentServer),
         closeServer(metricsServer),
         Promise.allSettled(tasks),
       ]);
