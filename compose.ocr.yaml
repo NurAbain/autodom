@@ -1,0 +1,39 @@
+# Run only on the existing gpu-worker LXC; never join bot/parser startup.
+# LAN-only listener, Bearer auth, no public DNS/tunnel, no Telegram/VIN credentials.
+services:
+  ocr-api:
+    build:
+      context: .
+      dockerfile: apps/ocr/Dockerfile
+    image: ${AUTODOM_OCR_IMAGE:-autodom-ocr:local}
+    init: true
+    restart: always
+    network_mode: host
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 6g
+    cpus: 6
+    shm_size: 128m
+    stop_grace_period: 35s
+    environment:
+      AUTODOM_OCR_API_TOKEN: ${AUTODOM_OCR_API_TOKEN:?Set the private OCR API token}
+      AUTODOM_OCR_DEVICES: ${AUTODOM_OCR_DEVICES:-0,1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1"]
+              capabilities: [gpu]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://192.168.0.20:8091/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

@@ -26,9 +26,6 @@ COPY apps/bot/package.json ./apps/bot/package.json
 RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 
 FROM node:24.21.0-bookworm-slim AS runtime
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends tesseract-ocr tesseract-ocr-eng \
-    && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     AUTODOM_BACKUP_DIR=/backups \
     AUTODOM_METRICS_PORT=9901 \

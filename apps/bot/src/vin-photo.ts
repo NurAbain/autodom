@@ -1,13 +1,24 @@
-import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { normalizeVin } from "@autodom/core/vin";
+import { z } from "zod";
 
 export const VIN_PHOTO_MAX_BYTES = 8 * 1024 * 1024;
 const MAX_PIXELS = 25_000_000;
 const MAX_OCR_OUTPUT = 64 * 1024;
 const MAX_CONCURRENT_PHOTOS = 2;
+const ocrResultSchema = z
+  .object({
+    lines: z
+      .array(
+        z
+          .object({
+            text: z.string().max(512),
+            confidence: z.number().finite().min(0).max(1),
+          })
+          .strict(),
+      )
+      .max(256),
+  })
+  .strict();
 let activePhotos = 0;
 
 export interface VinPhotoFile {
@@ -53,7 +64,7 @@ function validDimensions(width: number, height: number): boolean {
   );
 }
 
-function validateImage(bytes: Buffer): void {
+function validateImage(bytes: Buffer): "image/jpeg" | "image/png" {
   if (bytes.length < 24 || bytes.length > VIN_PHOTO_MAX_BYTES) throw new VinPhotoError("invalid");
   if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
     if (
@@ -61,7 +72,7 @@ function validateImage(bytes: Buffer): void {
       bytes.toString("ascii", 12, 16) === "IHDR" &&
       validDimensions(bytes.readUInt32BE(16), bytes.readUInt32BE(20))
     )
-      return;
+      return "image/png";
     throw new VinPhotoError("invalid");
   }
   if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new VinPhotoError("invalid");
@@ -80,7 +91,7 @@ function validateImage(bytes: Buffer): void {
         size >= 8 &&
         validDimensions(bytes.readUInt16BE(offset + 5), bytes.readUInt16BE(offset + 3))
       )
-        return;
+        return "image/jpeg";
       break;
     }
     offset += size;
@@ -88,7 +99,11 @@ function validateImage(bytes: Buffer): void {
   throw new VinPhotoError("invalid");
 }
 
-async function downloadPhoto(token: string, file: VinPhotoFile): Promise<Buffer> {
+async function downloadPhoto(
+  token: string,
+  file: VinPhotoFile,
+  signal: AbortSignal,
+): Promise<Buffer<ArrayBuffer>> {
   // Only the relative photo path returned by Telegram getFile is accepted. No redirects or custom authority.
   if (
     !/^photos\/[A-Za-z0-9_-]+\.(?:jpe?g|png)$/u.test(file.filePath) ||
@@ -102,7 +117,7 @@ async function downloadPhoto(token: string, file: VinPhotoFile): Promise<Buffer>
     `https://api.telegram.org/file/bot${encodeURIComponent(token)}/${file.filePath}`,
     {
       redirect: "error",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
     },
   );
   const length = response.headers.get("content-length");
@@ -129,49 +144,109 @@ async function downloadPhoto(token: string, file: VinPhotoFile): Promise<Buffer>
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
-  const bytes = Buffer.concat(chunks, size);
-  validateImage(bytes);
-  return bytes;
+  return Buffer.concat(chunks, size);
 }
 
-export function createPhotoRecognizer(token: string): PhotoRecognizer {
+export function createPhotoRecognizer(
+  telegramToken: string,
+  env: Readonly<Record<string, string | undefined>>,
+  signal?: AbortSignal,
+): PhotoRecognizer | undefined {
+  const rawUrl = env.AUTODOM_OCR_API_URL ?? "";
+  const apiToken = env.AUTODOM_OCR_API_TOKEN ?? "";
+  if (!rawUrl && !apiToken) return undefined;
+  if (!rawUrl || !/^[\x21-\x7e]{32,256}$/u.test(apiToken))
+    throw new Error("Configure both AUTODOM_OCR_API_URL and a strong AUTODOM_OCR_API_TOKEN");
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("AUTODOM_OCR_API_URL must be a valid service origin");
+  }
+  if (
+    !/^https?:\/\/[^/?#@\\\s]+\/?$/iu.test(rawUrl) ||
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/"
+  )
+    throw new Error("AUTODOM_OCR_API_URL must be an HTTP(S) origin without credentials or a path");
+  const endpoint = new URL("/v1/ocr/recognize", url).href;
+  const authorization = `Bearer ${apiToken}`;
+
   return async (file) => {
     if (activePhotos >= MAX_CONCURRENT_PHOTOS) throw new VinPhotoError("busy");
     activePhotos++;
-    let directory: string | undefined;
+    const requestSignal = AbortSignal.any([
+      AbortSignal.timeout(30_000),
+      ...(signal ? [signal] : []),
+    ]);
     try {
-      const bytes = await downloadPhoto(token, file);
-      directory = await mkdtemp(join(tmpdir(), "autodom-vin-"));
-      const input = join(directory, "photo");
-      await writeFile(input, bytes, { mode: 0o600 });
-      const text = await new Promise<string>((resolve, reject) => {
-        execFile(
-          "tesseract",
-          [input, "stdout", "-l", "eng", "--psm", "11"],
-          {
-            timeout: 12_000,
-            killSignal: "SIGKILL",
-            maxBuffer: MAX_OCR_OUTPUT,
-            encoding: "utf8",
-            env: { ...process.env, OMP_THREAD_LIMIT: "1" },
-            shell: false,
-          },
-          (error, stdout) => {
-            if (error) reject(new VinPhotoError("unavailable"));
-            else resolve(stdout);
-          },
-        );
+      const bytes = await downloadPhoto(telegramToken, file, requestSignal);
+      const contentType = validateImage(bytes);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: authorization,
+          "Content-Type": contentType,
+          Accept: "application/json",
+        },
+        body: bytes,
+        redirect: "error",
+        signal: requestSignal,
       });
-      return extractVinCandidates(text);
+      if (response.status !== 200) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new VinPhotoError(
+          response.status === 429
+            ? "busy"
+            : [400, 413, 415].includes(response.status)
+              ? "invalid"
+              : "unavailable",
+        );
+      }
+      const length = response.headers.get("content-length");
+      if (
+        response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !==
+          "application/json" ||
+        !response.body ||
+        (length !== null && (!/^\d+$/u.test(length) || Number(length) > MAX_OCR_OUTPUT))
+      ) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new VinPhotoError("unavailable");
+      }
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      let body: string;
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.byteLength;
+          if (size > MAX_OCR_OUTPUT) throw new VinPhotoError("unavailable");
+          chunks.push(chunk.value);
+        }
+        body = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, size));
+      } finally {
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
+      const result = ocrResultSchema.parse(JSON.parse(body));
+      // This score is a heuristic, not calibrated accuracy; the owner must still confirm.
+      return extractVinCandidates(
+        result.lines
+          .filter((line) => line.confidence >= 0.8)
+          .map((line) => line.text)
+          .join("\n"),
+      );
     } catch (error) {
-      // Never expose fetch/subprocess errors: Telegram's credential is part of the download URL.
+      // Never expose the Telegram download URL, OCR credentials or upstream response/errors.
       throw error instanceof VinPhotoError ? error : new VinPhotoError("unavailable");
     } finally {
-      try {
-        if (directory) await rm(directory, { recursive: true, force: true });
-      } finally {
-        activePhotos--;
-      }
+      activePhotos--;
     }
   };
 }

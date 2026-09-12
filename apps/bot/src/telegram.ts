@@ -5,12 +5,7 @@ import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
 import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
-import {
-  createPhotoRecognizer,
-  type PhotoRecognizer,
-  VIN_PHOTO_MAX_BYTES,
-  VinPhotoError,
-} from "./vin-photo.js";
+import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
@@ -172,14 +167,15 @@ export function createTelegramBot(
     client: { timeoutSeconds: 40, ...(options.apiRoot ? { apiRoot: options.apiRoot } : {}) },
   });
   const conversation = options.conversation ?? new Conversation(store);
-  const recognizePhoto = options.photoRecognizer ?? createPhotoRecognizer(token);
+  const recognizePhoto = options.photoRecognizer;
   const pendingPhotos = new Map<
     number,
     { nonce: string; candidates: readonly string[]; expiresAt: number }
   >();
   const photoTtlMs = 10 * 60 * 1000;
-  const photoHelp =
-    "Можно отправить фото VIN крупным планом, без бликов: все 17 символов должны быть видны. Фото распознаётся локально на сервере Autodom и удаляется после обработки; Telegram хранит отправленное сообщение. VIN не отправляем на проверку, пока вы не подтвердите распознанный номер.";
+  const photoHelp = recognizePhoto
+    ? "Можно отправить фото VIN крупным планом, без бликов: все 17 символов должны быть видны. Фото обрабатывает GPU OCR-сервер Autodom; Telegram хранит отправленное сообщение. VIN не отправляем на проверку, пока вы не подтвердите распознанный номер."
+    : "Распознавание фото не подключено. Введите VIN вручную: /vin VIN.";
   function rememberPhoto(userId: number, candidates: readonly string[]) {
     const now = Date.now();
     for (const [id, pending] of pendingPhotos) {
@@ -270,6 +266,10 @@ export function createTelegramBot(
       if (context.message.photo) {
         pendingPhotos.delete(userId);
         await conversation.handle(userId, chatId, "/vin");
+        if (!recognizePhoto) {
+          await context.reply(photoHelp);
+          return;
+        }
         const photo = context.message.photo.at(-1);
         if (!photo || (photo.file_size !== undefined && photo.file_size > VIN_PHOTO_MAX_BYTES)) {
           await context.reply(
@@ -278,7 +278,7 @@ export function createTelegramBot(
           return;
         }
         await context.reply(
-          "Распознаю фото локально. Проверка VIN начнётся только после вашего подтверждения.",
+          "Распознаю фото на GPU OCR-сервере Autodom. Проверка VIN начнётся только после вашего подтверждения.",
         );
         let candidates: readonly string[];
         try {

@@ -1,0 +1,15 @@
+# cuDNN9.10 fixes asymmetric padding and still supports Pascal; 9.11 drops it.
+onnxruntime-gpu==1.22.0
+nvidia-cuda-runtime-cu12==12.8.90
+nvidia-cublas-cu12==12.8.4.1
+nvidia-cudnn-cu12==9.10.2.21
+nvidia-cufft-cu12==11.3.3.83
+nvidia-curand-cu12==10.3.9.90
+nvidia-cuda-nvrtc-cu12==12.8.93
+rapidocr==3.4.2
+numpy==2.2.6
+opencv-python==4.12.0.88
+Pillow==12.3.0
+PyYAML==6.0.2
+fastapi==0.141.1
+uvicorn==0.52.4

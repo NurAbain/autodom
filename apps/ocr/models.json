@@ -1,0 +1,59 @@
+{
+  "det": {
+    "repository": "PaddlePaddle/PP-OCRv5_server_det_onnx",
+    "revision": "dcf248c4dcc064c6d030db241255f9e8fbc6733a",
+    "files": {
+      "inference.onnx": {
+        "size": 88116791,
+        "blobId": "0c4ec54280744bc9210845f06bd3e3e1d31dc32e",
+        "lfs": {
+          "sha256": "10803475a591f7dc623e24670fb5752ec94d39a1f8cf069aac1b6f0ce19cfc85",
+          "size": 88116791,
+          "pointerSize": 133
+        }
+      },
+      "inference.yml": {
+        "size": 903,
+        "blobId": "c4f16313e7e2c567da8e9fa8f4aeba14a307786e"
+      }
+    }
+  },
+  "rec": {
+    "repository": "PaddlePaddle/PP-OCRv5_server_rec_onnx",
+    "revision": "b70df217f4fd99d14f970bad092cebe7d74cc4d1",
+    "files": {
+      "inference.onnx": {
+        "size": 84503027,
+        "blobId": "84a7c59b7036c350368d2ff09f5be0f6cc2b328d",
+        "lfs": {
+          "sha256": "d9dc333c9c7b042c6dffb8e33d72b6f65c9c1d463d0a3c2f78174fea55e94752",
+          "size": 84503027,
+          "pointerSize": 133
+        }
+      },
+      "inference.yml": {
+        "size": 148345,
+        "blobId": "f5156e77296f540e963bdf4f89be90153234a90e"
+      }
+    }
+  },
+  "orientation": {
+    "repository": "PaddlePaddle/PP-LCNet_x1_0_textline_ori_onnx",
+    "revision": "7fdcf3cf7061163eda7183b224aa334bd33068f7",
+    "files": {
+      "inference.onnx": {
+        "size": 6777816,
+        "blobId": "63a24a10a1f8e8207eb969e55a9e38dc1f462b01",
+        "lfs": {
+          "sha256": "38aa97cd4be591e0ad304e659f07ba30d946f27a63315433f6659c69c8778345",
+          "size": 6777816,
+          "pointerSize": 132
+        }
+      },
+      "inference.yml": {
+        "size": 735,
+        "blobId": "61977592412f3529cf153ed9c904f6700cb8b9a6"
+      }
+    }
+  }
+}

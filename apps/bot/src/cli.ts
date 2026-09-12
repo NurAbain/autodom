@@ -11,6 +11,7 @@ import { Conversation } from "./conversation.js";
 import { SellerConversation } from "./seller-conversation.js";
 import { metricsPort, runBotService } from "./service.js";
 import { createTelegramBot } from "./telegram.js";
+import { createPhotoRecognizer } from "./vin-photo.js";
 
 const HELP = `Autodom Telegram bot and Mini App
 
@@ -23,6 +24,7 @@ AUTODOM_METRICS_PORT defaults to 9901.
 Set AUTODOM_MINI_APP_URL to enable the Mini App in this same bot process.
 AUTODOM_MINI_APP_HOST defaults to 127.0.0.1; AUTODOM_MINI_APP_PORT defaults to 8080.
 Set AUTODOM_VIN_API_URL and AUTODOM_VIN_API_TOKEN to enable remote VIN checks.
+Set AUTODOM_OCR_API_URL and AUTODOM_OCR_API_TOKEN to enable GPU photo recognition.
 No parser, worker or proxy configuration is loaded by this command.
 Stop the old Telegram poller before cutover; an existing webhook is never replaced.
 `;
@@ -90,6 +92,7 @@ export async function main(
     const publicUrl = miniAppUrl(env);
     const checkVin = createVinApiLookup(env, abort.signal);
     const token = await loadToken(env);
+    const photoRecognizer = createPhotoRecognizer(token, env, abort.signal);
     logger = createLogger({ ...env, AUTODOM_BOT_TOKEN: token });
     if (!abort.signal.aborted) {
       store = await Store.open(settings.database_url);
@@ -99,6 +102,7 @@ export async function main(
           conversation,
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
           ...(checkVin ? { checkVin } : {}),
+          ...(photoRecognizer ? { photoRecognizer } : {}),
         });
         await runBotService(
           store,
