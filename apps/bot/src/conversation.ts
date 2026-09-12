@@ -20,6 +20,7 @@ import {
 } from "@autodom/core";
 import type { Store } from "@autodom/storage";
 import { listingPhotoUrls } from "./media.js";
+import type { SellerConversation } from "./seller-conversation.js";
 import { VIN_DISCLOSURE } from "./vin-text.js";
 
 export type Button = readonly [string, string];
@@ -30,6 +31,7 @@ export interface Reply {
   photos?: readonly string[];
   listingId?: string;
   richHtml?: string;
+  miniAppView?: "vin" | "buy" | "sell" | "report-example";
 }
 export type ConversationStore = Pick<
   Store,
@@ -49,10 +51,9 @@ export type ConversationStore = Pick<
 >;
 type Draft = Record<string, unknown>;
 const START_BUTTONS: Buttons = [
-  [
-    ["Начать подбор", "/start"],
-    ["Данные и согласие", "/privacy"],
-  ],
+  [["Проверить VIN", "/vin"]],
+  [["Продать / обменять авто на недвижимость", "/sell"]],
+  [["Купить автомобиль", "/buy"]],
 ];
 const OPTIONAL_DEFAULTS = {
   city: "",
@@ -110,15 +111,16 @@ function bishkekTime(timestamp: number): string {
 
 export function privacyText(): string {
   return (
-    "<b>Autodom — помощник при покупке автомобиля</b>\n\n" +
+    "<b>Autodom — VIN, своё авто и покупка</b>\n\n" +
     `Бесплатный поиск по бюджету и пожеланиям. Включённые источники: ${enabledSources()
       .map((source) => escapeHtml(source.name))
       .join(", ")}. ` +
     "Иностранные адаптеры без согласованного доступа не собирают и не показывают объявления. Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; доступность экспорта не подтверждена. Платные услуги не подключены.\n\n" +
     "После вашего согласия на хранение сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки. Это нужно для бесплатного поиска. Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. До кнопки «Согласен на хранение» новый черновик не сохраняется.\n\n" +
-    "Мониторинг бесплатный и включается отдельно: /resume; /pause — остановить. Сохранение поиска само по себе не включает уведомления.\n\n" +
+    "Мониторинг бесплатный. При сохранении явно выбираете «с бесплатным мониторингом» или «без уведомлений». Позже /resume включает, /pause останавливает уведомления.\n\n" +
     `По команде /vin или кнопке «Проверить VIN»: ${VIN_DISCLOSURE} Заявки партнёрам сейчас не подключены. Архив истории чата не ведётся, контакты не собираются; однако текст, который вы сами вводите в поля поиска, сохраняется в этих полях. Не вводите туда контакты. Сообщения чата хранит Telegram. Профиль и уведомления доступны пользователю только в личном чате. Интерфейса доступа операторов к профилям и контактам нет; привилегированные администраторы инфраструктуры технически могут получить доступ к базе и резервным копиям.\n\n` +
-    "Данные хранятся до /delete: команда с подтверждением удаляет профиль, настройки и незавершённый ввод из рабочей базы. /cancel очищает только черновик, а не сохранённый профиль; при подтверждении удаления отменяет удаление и возвращает прежний черновик. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения этого срока. /delete не удаляет переписку в Telegram.\n\n" +
+    "Раздел своего авто не требует анкеты покупателя: отдельное согласие перед вводом, затем карточка марки/модели, года, пробега, цены и цели продажи или обмена. До сохранения ввод хранится временно в памяти; переключение цели его сбрасывает. Сохранённая карточка отделена от фильтров покупки. Мы не публикуем её и не отправляем партнёрам.\n\n" +
+    "Данные хранятся до /delete: подтверждение удаляет профиль покупки, карточку своего авто, настройки и незавершённый ввод из рабочей базы. /cancel отменяет текущий ввод, а не сохранённые данные; при подтверждении удаления отменяет удаление и возвращает прежний черновик покупки. /start, /vin и /sell не удаляют черновик покупки: /buy продолжает его. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения этого срока. /delete не удаляет переписку в Telegram.\n\n" +
     "Платные заказы и платежи не подключены; обязательные записи по платным заказам сейчас не хранятся. Если в будущем вы оформите заказ, /delete не сможет удалить финансовые записи, которые необходимо хранить по закону. /privacy — данные и согласие на хранение."
   );
 }
@@ -157,6 +159,7 @@ export function menu(profile: Profile): Buttons {
       ["Советы", "/tips"],
     ],
     [["Данные и согласие", "/privacy"]],
+    [["Другие цели", "/start"]],
   ];
 }
 export function listingText(listing: Listing, currency: string): string {
@@ -336,7 +339,19 @@ export function tips(profile: Profile): string {
 export class Conversation {
   // Bounded ephemeral storage consent; any next input consumes it.
   private readonly consents = new Map<number, string>();
-  constructor(private readonly store: ConversationStore) {}
+  private readonly goals = new Map<number, "home" | "buy" | "sell" | "vin">();
+  private readonly deletions = new Map<number, [string, Draft]>();
+  constructor(
+    private readonly store: ConversationStore,
+    private readonly options: { seller?: SellerConversation } = {},
+  ) {}
+
+  private setGoal(userId: number, goal: "home" | "buy" | "sell" | "vin"): void {
+    this.goals.delete(userId);
+    this.goals.set(userId, goal);
+    if (this.goals.size > 2048) this.goals.delete(this.goals.keys().next().value!);
+    if (goal !== "sell") this.options.seller?.clear(userId);
+  }
   private consentAction(userId: number): string {
     const action = `consent:${randomBytes(12).toString("base64url")}`;
     this.consents.delete(userId);
@@ -345,10 +360,16 @@ export class Conversation {
     return action;
   }
 
-  private privacy(userId: number, profile: Profile | null): Reply[] {
+  private privacy(userId: number, profile: Profile | null, detailed = false): Reply[] {
     if (profile) return packReplies(privacyText(), [], menu(profile));
     const action = this.consentAction(userId);
-    return packReplies(privacyText(), [], [[["Согласен на хранение — начать подбор", action]]]);
+    return packReplies(
+      detailed
+        ? privacyText()
+        : "<b>Поиск автомобиля</b>\nНужны только валюта, бюджет и модели. Остальные фильтры — по желанию.\n\nС вашего согласия сохраним Telegram ID, ID личного чата и черновик пожеланий на сервере проекта; после проверки — профиль. Не вводите контакты. Уведомления включаются только по вашему выбору. /delete удаляет рабочие данные, резервные копии могут храниться до 7 дней; переписку хранит Telegram. /privacy — все условия.\n\nСогласны на хранение для бесплатного поиска?",
+      [],
+      [[["Согласен на хранение — начать подбор", action]], [["Не сейчас", "/start"]]],
+    );
   }
   private async begin(userId: number, profile: Profile | null): Promise<Reply[]> {
     const data: Draft = { consent: true, budget_scope: "car", ...OPTIONAL_DEFAULTS };
@@ -366,8 +387,8 @@ export class Conversation {
       });
     }
     const markets = enabledMarkets();
-    if (markets.length === 1) data.market = markets[0];
-    return this.prompt(userId, markets.length === 1 ? "currency" : "market", data);
+    if (!data.market) data.market = markets.includes("KG") ? "KG" : (markets[0] ?? "KG");
+    return this.prompt(userId, profile ? "review" : "currency", data);
   }
   private draftProfile(userId: number, data: Draft, profile: Profile | null): Profile {
     return makeProfile({
@@ -408,15 +429,43 @@ export class Conversation {
     if (state === "review") {
       const candidate = this.draftProfile(userId, data, await this.store.getProfile(userId));
       text =
-        "<b>Проверьте поиск перед сохранением</b>\nЧто входит в ваш бюджет? При первом вводе по умолчанию — цена автомобиля. Можно сохранить сразу или уточнить любое поле; незаполненные поля не добавляют ограничений.\n\n" +
-        profileText(candidate) +
-        "\n\n" +
-        FILTER_NOTE +
-        "\n\nПока это черновик. /cancel — оставить прежний поиск; мониторинг останется на паузе.";
+        "<b>Проверьте поиск</b>\n\n" +
+        `Рынок: ${MARKETS[candidate.market as keyof typeof MARKETS]}\n` +
+        `Бюджет: ${candidate.budget_min_minor ? money(candidate.budget_min_minor, candidate.currency) + " — " : "до "}${money(candidate.budget_max_minor, candidate.currency)} · ${BUDGET_SCOPES[candidate.budget_scope as keyof typeof BUDGET_SCOPES]}\n` +
+        `Модели: ${candidate.query ? escapeHtml(candidate.query) : "любые"}\n` +
+        `Город: ${candidate.city ? escapeHtml(candidate.city) : "любой"}\n` +
+        [
+          candidate.body_type ? BODY_TYPES[candidate.body_type as keyof typeof BODY_TYPES] : "",
+          candidate.year_min ? `от ${candidate.year_min} г.` : "",
+          candidate.mileage_max_km !== null ? `до ${candidate.mileage_max_km} км` : "",
+          candidate.transmission
+            ? TRANSMISSIONS[candidate.transmission as keyof typeof TRANSMISSIONS]
+            : "",
+          candidate.allow_import === false ? "без импорта" : "",
+        ]
+          .filter(Boolean)
+          .join(" · ") +
+        "\nМожно сохранить сейчас или уточнить фильтры. Бюджет сравнивается с ценой объявления, не со всеми расходами покупки. Неизвестные данные не проходят выбранный фильтр. /profile — подробные условия после сохранения.\n\n" +
+        "Выберите, присылать ли новые совпадения и снижение цены. Оба варианта бесплатны. /cancel — отменить изменения.";
       buttons = [
-        [choice("Сохранить поиск", "save")],
-        ...Object.entries(FIELD_LABELS).map(([field, label]) => [choice(label, `edit.${field}`)]),
+        [choice("Сохранить + бесплатный мониторинг", "save.monitor")],
+        [choice("Сохранить без уведомлений", "save.silent")],
+        [choice("Бюджет", "edit.budget"), choice("Марки и модели", "edit.query")],
+        [choice("Уточнить фильтры", "refine")],
+        [["Отмена", "/cancel"]],
       ];
+    } else if (state === "refine") {
+      text =
+        "<b>Дополнительные условия</b>\nВсе поля необязательны. Выберите только важное; остальные не ограничивают поиск.\n\n" +
+        profileText(this.draftProfile(userId, data, await this.store.getProfile(userId)));
+      const fields = Object.entries(FIELD_LABELS);
+      buttons = [];
+      for (let index = 0; index < fields.length; index += 2)
+        buttons = [
+          ...buttons,
+          fields.slice(index, index + 2).map(([field, label]) => choice(label, `edit.${field}`)),
+        ];
+      buttons = [...buttons, [choice("Назад к сохранению", "back")], [["Отмена", "/cancel"]]];
     } else {
       const prompts: Record<string, string> = {
         market:
@@ -467,11 +516,9 @@ export class Conversation {
             ),
           ],
         ];
-      if (
-        (data.return_review || ["currency", "budget", "query"].includes(state)) &&
-        (state !== "currency" || data.return_review || enabledMarkets().length > 1)
-      )
+      if (data.return_review || ["budget", "query"].includes(state))
         buttons = [...buttons, [choice("Назад — сохранить прежнее значение", "back")]];
+      buttons = [...buttons, [["Отмена", "/cancel"]]];
       text += "\n/cancel — отменить весь ввод. Мониторинг на время изменений приостановлен.";
     }
     return packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons);
@@ -562,16 +609,17 @@ export class Conversation {
     const text = input.trim();
     let profile = await this.store.getProfile(userId);
     let command = text.split(/\s+/, 1)[0]?.split("@", 1)[0]?.toLowerCase() ?? "";
-    const draft = await this.store.getDraft(userId);
+    const draft = (await this.store.getDraft(userId)) ?? this.deletions.get(userId) ?? null;
     const consent = this.consents.get(userId);
     this.consents.delete(userId);
     if (text.startsWith("consent:")) {
-      if (profile || !consent || text !== consent)
+      if (profile || draft?.[0] === "delete_confirm" || !consent || text !== consent)
         return packReplies(
           "Согласие не принято: откройте актуальное описание /privacy.",
           [],
           profile ? menu(profile) : START_BUTTONS,
         );
+      this.setGoal(userId, "buy");
       return this.begin(userId, null);
     }
     let action: string | null = null;
@@ -592,19 +640,16 @@ export class Conversation {
       action = parts[3]!;
       let allowed = Object.keys(CHOICES[state] ?? {});
       if (state === "review")
-        allowed = ["save", ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`)];
+        allowed = ["save.monitor", "save.silent", "refine", "edit.budget", "edit.query"];
+      else if (state === "refine")
+        allowed = ["back", ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`)];
       else if (state === "currency") allowed.push("USD", "KGS");
       else if (state === "market") {
         const markets = enabledMarkets();
         allowed.push(...markets, ...(markets.length > 1 ? ["ALL"] : []));
       }
       if (state === "query" || Object.hasOwn(OPTIONAL_DEFAULTS, state)) allowed.push("skip");
-      if (
-        draft[1].return_review ||
-        ["budget", "query"].includes(state) ||
-        (state === "currency" && enabledMarkets().length > 1)
-      )
-        allowed.push("back");
+      if (draft[1].return_review || ["budget", "query"].includes(state)) allowed.push("back");
       if (!allowed.includes(action))
         return packReplies(
           "Эта кнопка не относится к текущему шагу. Продолжите ввод или /cancel.",
@@ -626,20 +671,64 @@ export class Conversation {
         );
       command = parts[2] === "on" ? "/resume" : "/pause";
     }
-    if (command === "/privacy") return this.privacy(userId, profile);
-    if (command === "/start")
-      return profile
-        ? packReplies("Ваш сохранённый поиск:\n\n" + profileText(profile), [], menu(profile))
-        : this.privacy(userId, null);
-    if (command === "/begin" || command === "/edit") {
-      if (!profile && draft?.[1].consent !== true) return this.privacy(userId, null);
+    if (command === "/privacy")
+      return draft && (draft[1].consent === true || draft[0] === "delete_confirm")
+        ? packReplies(privacyText(), [], profile ? menu(profile) : START_BUTTONS)
+        : this.privacy(userId, profile, true);
+    if (command === "/start") {
+      this.setGoal(userId, "home");
+      return packReplies(
+        "<b>Autodom</b>\nЧто хотите сделать?\n\nVIN — бесплатная проверка доступных корейских данных.\nПродать / обменять — ваше авто, недвижимость или первоначальный взнос.\nКупить — поиск по бюджету и моделям.\n\nСохранённый поиск и черновик покупки остаются на месте. /help — команды; /privacy — данные.",
+        [],
+        START_BUTTONS,
+      );
+    }
+    if (command === "/vin") {
+      this.setGoal(userId, "vin");
+      return [
+        {
+          text: "Введите VIN из 17 символов или отправьте фото VIN в боте. Бесплатно проверим доступные корейские данные; это не полный платный отчёт.",
+          buttons: START_BUTTONS,
+          miniAppView: "vin",
+        },
+      ];
+    }
+    if (["/buy", "/begin", "/edit"].includes(command)) {
+      this.setGoal(userId, "buy");
+      if (draft?.[0] === "delete_confirm")
+        return packReplies("Сначала подтвердите удаление или /cancel.", [], []);
+      if (draft && draft[1].consent === true) return this.prompt(userId, draft[0], draft[1]);
+      if (!profile) return this.privacy(userId, null);
+      if (command === "/buy")
+        return packReplies("Ваш поиск сохранён.\n\n" + profileText(profile), [], menu(profile));
       return this.begin(userId, profile);
     }
     if (command === "/cancel") {
+      if (this.goals.get(userId) === "sell" && draft?.[0] !== "delete_confirm") {
+        this.setGoal(userId, "home");
+        return packReplies(
+          "Ввод по вашему авто отменён. Сохранённая карточка авто и черновик покупки не изменены.",
+          [],
+          START_BUTTONS,
+        );
+      }
+      if (draft?.[0] !== "delete_confirm" && this.goals.get(userId) !== "buy") {
+        this.setGoal(userId, "home");
+        return packReplies(
+          "Текущее действие отменено. Сохранённые данные не изменены." +
+            (draft ? " Черновик покупки сохранён; /buy — продолжить." : ""),
+          [],
+          START_BUTTONS,
+        );
+      }
+      this.setGoal(userId, "home");
+      this.deletions.delete(userId);
       const previous =
         draft?.[0] === "delete_confirm" ? (draft[1].previous as [string, Draft] | null) : null;
-      if (previous) await this.store.setDraft(userId, previous[0], previous[1]);
-      else await this.store.clearDraft(userId);
+      if (previous) {
+        await this.store.setDraft(userId, previous[0], previous[1]);
+        this.setGoal(userId, "buy");
+      } else await this.store.clearDraft(userId);
       let note = previous
         ? "Удаление отменено. Незавершённый ввод сохранён."
         : draft?.[0] === "delete_confirm"
@@ -655,19 +744,25 @@ export class Conversation {
     }
     if (command === "/help")
       return packReplies(
-        "/start — начать или открыть поиск\n/search — подходящие автомобили по одному, с фото и описанием\n/profile — бюджет и пожелания\n/edit — изменить поиск\n/resume — включить бесплатный мониторинг\n/pause — приостановить\n/quiet HH:MM-HH:MM — тихие часы (Бишкек, UTC+6); /quiet off — отключить\n/vin VIN — CarHistory и Car365: доступность отчёта и записи, без покупки\n/privacy — хранение данных и согласие\n/tips — советы перед покупкой\n/status — состояние каталога\n/cancel — отменить ввод, не удаляя сохранённый поиск\n/delete — удалить мои данные\n\nБюджет можно ввести как 15000, 15к или 10000–15000. Модели — через запятую: Toyota Camry, Honda Accord. Внутри одного варианта все слова обязательны. Можно выбрать «Пока не знаю».",
+        "/start — три цели: VIN, продажа/обмен, покупка\n/vin — бесплатные корейские данные; можно отправить фото VIN\n/sell — продать или обменять своё авто на недвижимость / первоначальный взнос\n/mycar — сохранённое авто\n/buy — открыть поиск или продолжить черновик\n/search — подходящие автомобили с фото\n/profile — сохранённые фильтры и их ограничения\n/edit — изменить фильтры\n/resume — включить бесплатный мониторинг\n/pause — остановить уведомления\n/quiet HH:MM-HH:MM — тихие часы (Бишкек); /quiet off — отключить\n/privacy — данные и согласие\n/tips — советы\n/status — каталог\n/cancel — отменить текущий ввод; сохранённые данные остаются\n/delete — удалить данные с подтверждением\n\nПокупка: валюта → бюджет → модели → проверка. Остальные фильтры необязательны. Уведомления — только по вашему выбору. Переключение целей сохраняет черновик покупки; незавершённый ввод своего авто сбрасывается, сохранённая карточка остаётся.",
         [],
         profile ? menu(profile) : START_BUTTONS,
       );
     if (command === "/status")
       return packReplies(await this.catalogNote(), [], profile ? menu(profile) : START_BUTTONS);
     if (command === "/delete") {
-      if (!profile && !draft) return packReplies("Сохранённых данных нет.", [], START_BUTTONS);
+      this.options.seller?.clear(userId);
       const previous = draft?.[0] === "delete_confirm" ? draft[1].previous : draft;
       const nonce = randomBytes(12).toString("base64url");
-      await this.store.setDraft(userId, "delete_confirm", { nonce, previous });
+      if (profile || (draft && !this.deletions.has(userId)))
+        await this.store.setDraft(userId, "delete_confirm", { nonce, previous });
+      else {
+        this.deletions.delete(userId);
+        this.deletions.set(userId, ["delete_confirm", { nonce, previous: null }]);
+        if (this.deletions.size > 2048) this.deletions.delete(this.deletions.keys().next().value!);
+      }
       return packReplies(
-        "Удалить Telegram ID, бюджет, пожелания, незавершённый ввод и настройки уведомлений из рабочей базы? После подтверждения мониторинг остановится. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения срока. Переписка в Telegram не удаляется. Платные заказы и платежи сейчас не подключены; если заказы появятся, финансовые записи, необходимые по закону, этим удалением не стираются. Восстановить поиск здесь можно только новым вводом.",
+        "Удалить Telegram ID, карточку своего авто, фильтры покупки, незавершённый ввод и настройки уведомлений из рабочей базы? После подтверждения мониторинг остановится. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения срока. Переписка в Telegram не удаляется. Платные заказы и платежи сейчас не подключены; если заказы появятся, финансовые записи, необходимые по закону, этим удалением не стираются.",
         [],
         [
           [
@@ -685,8 +780,10 @@ export class Conversation {
           profile ? menu(profile) : START_BUTTONS,
         );
       await this.store.deleteUser(userId);
+      this.deletions.delete(userId);
+      this.setGoal(userId, "home");
       return packReplies(
-        "Профиль и незавершённый ввод удалены из рабочей базы. Уведомления остановлены. Переписка в Telegram не удалена; локальные снимки при управляемом хранении могут содержать удалённые данные до 7 дней.",
+        "Профиль покупки, карточка своего авто и незавершённый ввод удалены из рабочей базы. Уведомления остановлены. Переписка в Telegram не удалена; локальные снимки при управляемом хранении могут содержать удалённые данные до 7 дней.",
         [],
         START_BUTTONS,
       );
@@ -697,6 +794,7 @@ export class Conversation {
     ) {
       if (!profile)
         return packReplies("Сначала задайте бюджет и пожелания через /start.", [], START_BUTTONS);
+      if (command === "/profile" || command === "/search") this.setGoal(userId, "buy");
       if (command === "/profile")
         return packReplies(profileText(profile) + "\n\n" + FILTER_NOTE, [], menu(profile));
       if (command === "/quiet") {
@@ -771,6 +869,31 @@ export class Conversation {
       }
       return this.search(profile, offset);
     }
+    if (draft?.[0] === "delete_confirm")
+      return packReplies(
+        "Ожидаю подтверждение удаления. /delete — новая кнопка; /cancel — сохранить данные.",
+        [],
+        [],
+      );
+    if (
+      command === "/sell" ||
+      command === "/mycar" ||
+      text.startsWith("seller:") ||
+      this.goals.get(userId) === "sell"
+    ) {
+      if (command === "/sell" || command === "/mycar") this.setGoal(userId, "sell");
+      const replies = await this.options.seller?.handle(userId, chatId, text);
+      if (replies) return replies;
+      if (command === "/sell" || command === "/mycar")
+        return packReplies("Раздел своего авто сейчас недоступен.", [], START_BUTTONS);
+    }
+    if (action === null && this.goals.get(userId) !== "buy")
+      return packReplies(
+        "Выберите цель. /buy продолжит сохранённый черновик покупки.",
+        [],
+        START_BUTTONS,
+      );
+    if (action !== null) this.setGoal(userId, "buy");
     if (!draft)
       return packReplies(
         "Используйте /edit для изменения пожеланий или /search для подбора.",
@@ -778,11 +901,6 @@ export class Conversation {
         profile ? menu(profile) : START_BUTTONS,
       );
     const [state, data] = draft;
-    if (state === "delete_confirm")
-      return packReplies(
-        "Ожидаю подтверждение удаления. /delete — новая кнопка; /cancel — сохранить данные.",
-        [],
-      );
     if (!profile && data.consent !== true) return this.privacy(userId, null);
     if (
       action === null &&
@@ -792,25 +910,32 @@ export class Conversation {
         "Команда или кнопка не может быть значением поля. Продолжите ввод или /cancel.",
         [],
       );
-    if (state === "review") {
-      if (action === "save") {
-        profile = await this.store.saveProfile(this.draftProfile(userId, data, profile));
+    if (state === "review" || state === "refine") {
+      if (action === "save.monitor" || action === "save.silent") {
+        const candidate = this.draftProfile(userId, data, profile);
+        candidate.monitoring = action === "save.monitor";
+        profile = await this.store.saveProfile(candidate);
         await this.store.clearDraft(userId);
         return [
           {
-            text: "Поиск сохранён. Подбор и мониторинг бесплатны. Уведомления включите отдельной кнопкой.",
+            text:
+              action === "save.monitor"
+                ? "Поиск сохранён. Бесплатные уведомления о новых совпадениях и снижении цены включены. /pause — остановить."
+                : "Поиск сохранён без уведомлений. /resume — включить бесплатный мониторинг.",
             buttons: [],
           },
           ...(await this.search(profile)),
         ];
       }
+      if (action === "refine") return this.prompt(userId, "refine", data);
+      if (action === "back") return this.prompt(userId, "review", data);
       if (action?.startsWith("edit."))
         return this.prompt(userId, action.slice(5), { ...data, return_review: true });
       return this.prompt(
         userId,
-        "review",
+        state,
         data,
-        "Для сохранения нажмите «Сохранить», для исправления — нужное поле.",
+        "Выберите действие кнопкой: сохранить или уточнить условия.",
       );
     }
     if (action === "back") {

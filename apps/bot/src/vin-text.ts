@@ -4,6 +4,7 @@ import {
   type VinCheckResult,
   type VinProvider,
 } from "@autodom/core/vin";
+import { KOREAN_REPORT_PRICE_KGS } from "./korean-report-example.js";
 
 export const VIN_DISCLOSURE =
   "По вашему запросу VIN передаётся отдельному сервису Autodom. Сначала проверяем подключённые CarHistory и Car365 через настроенный прокси. Подключённые NHTSA vPIC и Auto.dev запрашиваем напрямую, только если все подключённые корейские источники ответили «не найдено»; если корейские источники отключены — сразу. При найденном VIN или ошибке корейской проверки эти декодеры не запрашиваем. Платный отчёт CarHistory не покупаем и не получаем; Car365 проверяет государственную экспортную запись. NHTSA даёт характеристики для рынка США, Auto.dev — глобальную расшифровку с неполным покрытием; это не история ДТП, пробега или владельцев. Auto.dev используется на бесплатном тарифе с лимитом. VIN не сохраняется в вашем поиске или профиле.";
@@ -14,10 +15,12 @@ export const VIN_CAUTION =
 export const VIN_GOOGLE_SEARCH_LABEL = "Искать VIN в Google";
 export const VIN_GOOGLE_SEARCH_NOTICE =
   "Поиск точного VIN в Google для любого рынка. VIN передаётся Google только при нажатии. Отсутствие результатов не означает чистую историю.";
+export const VIN_REPORT_EXAMPLE_LABEL = "Посмотреть пример полного отчёта";
+export const VIN_PREMIUM_DESCRIPTION = `Полный корейский отчёт: страховые повреждения и ремонт, смены собственника, записи пробега — в пределах данных источника. Цена — ${KOREAN_REPORT_PRICE_KGS} KGS; покупка и выдача пока не подключены. Можно посмотреть переведённый пример другого автомобиля: это не результат по вашему VIN.`;
 
 export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
-  carhistory: "CarHistory",
-  car365: "Car365",
+  carhistory: "Корея · CarHistory · наличие отчёта",
+  car365: "Корея · Car365 · экспортная запись",
   nhtsa_vpic: "NHTSA vPIC · США, характеристики",
   autodev: "Auto.dev · глобальные характеристики",
 };
@@ -38,15 +41,15 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
     case "not_found":
       description =
         provider === "carhistory"
-          ? "Доступность платного отчёта для этого VIN не подтверждена. Может потребоваться прежний корейский регистрационный номер."
+          ? "Наличие полного отчёта не подтверждено. Может понадобиться прежний корейский госномер."
           : provider === "nhtsa_vpic" || provider === "autodev"
             ? "Декодер не смог установить характеристики для этого VIN. Это не подтверждает отсутствие ДТП или других событий в истории."
-            : "Государственная запись об экспорте и пробеге для этого VIN не найдена. Это не подтверждает отсутствие повреждений.";
+            : "Экспортная запись с пробегом не найдена. Это не означает отсутствие повреждений.";
       break;
     case "available": {
       if (provider === "carhistory") {
         description =
-          "Платный отчёт доступен для запроса у провайдера. Полный отчёт не куплен и не получен; его содержание неизвестно.";
+          "Провайдер подтвердил наличие платного отчёта. Сам отчёт не получен и не куплен; ДТП, ремонт и владельцы пока неизвестны.";
         break;
       }
       if (provider === "nhtsa_vpic") {
@@ -83,7 +86,7 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
       }
       const record = result.car365.data;
       const lines = [
-        "Найдена государственная запись.",
+        "Найдена государственная экспортная запись.",
         record?.last_mileage_km == null
           ? "Пробег в записи неизвестен."
           : `Последний записанный пробег: ${record.last_mileage_km.toLocaleString("ru-RU")} км (не текущий реальный пробег).`,
@@ -121,12 +124,13 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
 
 export function vinResultText(result: VinCheckResult): string {
   return [
-    `VIN: ${result.vin}`,
+    `Бесплатная проверка VIN: ${result.vin}`,
     ...VIN_PROVIDERS.flatMap((provider) =>
       result[provider]
         ? [`${vinSourceText(provider, result)}\nИсточник: ${VIN_SOURCE_URLS[provider]}`]
         : [],
     ),
     VIN_CAUTION,
+    VIN_PREMIUM_DESCRIPTION,
   ].join("\n\n");
 }

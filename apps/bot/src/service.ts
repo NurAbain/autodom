@@ -16,9 +16,10 @@ import { type Bot, type BotError, type Context, GrammyError, HttpError } from "g
 import type { Update } from "grammy/types";
 import pg from "pg";
 import type { Logger } from "pino";
+import type { Conversation } from "./conversation.js";
 import { startMiniAppServer } from "./miniapp-server.js";
 import { monitor } from "./monitor.js";
-import { configureTelegramBot, sendReplies } from "./telegram.js";
+import { type AutodomBot, configureTelegramBot, sendReplies } from "./telegram.js";
 
 export function startPolling(bot: Bot): RunnerHandle {
   let offset = 0;
@@ -96,12 +97,13 @@ export function startPolling(bot: Bot): RunnerHandle {
 }
 
 export interface BotServiceContext {
-  bot: Bot;
+  bot: AutodomBot;
   token: string;
   miniAppUrl?: string;
   assetsDirectory?: string;
   signal?: AbortSignal;
   checkVin?: VinLookup;
+  conversation?: Conversation;
 }
 
 export function metricsPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -234,6 +236,15 @@ export async function runBotService(
         ...listener,
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
+        ...(context.conversation
+          ? {
+              dialogue: (userId: number, text: string) =>
+                store.withLock(`autodom:user:${userId}`, () => {
+                  bot.clearVinInput(userId);
+                  return context.conversation!.handle(userId, userId, text);
+                }),
+            }
+          : {}),
         ready,
         // Request errors can contain private Telegram initData or profile values.
         onError: () => logger.warn("Mini App request failed"),

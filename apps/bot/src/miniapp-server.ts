@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -13,7 +13,7 @@ import {
 import type { VinLookup } from "@autodom/core/vin";
 import { readVinRequest, VinRequestError } from "@autodom/core/vin-request";
 import type { Store } from "@autodom/storage";
-import { listingText } from "./conversation.js";
+import { listingText, type Reply } from "./conversation.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
@@ -25,6 +25,70 @@ class RequestError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+async function readDialogueRequest(request: IncomingMessage): Promise<string> {
+  const maxBytes = 8192;
+  if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json")
+    throw new RequestError(415, "Отправьте ответ в формате JSON.");
+  if (request.headers["content-encoding"] && request.headers["content-encoding"] !== "identity")
+    throw new RequestError(415, "Сжатые запросы не поддерживаются.");
+  if (Number(request.headers["content-length"]) > maxBytes)
+    throw new RequestError(413, "Ответ слишком длинный.");
+  const bytes = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const cleanup = () => {
+      clearTimeout(timer);
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      request.off("aborted", onError);
+    };
+    const fail = (status: number, message: string) => {
+      cleanup();
+      chunks.length = 0;
+      request.resume();
+      reject(new RequestError(status, message));
+    };
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) fail(413, "Ответ слишком длинный.");
+      else chunks.push(chunk);
+    };
+    const onEnd = () => {
+      cleanup();
+      resolve(Buffer.concat(chunks, size));
+    };
+    const onError = () => fail(400, "Не удалось прочитать ответ. Попробуйте ещё раз.");
+    const timer = setTimeout(() => fail(408, "Время отправки ответа истекло."), 10_000);
+    timer.unref();
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    request.once("aborted", onError);
+    if (request.destroyed) onError();
+  });
+  try {
+    const body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    // As with VIN input, do not let JSON.parse silently discard duplicate members.
+    if (!/^\s*\{\s*"(?:[^"\\]|\\.)*"\s*:\s*"(?:[^"\\]|\\.)*"\s*\}\s*$/u.test(body))
+      throw new Error();
+    const value: unknown = JSON.parse(body);
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("text" in value) ||
+      typeof value.text !== "string" ||
+      !value.text.trim() ||
+      value.text.length > 2048 ||
+      /[[\p{Cc}&&\p{ASCII}]--[\t\n\r]]/v.test(value.text)
+    )
+      throw new Error();
+    return value.text.trim();
+  } catch {
+    throw new RequestError(400, "Нужен один непустой ответ text, не длиннее 2048 символов.");
   }
 }
 
@@ -70,6 +134,7 @@ export interface MiniAppServerOptions {
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
   checkVin?: VinLookup;
+  dialogue?: (userId: number, text: string) => Promise<Reply[]>;
 }
 
 export async function startMiniAppServer(options: MiniAppServerOptions): Promise<Server> {
@@ -131,7 +196,9 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           response.end(request.method === "HEAD" ? undefined : asset.body);
           return;
         }
-        if (url.pathname !== "/miniapp/api/car" && url.pathname !== "/miniapp/api/vin")
+        if (
+          !["/miniapp/api/car", "/miniapp/api/vin", "/miniapp/api/dialogue"].includes(url.pathname)
+        )
           throw new RequestError(404, "Страница не найдена.");
         if (
           (request.headers.origin && request.headers.origin !== origin) ||
@@ -147,6 +214,19 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             401,
             "Сессия истекла. Закройте карточку и откройте её заново в Telegram.",
           );
+        if (url.pathname === "/miniapp/api/dialogue") {
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "POST");
+            throw new RequestError(405, "Ответы принимаются только через POST.");
+          }
+          if (url.search) throw new RequestError(400, "Передайте ответ только в теле запроса.");
+          const text = await readDialogueRequest(request);
+          if (!options.dialogue)
+            throw new RequestError(503, "Диалог недоступен. Откройте личный чат с ботом.");
+          const replies = await options.dialogue(user.id, text);
+          if (!response.destroyed) respond(response, 200, { replies });
+          return;
+        }
         if (url.pathname === "/miniapp/api/vin") {
           if (request.method !== "POST") {
             response.setHeader("Allow", "POST");

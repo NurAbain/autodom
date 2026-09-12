@@ -82,7 +82,7 @@ function button(replies: readonly Reply[], label: string): string {
 }
 const rendered = (replies: readonly Reply[]) => replies.map((reply) => reply.text).join("\n");
 async function begin(conversation: Conversation, user = 1, currency = "USD") {
-  const privacy = await conversation.handle(user, user, "/start");
+  const privacy = await conversation.handle(user, user, "/buy");
   const currencies = await conversation.handle(user, user, button(privacy, "Согласен"));
   return conversation.handle(user, user, button(currencies, currency));
 }
@@ -97,6 +97,17 @@ async function review(
   const queries = await conversation.handle(user, user, budget);
   return conversation.handle(user, user, query || button(queries, "Пока не знаю"));
 }
+async function field(replies: Reply[], label: string): Promise<Reply[]> {
+  const options = await conversation.handle(1, 1, button(replies, "Уточнить фильтры"));
+  return conversation.handle(1, 1, button(options, label));
+}
+async function editModels(query: string, budget = "12000") {
+  const current = await conversation.handle(1, 1, "/edit");
+  await conversation.handle(1, 1, button(current, "Бюджет"));
+  const updated = await conversation.handle(1, 1, budget);
+  await conversation.handle(1, 1, button(updated, "Марки"));
+  return conversation.handle(1, 1, query);
+}
 async function save(
   conversation: Conversation,
   query = "Toyota Camry",
@@ -105,7 +116,7 @@ async function save(
   budget = "15000",
 ) {
   const replies = await review(conversation, query, user, currency, budget);
-  return conversation.handle(user, user, button(replies, "Сохранить"));
+  return conversation.handle(user, user, button(replies, "Сохранить без"));
 }
 const car = (id: string, title = "Toyota Camry", extra: Partial<Listing> = {}) =>
   makeListing({
@@ -131,8 +142,60 @@ afterEach(() => {
 });
 
 describe("explicit consent and save safety", () => {
+  it("keeps three goals independent and resumes the buyer draft without accepting suspended free text", async () => {
+    const home = await conversation.handle(1, 1, "/start");
+    expect(home.flatMap((reply) => reply.buttons.flat().map(([, action]) => action))).toEqual([
+      "/vin",
+      "/sell",
+      "/buy",
+    ]);
+    await conversation.handle(1, 1, "/vin");
+    expect(await store.getDraft(1)).toBeNull();
+    expect(await store.getProfile(1)).toBeNull();
+    await begin(conversation);
+    const original = await store.getDraft(1);
+    await conversation.handle(1, 1, "/start");
+    await conversation.handle(1, 1, "90000");
+    await conversation.handle(1, 1, "/vin");
+    await conversation.handle(1, 1, "/cancel");
+    expect(await store.getDraft(1)).toEqual(original);
+    await conversation.handle(1, 1, "/buy");
+    await conversation.handle(1, 1, "12000");
+    expect((await store.getDraft(1))?.[1].maximum).toBe(1_200_000);
+    expect(await store.getProfile(1)).toBeNull();
+  });
+  it("requires explicit buyer resumption after losing the active goal on restart", async () => {
+    await begin(conversation);
+    await conversation.handle(1, 1, "15000");
+    const buyerDraft = await store.getDraft(1);
+    await conversation.handle(1, 1, "/sell");
+    const restarted = new Conversation(store);
+    await restarted.handle(1, 1, "Toyota Camry, 2018, 120000");
+    expect(await store.getDraft(1)).toEqual(buyerDraft);
+    await restarted.handle(1, 1, "/cancel");
+    expect(await store.getDraft(1)).toEqual(buyerDraft);
+    await restarted.handle(1, 1, "/buy");
+    await restarted.handle(1, 1, "Honda Fit");
+    expect((await store.getDraft(1))?.[1].query).toBe("Honda Fit");
+  });
+  it("enables monitoring only for the chosen save and rejects the alternate consumed button", async () => {
+    const first = await review(conversation);
+    const monitor = button(first, "бесплатный мониторинг");
+    await conversation.handle(1, 1, button(first, "Сохранить без"));
+    const silent = await store.getProfile(1);
+    expect(silent?.monitoring).toBe(false);
+    await conversation.handle(1, 1, monitor);
+    expect(await store.getProfile(1)).toEqual(silent);
+    const edited = await conversation.handle(1, 1, "/edit");
+    const enabled = button(edited, "бесплатный мониторинг");
+    await conversation.handle(2, 2, enabled);
+    expect(await store.getProfile(2)).toBeNull();
+    await conversation.handle(1, 1, enabled);
+    expect((await store.getProfile(1))?.monitoring).toBe(true);
+    expect(await store.getDraft(1)).toBeNull();
+  });
   it("persists nothing before current explicit consent, including on restart", async () => {
-    const old = button(await conversation.handle(1, 1, "/start"), "Согласен");
+    const old = button(await conversation.handle(1, 1, "/buy"), "Согласен");
     for (const command of ["/privacy", "/begin", "/edit", "consent:accept", old]) {
       await conversation.handle(1, 1, command);
       expect(await store.getDraft(1)).toBeNull();
@@ -148,10 +211,9 @@ describe("explicit consent and save safety", () => {
     "does not save invalid query %s",
     async (invalid) => {
       await save(conversation);
-      const currencies = await conversation.handle(1, 1, "/edit");
+      const current = await conversation.handle(1, 1, "/edit");
       const original = await store.getProfile(1);
-      await conversation.handle(1, 1, button(currencies, "KGS"));
-      await conversation.handle(1, 1, "1000000");
+      await conversation.handle(1, 1, button(current, "Марки"));
       await conversation.handle(1, 1, invalid);
       expect(await store.getProfile(1)).toEqual(original);
       expect((await store.getDraft(1))?.[0]).toBe("query");
@@ -160,10 +222,11 @@ describe("explicit consent and save safety", () => {
   it("binds review choices to user, current prompt and a single save, surviving restart", async () => {
     const first = await review(conversation, "Toyota");
     const oldSave = button(first, "Сохранить");
-    const oldCity = button(first, "Город");
+    const options = await conversation.handle(1, 1, button(first, "Уточнить фильтры"));
+    const oldCity = button(options, "Город");
     const city = await conversation.handle(1, 1, oldCity);
     const current = await store.getDraft(1);
-    for (const stale of [oldSave, oldCity, oldCity.replace(":review:", ":city:")]) {
+    for (const stale of [oldSave, oldCity, oldCity.replace(":refine:", ":city:")]) {
       await conversation.handle(1, 1, stale);
       expect(await store.getDraft(1)).toEqual(current);
       expect(await store.getProfile(1)).toBeNull();
@@ -187,7 +250,7 @@ describe("explicit consent and save safety", () => {
     const currencies = await conversation.handle(
       1,
       1,
-      button(await conversation.handle(1, 1, "/start"), "Согласен"),
+      button(await conversation.handle(1, 1, "/buy"), "Согласен"),
     );
     const stale = button(currencies, "KGS");
     await conversation.handle(1, 1, button(currencies, "USD"));
@@ -201,7 +264,7 @@ describe("explicit consent and save safety", () => {
       }
       if (state === "query") {
         const current = await conversation.handle(1, 1, "Toyota");
-        await conversation.handle(1, 1, button(current, "Город"));
+        await field(current, "Город");
       }
     }
   });
@@ -274,10 +337,7 @@ describe("editing, monitoring and deletion", () => {
       await conversation.handle(1, 1, `/quiet ${invalid}`);
       expect(await store.getProfile(1)).toEqual(quiet);
     }
-    const currencies = await conversation.handle(1, 1, "/edit");
-    await conversation.handle(1, 1, button(currencies, "USD"));
-    await conversation.handle(1, 1, "12000");
-    const current = await conversation.handle(1, 1, "Honda");
+    const current = await editModels("Honda");
     await conversation.handle(1, 1, button(current, "Сохранить"));
     expect((await store.getProfile(1))?.quiet_start_minute).toBe(1350);
     await conversation.handle(1, 1, "/quiet off");
@@ -297,22 +357,19 @@ describe("editing, monitoring and deletion", () => {
       Готовность: "no",
       Планируемая: "29.02.2024",
     })) {
-      await conversation.handle(1, 1, button(current, label));
+      await field(current, label);
       current = await conversation.handle(1, 1, value);
     }
     await conversation.handle(1, 1, button(current, "Сохранить"));
     const before = await store.getProfile(1);
-    const currencies = await conversation.handle(1, 1, "/edit");
-    await conversation.handle(1, 1, button(currencies, "USD"));
-    await conversation.handle(1, 1, "12000");
-    current = await conversation.handle(1, 1, "Honda");
+    current = await editModels("Honda");
     for (const [label, invalid] of [
       ["Год от", "1899"],
       ["Пробег до", "-1"],
       ["Планируемая", "2025-02-29"],
       ["Город", "123 !!!"],
     ]) {
-      await conversation.handle(1, 1, button(current, label!));
+      await field(current, label!);
       const prompt = await conversation.handle(1, 1, invalid!);
       current = await conversation.handle(1, 1, button(prompt, "Назад"));
     }
@@ -332,11 +389,8 @@ describe("editing, monitoring and deletion", () => {
       expect(changed?.[key]).toEqual(before?.[key]);
     expect(changed?.budget_max_minor).toBe(1_200_000);
     expect(changed?.purchase_by).toBe("2024-02-29");
-    const next = await conversation.handle(1, 1, "/edit");
-    await conversation.handle(1, 1, button(next, "USD"));
-    await conversation.handle(1, 1, "12000");
-    current = await conversation.handle(1, 1, "Honda");
-    const city = await conversation.handle(1, 1, button(current, "Город"));
+    current = await conversation.handle(1, 1, "/edit");
+    const city = await field(current, "Город");
     current = await conversation.handle(1, 1, button(city, "пропустить"));
     await conversation.handle(1, 1, button(current, "Сохранить"));
     expect((await store.getProfile(1))?.city).toBe("");
@@ -344,12 +398,12 @@ describe("editing, monitoring and deletion", () => {
   });
   it("currency correction requires new amount and back discards pending currency", async () => {
     let current = await review(conversation);
-    const currencies = await conversation.handle(1, 1, button(current, "Валюта"));
+    const currencies = await field(current, "Валюта");
     const amount = await conversation.handle(1, 1, button(currencies, "KGS"));
     expect((await store.getDraft(1))?.[0]).toBe("budget");
     current = await conversation.handle(1, 1, button(amount, "Назад"));
     expect((await store.getDraft(1))?.[1].currency).toBe("USD");
-    const again = await conversation.handle(1, 1, button(current, "Валюта"));
+    const again = await field(current, "Валюта");
     await conversation.handle(1, 1, button(again, "KGS"));
     current = await conversation.handle(1, 1, "1400000");
     expect(await store.getProfile(1)).toBeNull();
@@ -367,12 +421,9 @@ describe("search and safe rendering", () => {
       car("honda-other", "Honda Accord", { city: "Ош" }),
     ];
     await save(conversation);
-    const currencies = await conversation.handle(1, 1, "/edit");
-    await conversation.handle(1, 1, button(currencies, "USD"));
-    await conversation.handle(1, 1, "15000");
-    let current = await conversation.handle(1, 1, "Honda Accord");
+    let current = await editModels("Honda Accord", "15000");
     expect(rendered(await conversation.handle(1, 1, "/search"))).toContain("/toyota");
-    await conversation.handle(1, 1, button(current, "Город"));
+    await field(current, "Город");
     current = await conversation.handle(1, 1, "Бишкек");
     expect(rendered(await conversation.handle(1, 1, "/search"))).toContain("/toyota");
     const saved = rendered(await conversation.handle(1, 1, button(current, "Сохранить")));
@@ -394,14 +445,10 @@ describe("search and safe rendering", () => {
       }),
       car("american", "Hyundai", { market: "US", source: "truecar.com", original_currency: "USD" }),
     ];
-    const privacy = await conversation.handle(1, 1, "/start");
-    const markets = await conversation.handle(1, 1, button(privacy, "Согласен"));
+    let current = await review(conversation, "Hyundai");
+    const markets = await field(current, "Рынок");
     const market = button(markets, "Корея");
-    const currencies = await conversation.handle(1, 1, market);
-    const currency = button(currencies, "USD");
-    await conversation.handle(1, 1, currency);
-    await conversation.handle(1, 1, "15000");
-    const current = await conversation.handle(1, 1, "Hyundai");
+    current = await conversation.handle(1, 1, market);
     const results = await conversation.handle(1, 1, button(current, "Сохранить"));
     expect((await store.getProfile(1))?.market).toBe("KR");
     expect(rendered(results)).toContain("https://fem.encar.com/cars/detail/1");
@@ -412,8 +459,8 @@ describe("search and safe rendering", () => {
     expect(await store.getProfile(1)).toEqual(saved);
     await conversation.handle(1, 1, "/resume");
     await conversation.handle(1, 1, "/edit");
-    await conversation.handle(1, 1, currency);
-    expect((await store.getDraft(1))?.[0]).toBe("market");
+    await conversation.handle(1, 1, market);
+    expect((await store.getDraft(1))?.[0]).toBe("review");
     await conversation.handle(1, 1, "/cancel");
     expect((await store.getProfile(1))?.market).toBe("KR");
     expect((await store.getProfile(1))?.monitoring).toBe(false);
@@ -477,7 +524,7 @@ describe("search and safe rendering", () => {
   });
   it("escapes free text in both review and saved profile", async () => {
     let current = await review(conversation, "<b>Toyota</b>");
-    await conversation.handle(1, 1, button(current, "Город"));
+    await field(current, "Город");
     current = await conversation.handle(1, 1, "<i>Бишкек</i>");
     await conversation.handle(1, 1, button(current, "Сохранить"));
     for (const output of [
@@ -611,7 +658,7 @@ describe("grammY transport boundaries", () => {
     });
     return { bot, calls };
   }
-  it("runs only explicit private VIN commands without changing the buyer draft or requiring a profile", async () => {
+  it("checks VIN only for its private owner without changing buyer preferences or requiring a profile", async () => {
     const checkVin = vi.fn<VinLookup>(async (vin) => ({
       vin,
       checked_at: 1_789_000_000,
@@ -653,11 +700,6 @@ describe("grammY transport boundaries", () => {
       message: { ...message, chat: { ...message.chat, id: 2 }, text: "/vin KMHDU41DBAU123456" },
     });
     expect(checkVin).not.toHaveBeenCalled();
-    expect(
-      calls
-        .filter((call) => call.method === "sendMessage")
-        .every((call) => call.payload.reply_markup === undefined),
-    ).toBe(true);
     await bot.handleUpdate({
       update_id: 4,
       message: { ...message, text: "/vin@autodom_test_bot kmhdu41dbau123456" },
@@ -665,17 +707,20 @@ describe("grammY transport boundaries", () => {
     expect(checkVin).toHaveBeenCalledExactlyOnceWith("KMHDU41DBAU123456");
     expect(await store.getProfile(1)).toBeNull();
     expect(await store.getDraft(1)).toEqual(draft);
-    const text = String(calls.at(-1)?.payload.text);
-    expect(text).toMatch(/CarHistory[\s\S]*не подтверждена/);
-    expect(text).toMatch(/Car365[\s\S]*отключён/);
     expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([
+          expect.objectContaining({
+            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+          }),
+        ]),
+      ]),
     });
     await bot.handleUpdate({ update_id: 5, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
     expect(checkVin).toHaveBeenCalledTimes(1);
   });
-  it("does not infer a check from buyer text and explains an unconfigured explicit command", async () => {
+  it("accepts an exact VIN without requiring a buyer profile", async () => {
     const { bot, calls } = telegram();
     await bot.init();
     const message = {
@@ -690,7 +735,13 @@ describe("grammY transport boundaries", () => {
     });
     expect(String(calls.at(-1)?.payload.text)).toMatch(/не подключена/);
     expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([
+          expect.objectContaining({
+            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+          }),
+        ]),
+      ]),
     });
     expect(await store.getDraft(1)).toBeNull();
     const checkVin = vi.fn<VinLookup>();
@@ -700,7 +751,7 @@ describe("grammY transport boundaries", () => {
       update_id: 2,
       message: { ...message, text: "KMHDU41DBAU123456" },
     });
-    expect(checkVin).not.toHaveBeenCalled();
+    expect(checkVin).toHaveBeenCalledExactlyOnceWith("KMHDU41DBAU123456");
   });
   it("reports remote failure as unknown without exposing secrets or disturbing search", async () => {
     const { bot, calls } = telegram(async () => {
@@ -723,7 +774,13 @@ describe("grammY transport boundaries", () => {
     expect(text).toMatch(/неизвестен/);
     expect(text).not.toContain("private-api-token");
     expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([
+          expect.objectContaining({
+            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+          }),
+        ]),
+      ]),
     });
     expect(await store.getDraft(1)).toEqual(draft);
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
@@ -774,7 +831,13 @@ describe("grammY transport boundaries", () => {
     expect(html.match(/&lt;literal &amp; data&gt;/g)).toHaveLength(32 * 8);
     expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
     expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: [[{ url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22" }]],
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([
+          expect.objectContaining({
+            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+          }),
+        ]),
+      ]),
     });
   });
   it("refuses an existing webhook without replacing it or registering commands", async () => {

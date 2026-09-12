@@ -5,6 +5,8 @@ import {
   type VinCheckResult,
   vinGoogleSearchUrl,
 } from "@autodom/core/vin";
+import type { Reply } from "../src/conversation.js";
+import { KOREAN_REPORT_EXAMPLE, KOREAN_REPORT_PRICE_KGS } from "../src/korean-report-example.js";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
 import {
   VIN_CAUTION,
@@ -28,6 +30,88 @@ type TelegramApp = {
 };
 const telegram = (window as Window & { Telegram?: { WebApp?: TelegramApp } }).Telegram?.WebApp;
 const root = document.getElementById("app")!;
+
+type View = "home" | "vin" | "buy" | "sell" | "report-example" | "car";
+let currentView: View = "home";
+let generation = 0;
+const pending = new Set<AbortController>();
+
+function cancelRequests(): void {
+  generation += 1;
+  for (const controller of pending) controller.abort();
+  pending.clear();
+}
+
+window.addEventListener("pagehide", cancelRequests);
+window.addEventListener("popstate", () => void load());
+
+function navigate(view: View, carId?: string): void {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("car");
+  url.searchParams.delete("view");
+  if (view === "car" && carId) url.searchParams.set("car", carId);
+  else if (view !== "home") url.searchParams.set("view", view);
+  window.history.pushState(null, "", url);
+  void load();
+}
+
+async function request<T>(path: string, body?: unknown): Promise<T> {
+  if (!telegram?.initData) {
+    throw new Error(
+      "Откройте Автодом из личного чата в Telegram. Здесь нужен защищённый доступ, а не профиль покупателя.",
+    );
+  }
+  const controller = new AbortController();
+  const started = generation;
+  pending.add(controller);
+  const timeout = window.setTimeout(() => controller.abort(), 90_000);
+  try {
+    const response = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        Authorization: `tma ${telegram.initData}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let message =
+        response.status === 401
+          ? "Сессия истекла. Откройте Автодом заново из личного чата с ботом."
+          : "Сервис временно недоступен. Попробуйте ещё раз позже.";
+      try {
+        const error: unknown = await response.json();
+        if (
+          error &&
+          typeof error === "object" &&
+          "error" in error &&
+          typeof error.error === "string"
+        )
+          message = error.error;
+      } catch {
+        // A proxy may return an HTML error.
+      }
+      throw new Error(message);
+    }
+    const result = (await response.json()) as T;
+    if (started !== generation) throw new Error("Navigation interrupted");
+    return result;
+  } finally {
+    window.clearTimeout(timeout);
+    pending.delete(controller);
+  }
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error && error.name !== "AbortError"
+    ? error.message
+    : "Не удалось дождаться ответа. Проверьте соединение и попробуйте позже.";
+}
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -132,10 +216,12 @@ function richText(html: string, sourceUrl: string | null): DocumentFragment {
 function shell(): HTMLElement {
   const main = element("main");
   const header = element("header", "topbar");
-  header.append(
-    element("span", "brand", "Автодом"),
-    button("Вернуться в чат", closeCard, "button button-quiet"),
-  );
+  const brand = button("Автодом", () => navigate("home"), "brand");
+  brand.setAttribute("aria-label", "Автодом — на главную");
+  header.append(brand, button("В чат", closeCard, "button button-quiet"));
+  if (currentView !== "home") {
+    main.append(button("← На главную", () => navigate("home"), "back-link"));
+  }
   const note = element("p", "footnote");
   note.id = "close-note";
   note.setAttribute("role", "status");
@@ -146,13 +232,276 @@ function shell(): HTMLElement {
 function showState(title: string, message: string, retry = false): void {
   const main = shell();
   const state = element("section", "state");
-  state.append(element("p", "eyebrow", "Детали автомобиля"), element("h1", "", title));
+  state.append(element("p", "eyebrow", "Автодом"), element("h1", "", title));
   const description = element("p", "", message);
   description.setAttribute("role", "status");
   state.append(description);
   if (retry) state.append(button("Повторить загрузку", () => void load()));
-  state.append(element("p", "footnote", "Подбор автомобилей и настройки поиска остаются в чате."));
   main.append(state);
+}
+
+function showHome(): void {
+  const main = shell();
+  const heading = element("section", "home-heading");
+  heading.append(
+    element("p", "eyebrow", "Авто · Кыргызстан"),
+    element("h1", "", "С чего начнём?"),
+    element("p", "muted", "Проверьте автомобиль, найдите покупателя или выберите свой следующий."),
+  );
+  const goals = element("nav", "goals");
+  goals.setAttribute("aria-label", "Выберите цель");
+  for (const [view, number, title, description] of [
+    [
+      "vin",
+      "01",
+      "Проверить VIN",
+      "Бесплатная проверка корейских источников. VIN или фото в чате.",
+    ],
+    [
+      "sell",
+      "02",
+      "Продать или обменять авто",
+      "Продажа, обмен на недвижимость или первый взнос автомобилем.",
+    ],
+    ["buy", "03", "Купить авто", "Простой подбор по бюджету и вашим пожеланиям."],
+  ] as const) {
+    const goal = button("", () => navigate(view), "goal");
+    const copy = element("span", "goal-copy");
+    copy.append(
+      element("strong", "goal-title", title),
+      element("span", "goal-description", description),
+    );
+    goal.append(element("span", "goal-number", number), copy, element("span", "goal-arrow", "↗"));
+    goals.append(goal);
+  }
+  main.append(
+    heading,
+    goals,
+    element(
+      "p",
+      "footnote home-note",
+      "Выберите только то, что нужно сейчас. Для проверки VIN не нужна анкета покупателя.",
+    ),
+  );
+}
+
+function premiumPanel(): HTMLElement {
+  const panel = element("section", "panel premium-panel");
+  panel.append(
+    element("p", "eyebrow", "Следующий уровень проверки"),
+    element("h2", "", `Полный корейский отчёт · ${KOREAN_REPORT_PRICE_KGS} KGS`),
+    element(
+      "p",
+      "",
+      "Понятный перевод истории автомобиля: страховые события, ремонт и регистрационные сведения — в пределах данных источника.",
+    ),
+    element(
+      "p",
+      "footnote",
+      "Планируемая цена. Покупка пока недоступна, деньги не списываются. Доступность и состав отчёта зависят от автомобиля и провайдера.",
+    ),
+    button("Посмотреть реальный пример", () => navigate("report-example"), "button button-quiet"),
+    element(
+      "p",
+      "footnote",
+      "Пример относится к другому автомобилю. Это не результат проверки вашего VIN.",
+    ),
+  );
+  return panel;
+}
+
+function showExample(): void {
+  const main = shell();
+  const example = KOREAN_REPORT_EXAMPLE;
+  const heading = element("section", "example-heading");
+  heading.append(
+    element("p", "badge", "ПРИМЕР · НЕ НОВАЯ ПРОВЕРКА"),
+    element("h1", "", example.title),
+    element("p", "", example.notice),
+    element("p", "muted", example.vehicle.name),
+    element("p", "vin", example.vehicle.vin),
+    element(
+      "p",
+      "footnote",
+      `Дата запроса в документе: ${example.queryDate}. Дата документа: ${example.documentDate}.`,
+    ),
+  );
+  const summary = element("section", "panel");
+  summary.append(element("h2", "", "Коротко об этом примере"));
+  const facts = element("dl", "facts");
+  for (const row of example.summary) {
+    const fact = element("div", "fact");
+    fact.append(
+      element("dt", "", row.label),
+      element("dd", "", row.value),
+      element("p", "footnote", `${row.korean} · стр. ${row.pages.join(", ")}`),
+    );
+    facts.append(fact);
+  }
+  summary.append(facts);
+  main.append(heading, summary);
+  for (const section of example.sections) {
+    const details = element("details", "panel example-section");
+    details.append(
+      element("summary", "", section.title),
+      element("p", "footnote", `${section.korean} · стр. ${section.pages.join(", ")}`),
+    );
+    for (const paragraph of section.paragraphs) details.append(element("p", "", paragraph));
+    if ("rows" in section && section.rows) {
+      const rows = element("dl", "report-rows");
+      for (const row of section.rows) {
+        const fact = element("div", "fact");
+        fact.append(element("dt", "", row.label), element("dd", "", row.value));
+        if ("korean" in row && row.korean) fact.append(element("p", "footnote", row.korean));
+        rows.append(fact);
+      }
+      details.append(rows);
+    }
+    main.append(details);
+  }
+  const limits = element("section", "panel notice");
+  limits.append(element("h2", "", "Как читать этот пример"));
+  for (const limitation of example.limitations) limits.append(element("p", "", limitation));
+  main.append(
+    limits,
+    button("Перейти к проверке своего VIN", () => navigate("vin")),
+  );
+}
+
+function showDialogue(view: "buy" | "sell"): void {
+  const main = shell();
+  const started = generation;
+  main.append(
+    element("p", "eyebrow", view === "buy" ? "Подбор автомобиля" : "Ваш автомобиль"),
+    element("h1", "", view === "buy" ? "Купить авто" : "Продать или обменять"),
+    element(
+      "p",
+      "muted",
+      view === "buy"
+        ? "Выбирайте кнопками или отвечайте текстом. Настройки те же, что в чате."
+        : "Расскажите об авто и цели. Анкета продажи отделена от поиска автомобиля.",
+    ),
+  );
+  const content = element("div", "dialogue-content");
+  const status = element("p", "footnote dialogue-status");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  const form = element("form", "dialogue-form panel");
+  const label = element("label", "", "Ваш ответ");
+  label.htmlFor = "dialogue-input";
+  const input = element("input", "text-input");
+  input.id = "dialogue-input";
+  input.type = "text";
+  input.placeholder = "Напишите ответ…";
+  input.autocomplete = "off";
+  input.maxLength = 2048;
+  input.required = true;
+  const submit = element("button", "button", "Отправить");
+  submit.type = "submit";
+  form.append(label, input, submit);
+  const cancel = button("Отменить текущий шаг", () => void send("/cancel"), "back-link");
+  main.append(content, status, form, cancel);
+  let busy = false;
+
+  function runAction(command: string): void {
+    if (busy) return;
+    if (command === "/vin") navigate("vin");
+    else if (command === "/start") navigate("home");
+    else if (command === "/buy" && view !== "buy") navigate("buy");
+    else if ((command === "/sell" || command === "/mycar") && view !== "sell") navigate("sell");
+    else void send(command);
+  }
+
+  function renderReply(reply: Reply): HTMLElement {
+    const section = element("section", "panel dialogue-reply");
+    const text = element("div", "reply-text");
+    text.append(richText(reply.text, null));
+    section.append(text);
+    if (reply.listingId) {
+      section.append(
+        button(
+          "Открыть автомобиль и фото",
+          () => navigate("car", reply.listingId),
+          "button button-quiet",
+        ),
+      );
+    }
+    if (reply.miniAppView && reply.miniAppView !== view) {
+      const target = reply.miniAppView;
+      section.append(
+        button(
+          target === "report-example"
+            ? "Посмотреть пример отчёта"
+            : target === "vin"
+              ? "Открыть проверку VIN"
+              : "Открыть",
+          () => navigate(target),
+          "button button-quiet",
+        ),
+      );
+    }
+    const actions = element("div", "dialogue-actions");
+    for (const row of reply.buttons) {
+      const group = element("div", "button-row");
+      for (const [label, command] of row) {
+        const url = safeUrl(command);
+        if (url) {
+          const link = sourceLink(url, label);
+          link.className = "button button-quiet";
+          group.append(link);
+        } else {
+          group.append(button(label, () => runAction(command), "button button-quiet"));
+        }
+      }
+      actions.append(group);
+    }
+    section.append(actions);
+    return section;
+  }
+
+  async function send(text: string): Promise<void> {
+    if (busy || !text.trim()) return;
+    busy = true;
+    status.textContent = "Сохраняем ответ и открываем следующий шаг…";
+    content.querySelectorAll<HTMLButtonElement>("button").forEach((node) => {
+      node.disabled = true;
+    });
+    input.disabled = true;
+    submit.disabled = true;
+    cancel.disabled = true;
+    try {
+      const result = await request<{ replies: Reply[] }>("/miniapp/api/dialogue", { text });
+      if (started !== generation) return;
+      content.replaceChildren(...result.replies.map(renderReply));
+      if (result.replies.length === 0)
+        content.append(
+          element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
+        );
+      input.value = "";
+      status.textContent = "";
+      content.scrollIntoView({ block: "start", behavior: "smooth" });
+    } catch (error) {
+      if (started !== generation) return;
+      status.textContent = `${errorText(error)} Если ответ успел сохраниться, продолжите с актуального шага в чате.`;
+      if (!content.childElementCount)
+        content.append(button("Открыть шаг заново", () => void send(text), "button button-quiet"));
+    } finally {
+      if (started === generation) {
+        busy = false;
+        content.querySelectorAll<HTMLButtonElement>("button").forEach((node) => {
+          node.disabled = false;
+        });
+        input.disabled = false;
+        submit.disabled = false;
+        cancel.disabled = false;
+      }
+    }
+  }
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    runAction(input.value.trim());
+  });
+  void send(view === "buy" ? "/buy" : "/sell");
 }
 
 function gallery(car: MiniAppCar): HTMLElement {
@@ -214,24 +563,45 @@ function gallery(car: MiniAppCar): HTMLElement {
   return section;
 }
 
-function vinPanel(car: MiniAppCar): HTMLElement {
+function vinPanel(car?: MiniAppCar): HTMLElement {
+  const started = generation;
   const panel = element("section", "panel vin-panel");
   panel.append(
-    element("p", "eyebrow", "Данные об автомобиле"),
-    element("h2", "", "Проверка VIN"),
+    element("p", "eyebrow", "Бесплатно · сначала Корея"),
+    element(car ? "h2" : "h1", "", "Проверить VIN"),
     element(
       "p",
-      car.vin ? "vin" : "muted",
-      car.vin
-        ? `VIN из объявления: ${car.vin}`
-        : "Источник не указал VIN или номер кузова. Введите VIN с автомобиля или документов.",
+      "muted",
+      "Проверим наличие отчёта CarHistory и экспортную запись Car365. Полную историю бесплатно не получаем.",
     ),
-    element("p", "footnote", VIN_DISCLOSURE),
+  );
+  if (car) {
+    panel.append(
+      element(
+        "p",
+        car.vin ? "vin" : "muted",
+        car.vin
+          ? `VIN из объявления: ${car.vin}`
+          : "В объявлении нет VIN. Введите его с автомобиля или документов.",
+      ),
+      element(
+        "p",
+        "footnote",
+        "Введённый вручную VIN не подтверждён как VIN этого объявления. Сверьте номер с автомобилем и документами.",
+      ),
+    );
+  }
+  panel.append(
     element(
       "p",
       "footnote",
-      "Введённый вручную VIN не подтверждён как VIN этого объявления. Даже номер от источника нужно сверить с автомобилем и документами.",
+      "Есть только фото VIN? Отправьте его в чат с ботом и подтвердите распознанный номер перед проверкой.",
     ),
+  );
+  const disclosure = element("details", "disclosure");
+  disclosure.append(
+    element("summary", "", "Какие источники проверяем и куда передаём VIN"),
+    element("p", "footnote", VIN_DISCLOSURE),
   );
   const form = element("form", "vin-form");
   const label = element("label", "", "VIN — 17 латинских букв и цифр, без I, O, Q");
@@ -245,7 +615,7 @@ function vinPanel(car: MiniAppCar): HTMLElement {
   input.maxLength = 64;
   input.required = true;
   input.setAttribute("autocapitalize", "characters");
-  input.value = car.vin ?? "";
+  input.value = car?.vin ?? "";
   const submit = element("button", "button", "Проверить VIN");
   submit.type = "submit";
   const search = sourceLink(vinGoogleSearchUrl(input.value), VIN_GOOGLE_SEARCH_LABEL);
@@ -279,78 +649,109 @@ function vinPanel(car: MiniAppCar): HTMLElement {
       input.focus();
       return;
     }
-    if (!telegram?.initData) {
-      results.replaceChildren(
-        element("p", "", "Откройте карточку заново из личного чата в Telegram."),
-      );
-      return;
-    }
+    if (started !== generation) return;
     input.value = vin;
     input.disabled = true;
     submit.disabled = true;
     submit.textContent = "Проверяем…";
     results.replaceChildren(element("p", "", `Проверяем VIN ${vin} у подключённых провайдеров…`));
-    const controller = new AbortController();
-    const onHide = () => controller.abort();
-    window.addEventListener("pagehide", onHide, { once: true });
     try {
-      const response = await fetch("/miniapp/api/vin", {
-        method: "POST",
-        headers: { Authorization: `tma ${telegram.initData}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ vin }),
-        cache: "no-store",
-        credentials: "omit",
-        redirect: "error",
-        referrerPolicy: "no-referrer",
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        let message = "Проверка временно недоступна. Результат неизвестен; повторите позже.";
-        try {
-          const error: unknown = await response.json();
-          if (
-            error &&
-            typeof error === "object" &&
-            "error" in error &&
-            typeof error.error === "string"
-          )
-            message = error.error;
-        } catch {
-          // An upstream proxy may return a non-JSON error.
-        }
-        results.replaceChildren(element("p", "", message));
-        return;
-      }
-      const result = (await response.json()) as VinCheckResult;
-      if (result.vin !== vin) throw new Error("VIN result mismatch");
-      results.replaceChildren(element("p", "vin", `Результат для VIN ${result.vin}`));
+      const result = await request<VinCheckResult>("/miniapp/api/vin", { vin });
+      if (started !== generation) return;
+      if (result.vin !== vin)
+        throw new Error(
+          "Источник вернул ответ для другого VIN. Не используйте его для проверки автомобиля.",
+        );
+      results.replaceChildren(element("p", "vin", `VIN ${result.vin}`));
+      const statuses = {
+        available: "Запись найдена",
+        not_found: "Не найдено",
+        unavailable: "Результат неизвестен",
+        disabled: "Не проверялось",
+      };
       for (const provider of VIN_PROVIDERS) {
         const observation = result[provider];
         if (!observation) continue;
         const section = element("section", "vin-source");
         section.dataset.status = observation.status;
         section.append(
-          element("p", "vin-observation", vinSourceText(provider, result)),
+          element("h3", "", VIN_SOURCE_NAMES[provider]),
+          element(
+            "p",
+            "badge",
+            provider === "carhistory" && observation.status === "available"
+              ? "Отчёт доступен у провайдера"
+              : statuses[observation.status],
+          ),
+        );
+        if (provider === "car365" && observation.status === "available") {
+          const record = result.car365.data;
+          const facts = element("dl", "facts export-facts");
+          for (const [label, value] of [
+            ["Дата декларации об экспорте", record?.export_date ?? "Неизвестна"],
+            [
+              "Записанный пробег",
+              record?.last_mileage_km == null
+                ? "Неизвестен"
+                : `${record.last_mileage_km.toLocaleString("ru-RU")} км`,
+            ],
+            ["Модель в записи", record?.model ?? "Неизвестна"],
+            ["Первая регистрация", record?.first_registration_date ?? "Неизвестна"],
+          ]) {
+            const fact = element("div", "fact");
+            fact.append(element("dt", "", label), element("dd", "", value));
+            facts.append(fact);
+          }
+          section.append(
+            facts,
+            element(
+              "p",
+              "footnote",
+              "Дата декларации — не дата отправки автомобиля и не дата замера пробега. Записанный пробег не равен текущему.",
+            ),
+            element(
+              "p",
+              "notice",
+              record?.total_loss == null
+                ? "Полная гибель: сведений нет. Состояние автомобиля неизвестно."
+                : record.total_loss
+                  ? "Внимание: в записи указана полная гибель автомобиля."
+                  : "Полная гибель в записи не указана. Это не подтверждает отсутствие ДТП или повреждений.",
+            ),
+            element(
+              "p",
+              "footnote",
+              observation.checked_at === null
+                ? "Время проверки неизвестно."
+                : `Проверено: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(observation.checked_at * 1000))} · Бишкек`,
+            ),
+          );
+        } else {
+          section.append(element("p", "vin-observation", vinSourceText(provider, result)));
+        }
+        section.append(
           sourceLink(VIN_SOURCE_URLS[provider], `Источник: ${VIN_SOURCE_NAMES[provider]}`),
         );
         results.append(section);
       }
-    } catch {
+    } catch (error) {
+      if (started !== generation) return;
       results.replaceChildren(
         element(
           "p",
-          "",
-          "Не удалось завершить проверку VIN. Результат неизвестен — это не отсутствие записей. Попробуйте позже.",
+          "notice",
+          `${errorText(error)} Результат неизвестен — это не отсутствие записей.`,
         ),
       );
     } finally {
-      window.removeEventListener("pagehide", onHide);
-      input.disabled = false;
-      submit.disabled = false;
-      submit.textContent = "Проверить VIN";
+      if (started === generation) {
+        input.disabled = false;
+        submit.disabled = false;
+        submit.textContent = "Проверить VIN";
+      }
     }
   }
-  panel.append(form, results, element("p", "footnote", VIN_CAUTION));
+  panel.append(form, results, element("p", "footnote", VIN_CAUTION), disclosure);
   return panel;
 }
 
@@ -377,7 +778,7 @@ function showCar(car: MiniAppCar): void {
     facts.append(fact);
   }
   main.append(facts);
-  main.append(vinPanel(car));
+  main.append(vinPanel(car), premiumPanel());
   const details = element("section", "panel");
   details.append(element("h2", "", "Сведения из объявления"));
   const text = element("div", "details");
@@ -404,71 +805,53 @@ function showCar(car: MiniAppCar): void {
 }
 
 async function load(): Promise<void> {
+  cancelRequests();
+  const started = generation;
   const params = new URLSearchParams(window.location.search);
+  const view = params.get("view");
   const id = params.get("car");
-  if (!id || id.length > 200 || params.getAll("car").length !== 1) {
-    showState(
-      "Выберите автомобиль в чате",
-      "Откройте дополнительные сведения кнопкой под конкретным объявлением. Каталога в приложении нет.",
-    );
+  currentView =
+    view === "vin" || view === "buy" || view === "sell" || view === "report-example"
+      ? view
+      : id !== null
+        ? "car"
+        : "home";
+  window.scrollTo(0, 0);
+  if (currentView === "home") {
+    showHome();
     return;
   }
-  const initData = telegram?.initData;
-  if (!initData) {
+  if (currentView === "vin") {
+    const main = shell();
+    main.append(vinPanel(), premiumPanel());
+    return;
+  }
+  if (currentView === "report-example") {
+    showExample();
+    return;
+  }
+  if (currentView === "buy" || currentView === "sell") {
+    showDialogue(currentView);
+    return;
+  }
+  if (!id || id.length > 200 || params.getAll("car").length !== 1) {
     showState(
-      "Откройте карточку в Telegram",
-      "Обычная ссылка в браузере не даёт доступа к сведениям. Используйте кнопку под автомобилем в личном чате с ботом.",
+      "Не удалось определить автомобиль",
+      "Откройте карточку по кнопке под объявлением в чате или вернитесь на главную.",
     );
     return;
   }
   showState("Открываем карточку", "Загружаем сведения из объявления…");
   try {
-    const response = await fetch(`/miniapp/api/car?id=${encodeURIComponent(id)}`, {
-      headers: { Authorization: `tma ${initData}` },
-      cache: "no-store",
-      credentials: "omit",
-      redirect: "error",
-      referrerPolicy: "no-referrer",
-    });
-    if (!response.ok) {
-      const titles: Record<number, string> = {
-        400: "Не удалось определить автомобиль",
-        401: "Откройте карточку заново",
-        403: "Нужен личный чат с ботом",
-        404: "Карточка больше недоступна",
-      };
-      let message = "Не удалось загрузить сведения. Попробуйте ещё раз позже.";
-      try {
-        const error: unknown = await response.json();
-        if (
-          error &&
-          typeof error === "object" &&
-          "error" in error &&
-          typeof error.error === "string"
-        )
-          message = error.error;
-      } catch {
-        // Reverse proxies may respond without JSON.
-      }
-      showState(
-        titles[response.status] ?? "Не удалось загрузить карточку",
-        message,
-        response.status >= 500,
-      );
-      return;
-    }
-    showCar((await response.json()) as MiniAppCar);
-  } catch {
-    showState(
-      "Нет соединения",
-      "Не удалось связаться с сервисом. Проверьте подключение и повторите загрузку.",
-      true,
-    );
+    const car = await request<MiniAppCar>(`/miniapp/api/car?id=${encodeURIComponent(id)}`);
+    if (started === generation) showCar(car);
+  } catch (error) {
+    if (started === generation) showState("Карточка недоступна", errorText(error), true);
   }
 }
 
 telegram?.ready?.();
 telegram?.expand?.();
-telegram?.BackButton?.onClick?.(closeCard);
+telegram?.BackButton?.onClick?.(() => (currentView === "home" ? closeCard() : navigate("home")));
 telegram?.BackButton?.show?.();
 void load();
