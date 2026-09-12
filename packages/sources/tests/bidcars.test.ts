@@ -414,6 +414,16 @@ describe("Bid.Cars catalog", () => {
       ),
     ).toThrow(SourceError);
   });
+  it("accepts a non-link range separator without weakening pagination scope", () => {
+    const html = catalog(undefined, { page: 4, pages: 5 }).replace(
+      "</ul>",
+      '<li><a href="#">-</a></li></ul>',
+    );
+    expect(parseCatalog(html, 4)).toMatchObject({ page: 4, pages: 5, urls: [URL] });
+    expect(() =>
+      parseCatalog(html.replace('href="#">-', 'href="https://example.com/">-'), 4),
+    ).toThrow(SourceError);
+  });
   it("rejects page, scope, row, and duplicate identity conflicts as whole-page failures", () => {
     for (const html of [
       catalog(undefined, { page: 2, pages: 3 }),

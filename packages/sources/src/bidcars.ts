@@ -641,7 +641,7 @@ export function parseCatalog(
     const anchor = $(element);
     const target = anchor.attr("href") ?? "";
     const label = nodeText(anchor);
-    if (target === "#" && ["...", "…"].includes(label)) return;
+    if (target === "#" && ["-", "...", "…"].includes(label)) return;
     const number = Number(publicUrl(target, CATALOG_PATH)[1]);
     if (target !== prefix + number)
       throw new SourceError("Bid.Cars pagination escapes requested scope");
