@@ -1,5 +1,6 @@
 import type { Listing } from "@autodom/core";
 import type { OwnerCurrency, OwnerPurpose, PropertyType } from "@autodom/core/owner-vehicle";
+import type { PaymentEvent, PaymentOrder, PaymentRefund } from "@autodom/core/payments";
 import { sql } from "drizzle-orm";
 import {
   bigint,
@@ -11,6 +12,7 @@ import {
   jsonb,
   pgTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 const money = (name: string) => bigint(name, { mode: "number" });
@@ -164,6 +166,111 @@ export const metadata = pgTable("metadata", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
+export const paymentOrders = pgTable(
+  "payment_orders",
+  {
+    id: text("id").primaryKey(),
+    user_id: money("user_id").notNull(),
+    product: text("product").$type<PaymentOrder["product"]>().notNull(),
+    provider: text("provider").$type<PaymentOrder["provider"]>().notNull(),
+    currency: text("currency").$type<PaymentOrder["currency"]>().notNull(),
+    amount: money("amount").notNull(),
+    title: text("title").notNull(),
+    description: text("description").notNull(),
+    seller: text("seller").notNull(),
+    support_url: text("support_url").notNull(),
+    terms: text("terms").notNull(),
+    executor: text("executor").notNull(),
+    expires_at: text("expires_at").notNull(),
+    created_at: text("created_at").notNull(),
+    accepted_at: text("accepted_at"),
+    invoice_url: text("invoice_url"),
+    invoice_status: text("invoice_status").$type<PaymentOrder["invoiceStatus"]>().notNull(),
+    payment_status: text("payment_status").$type<PaymentOrder["paymentStatus"]>().notNull(),
+    fulfillment_status: text("fulfillment_status")
+      .$type<PaymentOrder["fulfillmentStatus"]>()
+      .notNull(),
+    charge_id: text("charge_id"),
+    needs_review: boolean("needs_review").notNull(),
+  },
+  (table) => [
+    index("payment_orders_buyer").on(table.user_id, table.created_at),
+    uniqueIndex("payment_orders_charge").on(table.provider, table.charge_id),
+    check(
+      "payment_orders_kind",
+      sql`${table.provider} = 'finik' AND ${table.product} = 'inspection' AND ${table.currency} = 'KGS'`,
+    ),
+    check(
+      "payment_orders_amount",
+      sql`${table.amount} BETWEEN 1 AND 9007199254740991 AND ${table.amount} % 100 = 0`,
+    ),
+    check("payment_orders_buyer_id", sql`${table.user_id} BETWEEN 1 AND 9007199254740991`),
+    check(
+      "payment_orders_state",
+      sql`${table.invoice_status} IN ('offered','pending','cancelled') AND ${table.payment_status} IN ('unpaid','paid') AND ${table.fulfillment_status} IN ('ready','fulfilled','cancelled')`,
+    ),
+    check(
+      "payment_orders_capture",
+      sql`(${table.payment_status} = 'unpaid' AND ${table.charge_id} IS NULL) OR (${table.payment_status} = 'paid' AND ${table.charge_id} IS NOT NULL AND ${table.accepted_at} IS NOT NULL)`,
+    ),
+    check(
+      "payment_orders_fulfillment",
+      sql`${table.fulfillment_status} <> 'fulfilled' OR ${table.payment_status} = 'paid'`,
+    ),
+  ],
+);
+export const paymentEvents = pgTable(
+  "payment_events",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").$type<PaymentEvent["provider"]>().notNull(),
+    event_id: text("event_id").notNull(),
+    charge_id: text("charge_id").notNull(),
+    order_id: text("order_id"),
+    fingerprint: text("fingerprint").notNull(),
+    data: jsonb("data").$type<PaymentEvent>().notNull(),
+    outcome: text("outcome").$type<"applied" | "review">().notNull(),
+    review_reason: text("review_reason"),
+    received_at: text("received_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("payment_events_fingerprint").on(table.fingerprint),
+    index("payment_events_transaction").on(table.provider, table.event_id),
+    index("payment_events_charge").on(table.provider, table.charge_id),
+    check("payment_events_provider", sql`${table.provider} = 'finik'`),
+    check(
+      "payment_events_outcome",
+      sql`(${table.outcome} = 'applied' AND ${table.review_reason} IS NULL) OR (${table.outcome} = 'review' AND ${table.review_reason} IS NOT NULL)`,
+    ),
+  ],
+);
+export const paymentRefunds = pgTable(
+  "payment_refunds",
+  {
+    id: text("id").primaryKey(),
+    order_id: text("order_id")
+      .notNull()
+      .references(() => paymentOrders.id),
+    provider: text("provider").$type<PaymentRefund["provider"]>().notNull(),
+    amount: money("amount").notNull(),
+    reason: text("reason").notNull(),
+    status: text("status").$type<PaymentRefund["status"]>().notNull(),
+    created_at: text("created_at").notNull(),
+    updated_at: text("updated_at").notNull(),
+    note: text("note"),
+  },
+  (table) => [
+    index("payment_refunds_order").on(table.order_id),
+    uniqueIndex("payment_refunds_active")
+      .on(table.order_id)
+      .where(sql`${table.status} = 'requested'`),
+    check(
+      "payment_refunds_kind",
+      sql`${table.provider} = 'finik' AND ${table.status} IN ('requested','submitted','failed')`,
+    ),
+    check("payment_refunds_amount", sql`${table.amount} BETWEEN 1 AND 9007199254740991`),
+  ],
+);
 export const schema = {
   listings,
   events,
@@ -171,7 +278,16 @@ export const schema = {
   drafts,
   metadata,
   owner_vehicles: ownerVehicles,
+  payment_orders: paymentOrders,
+  payment_events: paymentEvents,
+  payment_refunds: paymentRefunds,
 };
 export const LEGACY_DATA_TABLES = ["listings", "events", "profiles", "drafts", "metadata"] as const;
-export const DATA_TABLES = [...LEGACY_DATA_TABLES, "owner_vehicles"] as const;
+export const OWNER_DATA_TABLES = [...LEGACY_DATA_TABLES, "owner_vehicles"] as const;
+export const DATA_TABLES = [
+  ...OWNER_DATA_TABLES,
+  "payment_orders",
+  "payment_events",
+  "payment_refunds",
+] as const;
 export type DataTable = (typeof DATA_TABLES)[number];

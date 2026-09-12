@@ -5,10 +5,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type Listing, makeListing, makeProfile, matches } from "@autodom/core";
 import type { OwnerVehicle } from "@autodom/core/owner-vehicle";
+import type { PaymentEvent, PaymentOfferInput } from "@autodom/core/payments";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { importSqlite } from "../src/import-sqlite.js";
+import { PaymentStore } from "../src/payments.js";
 import { backup, restore } from "../src/snapshots.js";
 import { Store } from "../src/store.js";
 
@@ -88,6 +90,13 @@ async function rewriteSnapshot(
     );
     delete (footer.counts as Record<string, number>).owner_vehicles;
   }
+  if (Number(records[0]?.schema_version) < 5) {
+    records[0]!.tables = (records[0]!.tables as string[]).filter(
+      (table) => !table.startsWith("payment_"),
+    );
+    for (const table of ["payment_orders", "payment_events", "payment_refunds"])
+      delete (footer.counts as Record<string, number>)[table];
+  }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
   await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
@@ -120,12 +129,311 @@ afterAll(async () => {
   await container?.stop();
 });
 
+const inspectionOffer = (userId = 1): PaymentOfferInput => ({
+  userId,
+  product: "inspection",
+  amount: 150000,
+  title: "Vehicle inspection",
+  description: "On-site mechanical inspection by the named executor, by appointment.",
+  seller: "Test inspection seller",
+  executor: "Test mechanic",
+  supportUrl: "https://example.com/support",
+  terms: "Inspection only; appointment agreed separately.",
+  expiresAt: new Date((NOW + 3600) * 1000).toISOString(),
+});
+const receipt = (orderId: string | null, chargeId = randomUUID()): PaymentEvent => ({
+  provider: "finik",
+  eventId: chargeId,
+  kind: "paid",
+  orderId,
+  userId: null,
+  currency: "KGS",
+  amount: 150000,
+  chargeId,
+  occurredAt: new Date(NOW * 1000).toISOString(),
+});
+
+describe("Finik physical inspection ledger", () => {
+  it("requires explicit physical terms and protects immutable owned invoices", async () => {
+    const payments = new PaymentStore(db);
+    await expect(payments.createOffer({ ...inspectionOffer(), amount: 150001 })).rejects.toThrow();
+    await expect(payments.createOffer({ ...inspectionOffer(), executor: "" })).rejects.toThrow();
+    await expect(
+      payments.createOffer({ ...inspectionOffer(), description: "x".repeat(301) }),
+    ).rejects.toThrow();
+    await expect(
+      payments.createOffer({
+        ...inspectionOffer(),
+        supportUrl: "https://secret:password@example.com",
+      }),
+    ).rejects.toThrow();
+    const order = await payments.createOffer(inspectionOffer());
+    await expect(payments.setInvoice(order.id, "https://example.com/invoice")).rejects.toThrow();
+    const accepted = await payments.acceptOrder(order.id, 1);
+    expect(await payments.acceptOrder(order.id, 1)).toEqual(accepted);
+    expect(await payments.cancelOffer(order.id, 1)).toBe(false);
+    await payments.setInvoice(order.id, "https://example.com/invoice");
+    await expect(payments.setInvoice(order.id, "https://example.com/another")).rejects.toThrow();
+    expect((await payments.getOrder(order.id))?.paymentStatus).toBe("unpaid");
+    expect(await payments.completeInspection(order.id)).toBe(false);
+  });
+
+  it("normalizes timezone offsets before durable retry identity", async () => {
+    const payments = new PaymentStore(db);
+    const offer = inspectionOffer();
+    const offsetExpiry = offer.expiresAt.replace("Z", "+00:00");
+    const order = await payments.createOffer({ ...offer, expiresAt: offsetExpiry });
+    expect(order.expiresAt).toBe(offer.expiresAt);
+    await payments.acceptOrder(order.id, 1);
+    const event = receipt(order.id);
+    expect(
+      await payments.ingestEvent({ ...event, occurredAt: event.occurredAt.replace("Z", "+00:00") }),
+    ).toBe("applied");
+    expect(await payments.ingestEvent(event)).toBe("duplicate");
+  });
+
+  it("serializes cross-connection receipts and requires separate physical completion", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    const order = await payments.createOffer(inspectionOffer());
+    await expect(payments.acceptOrder(order.id, 2)).rejects.toThrow();
+    await payments.acceptOrder(order.id, 1);
+    const event = receipt(order.id);
+    expect(
+      (await Promise.all([payments.ingestEvent(event), peer.ingestEvent(event)])).sort(),
+    ).toEqual(["applied", "duplicate"]);
+    expect(await payments.getOrder(order.id)).toMatchObject({
+      paymentStatus: "paid",
+      fulfillmentStatus: "ready",
+      needsReview: false,
+    });
+    expect(await payments.completeInspection(order.id)).toBe(true);
+    expect(await peer.completeInspection(order.id)).toBe(true);
+    expect((await payments.getOrder(order.id))?.fulfillmentStatus).toBe("fulfilled");
+  });
+
+  it("retains mismatches and conflicting charge reuse without paying another order", async () => {
+    const payments = new PaymentStore(db);
+    const first = await payments.createOffer(inspectionOffer());
+    const second = await payments.createOffer(inspectionOffer(2));
+    await payments.acceptOrder(first.id, 1);
+    await payments.acceptOrder(second.id, 2);
+    const event = receipt(first.id);
+    expect(await payments.ingestEvent({ ...event, amount: 149999 })).toBe("review");
+    expect(await payments.ingestEvent(event)).toBe("review");
+    expect((await payments.getOrder(first.id))?.paymentStatus).toBe("unpaid");
+    const good = receipt(first.id);
+    expect(await payments.ingestEvent(good)).toBe("applied");
+    expect(await payments.ingestEvent({ ...good, orderId: second.id })).toBe("review");
+    expect((await payments.getOrder(second.id))?.paymentStatus).toBe("unpaid");
+    expect(await payments.completeInspection(first.id)).toBe(false);
+    expect(await payments.completeInspection(second.id)).toBe(false);
+    expect(await payments.ingestEvent(receipt(null))).toBe("review");
+    await expect(payments.ingestEvent({ ...receipt(second.id), amount: 1.1 })).rejects.toThrow();
+    expect((await payments.getOrder(second.id))?.paymentStatus).toBe("unpaid");
+  });
+
+  it("accounts for late accepted money but never fulfills or pays an unaccepted offer", async () => {
+    const payments = new PaymentStore(db);
+    const accepted = await payments.createOffer(inspectionOffer());
+    const unaccepted = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(accepted.id, 1);
+    vi.setSystemTime((NOW + 3601) * 1000);
+    expect(await payments.ingestEvent(receipt(accepted.id))).toBe("review");
+    expect(await payments.getOrder(accepted.id)).toMatchObject({
+      paymentStatus: "paid",
+      needsReview: true,
+      fulfillmentStatus: "ready",
+    });
+    expect(await payments.completeInspection(accepted.id)).toBe(false);
+    expect(await payments.ingestEvent(receipt(unaccepted.id))).toBe("review");
+    expect((await payments.getOrder(unaccepted.id))?.paymentStatus).toBe("unpaid");
+  });
+
+  it("reserves partial refunds atomically and never treats submission as returned money", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    const order = await payments.createOffer(inspectionOffer());
+    await expect(payments.requestRefund(order.id, 1, "Not captured")).rejects.toThrow();
+    await payments.acceptOrder(order.id, 1);
+    await payments.ingestEvent(receipt(order.id));
+    const results = await Promise.allSettled([
+      payments.requestRefund(order.id, 50000, "Partial request"),
+      peer.requestRefund(order.id, 50000, "Concurrent request"),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const [first] = await payments.listRefunds(order.id);
+    await payments.markRefund(first!.id, "submitted", "Operator sent request to provider");
+    await expect(payments.markRefund(first!.id, "failed")).rejects.toThrow();
+    await expect(payments.requestRefund(order.id, 100001, "Too much")).rejects.toThrow();
+    await expect(payments.requestRefund(order.id, 0.1, "Fractional")).rejects.toThrow();
+    const rest = await payments.requestRefund(order.id, 100000, "Remaining amount");
+    await payments.markRefund(rest.id, "failed", "Provider procedure unavailable");
+    const replacement = await payments.requestRefund(order.id, 100000, "Retry requested");
+    await payments.markRefund(replacement.id, "submitted");
+    await expect(payments.requestRefund(order.id, 1, "Over capture")).rejects.toThrow();
+    expect((await payments.getOrder(order.id))?.paymentStatus).toBe("paid");
+  });
+
+  it("round trips financial audit and deduplication independently of deleted free profiles", async () => {
+    const payments = new PaymentStore(db);
+    await db.saveProfile(profile());
+    const order = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(order.id, 1);
+    const event = receipt(order.id);
+    await payments.ingestEvent(event);
+    const unknown = receipt(null);
+    await payments.ingestEvent(unknown);
+    const refund = await payments.requestRefund(order.id, 100, "Partial refund requested");
+    await db.deleteUser(1);
+    expect(await payments.getOrder(order.id)).not.toBeNull();
+    const path = join(directory, "financial.ndjson");
+    await backup(db, path);
+    const targetUrl = await database();
+    await restore(path, targetUrl);
+    const restored = new PaymentStore(await open(targetUrl));
+    expect(await restored.getOrder(order.id)).toEqual(await payments.getOrder(order.id));
+    expect(await restored.getRefund(refund.id)).toEqual(refund);
+    expect(await restored.ingestEvent(event)).toBe("duplicate");
+    expect(await restored.ingestEvent(unknown)).toBe("duplicate");
+    const emptyUrl = await database();
+    const empty = await open(emptyUrl);
+    const emptyPath = join(directory, "empty.ndjson");
+    await backup(empty, emptyPath);
+    await expect(restore(emptyPath, targetUrl)).rejects.toThrow();
+    const auditOnlyUrl = await database();
+    const auditOnly = new PaymentStore(await open(auditOnlyUrl));
+    await auditOnly.ingestEvent(receipt(null));
+    await expect(restore(emptyPath, auditOnlyUrl)).rejects.toThrow();
+  });
+
+  it("rejects checksummed financial snapshots with forged capture or excessive refunds atomically", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(order.id, 1);
+    await payments.ingestEvent(receipt(order.id));
+    await payments.requestRefund(order.id, 100, "Refund requested");
+    const source = join(directory, "source.ndjson");
+    await backup(db, source);
+    for (const damage of ["charge", "refund"]) {
+      const damaged = join(directory, `${damage}.ndjson`);
+      await rewriteSnapshot(source, damaged, (record) => {
+        const row = record.row as Record<string, unknown>;
+        if (damage === "charge" && record.table === "payment_orders") row.charge_id = randomUUID();
+        if (damage === "refund" && record.table === "payment_refunds") row.amount = "150001";
+      });
+      const targetUrl = await database();
+      await expect(restore(damaged, targetUrl)).rejects.toThrow();
+      expect(await new PaymentStore(await open(targetUrl)).getOrder(order.id)).toBeNull();
+    }
+  });
+  it("keeps a last-millisecond acceptance restorable when the clock crosses expiry", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(inspectionOffer());
+    const acceptedAt = Date.parse(order.expiresAt) - 1;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => {
+      vi.setSystemTime(acceptedAt + 2);
+      return acceptedAt;
+    });
+    try {
+      await payments.acceptOrder(order.id, 1);
+    } finally {
+      clock.mockRestore();
+    }
+    const source = join(directory, "last-millisecond.ndjson");
+    await backup(db, source);
+    const targetUrl = await database();
+    await restore(source, targetUrl);
+    expect((await new PaymentStore(await open(targetUrl)).getOrder(order.id))?.acceptedAt).toBe(
+      new Date(acceptedAt).toISOString(),
+    );
+  });
+
+  it("preserves a late capture review hold through restore and rejects its removal", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(order.id, 1);
+    vi.setSystemTime((NOW + 3601) * 1000);
+    await payments.ingestEvent(receipt(order.id));
+    const source = join(directory, "late-review.ndjson");
+    await backup(db, source);
+    const validUrl = await database();
+    await restore(source, validUrl);
+    const valid = new PaymentStore(await open(validUrl));
+    expect(await valid.getOrder(order.id)).toMatchObject({
+      paymentStatus: "paid",
+      needsReview: true,
+    });
+    expect(await valid.completeInspection(order.id)).toBe(false);
+    const damaged = join(directory, "removed-review.ndjson");
+    await rewriteSnapshot(source, damaged, (record) => {
+      if (record.table === "payment_orders")
+        (record.row as Record<string, unknown>).needs_review = false;
+    });
+    const targetUrl = await database();
+    await expect(restore(damaged, targetUrl)).rejects.toThrow();
+    expect(await new PaymentStore(await open(targetUrl)).getOrder(order.id)).toBeNull();
+  });
+
+  it("rejects a late capture snapshot that forgets the captured money", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(order.id, 1);
+    vi.setSystemTime((NOW + 3601) * 1000);
+    await payments.ingestEvent(receipt(order.id));
+    const source = join(directory, "late-capture.ndjson");
+    await backup(db, source);
+    const damaged = join(directory, "forgotten-capture.ndjson");
+    await rewriteSnapshot(source, damaged, (record) => {
+      if (record.table === "payment_orders") {
+        const row = record.row as Record<string, unknown>;
+        row.payment_status = "unpaid";
+        row.charge_id = null;
+      }
+    });
+    const targetUrl = await database();
+    await expect(restore(damaged, targetUrl)).rejects.toThrow();
+    expect(await new PaymentStore(await open(targetUrl)).getOrder(order.id)).toBeNull();
+  });
+
+  it("rejects removing the original order hold after its charge is reused by another order", async () => {
+    const payments = new PaymentStore(db);
+    const first = await payments.createOffer(inspectionOffer());
+    const second = await payments.createOffer(inspectionOffer(2));
+    await payments.acceptOrder(first.id, 1);
+    await payments.acceptOrder(second.id, 2);
+    const event = receipt(first.id);
+    await payments.ingestEvent(event);
+    await payments.ingestEvent({ ...event, orderId: second.id, eventId: randomUUID() });
+    const source = join(directory, "conflict-review.ndjson");
+    await backup(db, source);
+    const damaged = join(directory, "removed-original-hold.ndjson");
+    await rewriteSnapshot(source, damaged, (record) => {
+      const row = record.row as Record<string, unknown> | undefined;
+      if (record.table === "payment_orders" && row?.id === first.id) row.needs_review = false;
+    });
+    const targetUrl = await database();
+    await expect(restore(damaged, targetUrl)).rejects.toThrow();
+    expect(await new PaymentStore(await open(targetUrl)).getOrder(first.id)).toBeNull();
+  });
+});
+
 describe("PostgreSQL Store", () => {
   it("serializes concurrent startup migrations without losing either connection", async () => {
     const fresh = await database();
     const [left, right] = await Promise.all([open(fresh), open(fresh)]);
     await left.setMeta("migrated", "yes");
     expect(await right.getMeta("migrated")).toBe("yes");
+  });
+  it("refuses a modified payment migration checksum on reopen", async () => {
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      await client.query("UPDATE autodom_migrations SET checksum = 'modified' WHERE version = 6");
+      await expect(Store.open(url)).rejects.toThrow();
+    } finally {
+      await client.end();
+    }
   });
   it("isolates concurrent transactions sharing an advisory-lock connection", async () => {
     await db.withLock("shared", async () => {
@@ -511,11 +819,12 @@ describe("portable snapshots and read-only legacy import", () => {
     await expect(restore(snapshot, targetUrl)).rejects.toThrow();
     expect((await target.stats()).listings).toBe(0);
   });
-  it.each([1, 2, 3])(
+  it.each([1, 2, 3, 4])(
     "migrates schema-v%i snapshots without restoring removed profile fields",
     async (version) => {
       await db.upsertListings([car()]);
       const saved = await db.saveProfile(profile());
+      const owner = version === 4 ? await db.saveOwnerVehicle(ownerCard()) : null;
       await db.setDraft(1, "budget", { minimum: 150 });
       await db.upsertListings([car({ id: "2" })]);
       const current = join(directory, "current.ndjson");
@@ -536,6 +845,7 @@ describe("portable snapshots and read-only legacy import", () => {
       expect(await target.getDraft(1)).toEqual(["budget", { minimum: 150 }]);
       expect(await target.eventsAfter(saved.cursor)).toEqual(await db.eventsAfter(saved.cursor));
       expect((await target.getListing("1"))?.photo_urls).toEqual([]);
+      expect(await target.getOwnerVehicle(1)).toEqual(owner);
     },
   );
   it.each([
