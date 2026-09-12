@@ -1,4 +1,5 @@
 import type { Listing } from "@autodom/core";
+import type { OwnerCurrency, OwnerPurpose, PropertyType } from "@autodom/core/owner-vehicle";
 import { sql } from "drizzle-orm";
 import {
   bigint,
@@ -106,6 +107,54 @@ export const profiles = pgTable(
     ),
   ],
 );
+export const ownerVehicles = pgTable(
+  "owner_vehicles",
+  {
+    user_id: bigint("user_id", { mode: "number" }).primaryKey(),
+    chat_id: bigint("chat_id", { mode: "number" }).notNull(),
+    purpose: text("purpose").$type<OwnerPurpose>().notNull(),
+    make_model: text("make_model").notNull(),
+    year: integer("year").notNull(),
+    mileage_km: bigint("mileage_km", { mode: "number" }),
+    sale_price_minor: money("sale_price_minor"),
+    sale_currency: text("sale_currency").$type<OwnerCurrency>(),
+    property_city: text("property_city"),
+    property_type: text("property_type").$type<PropertyType>(),
+    cash_minor: money("cash_minor"),
+    cash_currency: text("cash_currency").$type<OwnerCurrency>(),
+    monthly_minor: money("monthly_minor"),
+    monthly_currency: text("monthly_currency").$type<OwnerCurrency>(),
+    consent_at: doublePrecision("consent_at").notNull(),
+    updated_at: doublePrecision("updated_at").notNull(),
+  },
+  (table) => [
+    check("owner_purpose", sql`${table.purpose} IN ('sale','property','downpayment')`),
+    check(
+      "owner_vehicle",
+      sql`length(trim(${table.make_model})) BETWEEN 1 AND 120 AND ${table.year} BETWEEN 1900 AND 2100 AND (${table.mileage_km} IS NULL OR ${table.mileage_km} BETWEEN 0 AND 10000000)`,
+    ),
+    check(
+      "owner_sale_money",
+      sql`(${table.sale_price_minor} IS NULL AND ${table.sale_currency} IS NULL) OR (${table.sale_price_minor} IS NOT NULL AND ${table.sale_price_minor} > 0 AND ${table.sale_currency} IS NOT NULL AND ${table.sale_currency} IN ('USD','KGS'))`,
+    ),
+    check(
+      "owner_cash_money",
+      sql`(${table.cash_minor} IS NULL AND ${table.cash_currency} IS NULL) OR (${table.cash_minor} IS NOT NULL AND ${table.cash_minor} >= 0 AND ${table.cash_currency} IS NOT NULL AND ${table.cash_currency} IN ('USD','KGS'))`,
+    ),
+    check(
+      "owner_monthly_money",
+      sql`(${table.monthly_minor} IS NULL AND ${table.monthly_currency} IS NULL) OR (${table.monthly_minor} IS NOT NULL AND ${table.monthly_minor} >= 0 AND ${table.monthly_currency} IS NOT NULL AND ${table.monthly_currency} IN ('USD','KGS'))`,
+    ),
+    check(
+      "owner_property",
+      sql`(${table.property_city} IS NULL OR length(trim(${table.property_city})) BETWEEN 1 AND 80) AND (${table.property_type} IS NULL OR ${table.property_type} IN ('apartment','house','land','commercial','any')) AND (${table.purpose} = 'sale' OR (${table.property_city} IS NOT NULL AND ${table.property_type} IS NOT NULL))`,
+    ),
+    check(
+      "owner_consent",
+      sql`${table.consent_at} > 0 AND ${table.updated_at} >= ${table.consent_at}`,
+    ),
+  ],
+);
 export const drafts = pgTable("drafts", {
   user_id: bigint("user_id", { mode: "number" }).primaryKey(),
   state: text("state").notNull(),
@@ -115,6 +164,14 @@ export const metadata = pgTable("metadata", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),
 });
-export const schema = { listings, events, profiles, drafts, metadata };
-export const DATA_TABLES = ["listings", "events", "profiles", "drafts", "metadata"] as const;
+export const schema = {
+  listings,
+  events,
+  profiles,
+  drafts,
+  metadata,
+  owner_vehicles: ownerVehicles,
+};
+export const LEGACY_DATA_TABLES = ["listings", "events", "profiles", "drafts", "metadata"] as const;
+export const DATA_TABLES = [...LEGACY_DATA_TABLES, "owner_vehicles"] as const;
 export type DataTable = (typeof DATA_TABLES)[number];

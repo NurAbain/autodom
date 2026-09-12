@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type Listing, makeListing, makeProfile, matches } from "@autodom/core";
+import type { OwnerVehicle } from "@autodom/core/owner-vehicle";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +32,24 @@ const profile = () =>
     budget_max_minor: 200,
     monitoring: true,
   });
+const ownerCard = (): OwnerVehicle => ({
+  user_id: 1,
+  chat_id: 10,
+  purpose: "downpayment",
+  make_model: "Toyota Camry",
+  year: 2018,
+  mileage_km: null,
+  sale_price_minor: null,
+  sale_currency: null,
+  property_city: "Бишкек",
+  property_type: "apartment",
+  cash_minor: 0,
+  cash_currency: "KGS",
+  monthly_minor: 3000000,
+  monthly_currency: "KGS",
+  consent_at: NOW - 10,
+  updated_at: NOW,
+});
 let container: StartedPostgreSqlContainer | undefined;
 let admin: pg.Pool;
 let baseUrl: string;
@@ -63,6 +82,12 @@ async function rewriteSnapshot(
     .map((line) => JSON.parse(line) as Record<string, unknown>);
   const footer = records.pop()!;
   for (const record of records) change(record);
+  if (Number(records[0]?.schema_version) < 4) {
+    records[0]!.tables = (records[0]!.tables as string[]).filter(
+      (table) => table !== "owner_vehicles",
+    );
+    delete (footer.counts as Record<string, number>).owner_vehicles;
+  }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
   await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
@@ -370,13 +395,29 @@ describe("PostgreSQL Store", () => {
     await db.saveProfile(profile());
     await db.setDraft(1, "budget", { minimum: 100 });
     await db.setMeta("monitor_cursor", "1");
+    await db.saveOwnerVehicle(ownerCard());
     await db.deleteUser(1);
     expect(await db.getProfile(1)).toBeNull();
     expect(await db.getDraft(1)).toBeNull();
+    expect(await db.getOwnerVehicle(1)).toBeNull();
     expect(await db.monitoringProfiles()).toEqual([]);
     expect(await db.getMeta("monitor_cursor")).toBe("1");
     expect((await db.stats()).listings).toBe(1);
     expect((await db.stats()).events).toBe(1);
+  });
+  it("keeps the owner card independent of buyer data and requires consent to replace it", async () => {
+    const owner = ownerCard();
+    await db.saveOwnerVehicle(owner);
+    expect(await db.getProfile(1)).toBeNull();
+    expect(await db.getOwnerVehicle(1)).toEqual(owner);
+    const buyer = await db.saveProfile(profile());
+    await db.setDraft(1, "budget", { minimum: 100 });
+    await expect(db.saveOwnerVehicle({ ...owner, consent_at: 0 })).rejects.toThrow();
+    expect(await db.getOwnerVehicle(1)).toEqual(owner);
+    await db.deleteOwnerVehicle(1);
+    expect(await db.getOwnerVehicle(1)).toBeNull();
+    expect(await db.getProfile(1)).toEqual(buyer);
+    expect(await db.getDraft(1)).toEqual(["budget", { minimum: 100 }]);
   });
   it("reuses locked connections and releases ownership on callback failure", async () => {
     const other = await open(url);
@@ -418,6 +459,7 @@ describe("portable snapshots and read-only legacy import", () => {
     const second = await db.saveProfile({ ...profile(), user_id: 2, chat_id: 20 });
     await db.setDraft(1, "budget", { query: "тойота", minimum: 100 });
     await db.setMeta("source:mashina.kg:crawl_next_page", "37");
+    const owner = await db.saveOwnerVehicle(ownerCard());
     const updated = {
       ...initial,
       price_usd_minor: 150,
@@ -438,6 +480,7 @@ describe("portable snapshots and read-only legacy import", () => {
     expect(await target.getProfile(2)).toEqual(second);
     expect(quiet?.cursor).toBe(saved.cursor);
     expect(await target.getDraft(1)).toEqual(["budget", { query: "тойота", minimum: 100 }]);
+    expect(await target.getOwnerVehicle(1)).toEqual(owner);
     expect(await target.eventsAfter(0)).toEqual(await db.eventsAfter(0));
     const expectedListing = { ...updated, observed_at: NOW - 1 };
     expect(await target.getListing("1")).toEqual(expectedListing);
@@ -468,7 +511,7 @@ describe("portable snapshots and read-only legacy import", () => {
     await expect(restore(snapshot, targetUrl)).rejects.toThrow();
     expect((await target.stats()).listings).toBe(0);
   });
-  it.each([1, 2])(
+  it.each([1, 2, 3])(
     "migrates schema-v%i snapshots without restoring removed profile fields",
     async (version) => {
       await db.upsertListings([car()]);

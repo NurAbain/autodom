@@ -19,6 +19,10 @@
     "./vin-request": {
       "types": "./src/vin-request.ts",
       "default": "./src/vin-request.ts"
+    },
+    "./owner-vehicle": {
+      "types": "./src/owner-vehicle.ts",
+      "default": "./src/owner-vehicle.ts"
     }
   },
   "dependencies": {}
