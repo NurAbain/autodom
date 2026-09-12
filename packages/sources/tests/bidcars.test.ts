@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   type DocumentOptions,
   type DocumentRequest,
@@ -12,6 +13,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { CATALOG_URL, catalogUrl, fetchPage, parseCatalog, parseDetail } from "../src/bidcars.js";
 
 const URL = "https://bid.cars/en/lot/1-66587646/1969-Alfa-Romeo-Duetto-AR1480400";
+const MISSING_VIN_URL = "https://bid.cars/en/lot/0-46046054/1997-Suzuki-800-Intruder";
+const MISSING_VIN_DETAIL = readFileSync(
+  new globalThis.URL("./fixtures/bidcars-missing-vin.html", import.meta.url),
+  "utf8",
+);
 function detail({
   ended = false,
   status,
@@ -139,6 +145,60 @@ afterEach(() => {
 });
 
 describe("Bid.Cars detail", () => {
+  it("uses corroborated DOM identity when the source omits VIN and Vehicle JSON-LD", () => {
+    const listing = parseDetail(MISSING_VIN_DETAIL, MISSING_VIN_URL)!;
+    expect(listing).toMatchObject({
+      id: "bidcars:0-46046054",
+      title: "1997 Suzuki 800 Intruder",
+      year: 1997,
+      vin: "",
+      mileage: "",
+      auction_lot: "0-46046054",
+      auction_house: "IAAI",
+      city: "Englishtown (NJ)",
+      current_bid_minor: 0,
+    });
+    expect(listingPrice(listing, "USD")).toBeNull();
+  });
+  it("combines provided VIN evidence without treating absent structured VIN as a contradiction", () => {
+    const html = detail().replace(
+      '"vehicleIdentificationNumber":"AR1480400"',
+      '"vehicleIdentificationNumber":null',
+    );
+    expect(parseDetail(html, URL)?.vin).toBe("AR1480400");
+    const unknown = html
+      .replace("Duetto | AR1480400 |", "Duetto |  |")
+      .replace("VIN: AR1480400 Lot:", "VIN:  Lot:")
+      .replace('class="right-info">AR1480400', 'class="right-info">');
+    expect(parseDetail(unknown, URL)?.vin).toBe("");
+    expect(() =>
+      parseDetail(
+        html.replace('"vehicleIdentificationNumber":null', '"vehicleIdentificationNumber":123'),
+        URL,
+      ),
+    ).toThrow(SourceError);
+  });
+  it("rejects provided malformed or conflicting VINs and independent identity conflicts without JSON-LD", () => {
+    for (const html of [
+      MISSING_VIN_DETAIL.replace(
+        '<span class="vin-drop"></span>',
+        '<span class="vin-drop">bad!</span>',
+      ),
+      MISSING_VIN_DETAIL.replace(
+        '<span class="vin-drop"></span>',
+        '<span class="vin-drop">AR1480400</span>',
+      ).replace("VIN:  Lot:", "VIN: AR1480401 Lot:"),
+      MISSING_VIN_DETAIL.replace('class="title_lot">1997 Suzuki', 'class="title_lot">1997 Other'),
+      MISSING_VIN_DETAIL.replace("var auctionType = 'IAAI'", "var auctionType = 'Copart'"),
+      MISSING_VIN_DETAIL.replace("var lotNumber = '0-46046054'", "var lotNumber = '0-46046055'"),
+      MISSING_VIN_DETAIL.replace(
+        `property="og:url" content="${MISSING_VIN_URL}"`,
+        `property="og:url" content="${URL}"`,
+      ),
+    ]) {
+      expect(() => parseDetail(html, MISSING_VIN_URL)).toThrow(SourceError);
+    }
+  });
   it("keeps primary attributes separate from supplemental platform specifications", () => {
     const html = detail().replace(
       '<div id="tertiary-info"></div>',
@@ -186,6 +246,21 @@ describe("Bid.Cars detail", () => {
       original_price_minor: null,
     });
     expect(listingPrice(listing, "USD")).toBeNull();
+  });
+  it("accepts a single displayed estimate only when both declared bounds agree", () => {
+    const html = detail({ ended: true })
+      .replace("<b>$475</b> - <b>$9,000</b>", "<b>$475</b>")
+      .replace("var estimatedAmount2 = 9000", "var estimatedAmount2 = 475");
+    const listing = parseDetail(html, URL)!;
+    expect(listing).toMatchObject({
+      estimated_min_minor: 47_500,
+      estimated_max_minor: 47_500,
+      auction_status: "ended",
+    });
+    expect(listingPrice(listing, "USD")).toBeNull();
+    expect(() =>
+      parseDetail(html.replace("var estimatedAmount2 = 475", "var estimatedAmount2 = 9000"), URL),
+    ).toThrow(SourceError);
   });
   it("accepts evidenced archived results without live status or estimate, not unrelated archive text", () => {
     const listing = parseDetail(archivedDetail(), URL)!;
@@ -399,6 +474,16 @@ describe("Bid.Cars catalog", () => {
       ),
     ).toThrow(SourceError);
   });
+  it("accepts a non-link range separator without weakening pagination scope", () => {
+    const html = catalog(undefined, { page: 4, pages: 5 }).replace(
+      "</ul>",
+      '<li><a href="#">-</a></li></ul>',
+    );
+    expect(parseCatalog(html, 4)).toMatchObject({ page: 4, pages: 5, urls: [URL] });
+    expect(() =>
+      parseCatalog(html.replace('href="#">-', 'href="https://example.com/">-'), 4),
+    ).toThrow(SourceError);
+  });
   it("rejects page, scope, row, and duplicate identity conflicts as whole-page failures", () => {
     for (const html of [
       catalog(undefined, { page: 2, pages: 3 }),
@@ -415,6 +500,27 @@ describe("Bid.Cars catalog", () => {
     ]) {
       expect(() => parseCatalog(html)).toThrow(SourceError);
     }
+  });
+  it("retains an otherwise identified catalog row with an absent VIN as unknown", () => {
+    // Reduced from /en/automobile/page/17: lot 0-46046054 also has no VIN on its detail page.
+    const missingVin = `<div class="item-horizontal lots-search" id="0-46046054">
+      <div class="name"><a href="https://bid.cars/en/lot/0-46046054/1997-Suzuki-800-Intruder" class="item-title damage-info">1997 Suzuki 800 Intruder</a></div>
+      <h2 class="vin_title"><a href="https://bid.cars/en/lot/0-46046054/1997-Suzuki-800-Intruder"></a></h2>
+      <span class="vin_title">0-46046054</span>
+    </div>`;
+    expect(parseCatalog(catalog([row(), missingVin], { page: 17, pages: 18 }), 17).lots).toEqual([
+      { lot: "1-66587646", url: URL, title: "1969 Alfa Romeo Duetto", vin: "AR1480400" },
+      { lot: "0-46046054", url: MISSING_VIN_URL, title: "1997 Suzuki 800 Intruder", vin: "" },
+    ]);
+  });
+  it("merges absent duplicate VIN evidence without losing a provided VIN or accepting disagreement", () => {
+    const absent = row().replace("AR1480400</a>", "</a>");
+    expect(parseCatalog(catalog([absent, row(), absent])).lots).toEqual([
+      { lot: "1-66587646", url: URL, title: "1969 Alfa Romeo Duetto", vin: "AR1480400" },
+    ]);
+    expect(() =>
+      parseCatalog(catalog([absent, row(), row().replace("AR1480400</a>", "AR1480401</a>")])),
+    ).toThrow(SourceError);
   });
   it("accepts an empty terminal page but not an empty interior or unrecognized page", () => {
     expect(parseCatalog(catalog([]))).toMatchObject({ urls: [], total: null });
@@ -451,6 +557,36 @@ describe("Bid.Cars catalog", () => {
 });
 
 describe("Bid.Cars fetch", () => {
+  it("returns all identified lots when VIN is absent and retains a VIN supplied only by detail", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const unknown = row(MISSING_VIN_URL, "0-46046054", "1997 Suzuki 800 Intruder").replace(
+      "AR1480400</a>",
+      "</a>",
+    );
+    const result = await fetchPage({
+      transport: transportFor({
+        [CATALOG_URL]: catalog([row().replace("AR1480400</a>", "</a>"), unknown]),
+        [URL]: detail(),
+        [MISSING_VIN_URL]: MISSING_VIN_DETAIL,
+      }),
+    });
+    expect(result.listings.map(({ id, vin }) => ({ id, vin }))).toEqual([
+      { id: "bidcars:1-66587646", vin: "AR1480400" },
+      { id: "bidcars:0-46046054", vin: "" },
+    ]);
+  });
+  it("retains a provided catalog VIN when detail VIN is unknown after corroborating lot identity", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const result = await fetchPage({
+      transport: transportFor({
+        [CATALOG_URL]: catalog([row(MISSING_VIN_URL, "0-46046054", "1997 Suzuki 800 Intruder")]),
+        [MISSING_VIN_URL]: MISSING_VIN_DETAIL,
+      }),
+    });
+    expect(result.listings.map(({ id, vin }) => ({ id, vin }))).toEqual([
+      { id: "bidcars:0-46046054", vin: "AR1480400" },
+    ]);
+  });
   it("gates before any network access", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
     const calls: string[] = [];
@@ -470,6 +606,17 @@ describe("Bid.Cars fetch", () => {
     expect(result.total).toBeNull();
     expect(calls).toEqual([CATALOG_URL, URL]);
     expect(batch).toHaveBeenCalledTimes(1);
+  });
+  it("decodes structured title entities before matching the catalog without interpreting markup", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const encoded = "1969 Alfa Romeo Duetto, 5&#039;7&nbsp;&amp;&nbsp;&lt;Prototype&gt;";
+    const result = await fetchPage({
+      transport: transportFor({
+        [CATALOG_URL]: catalog([row(URL, "1-66587646", encoded)]),
+        [URL]: detail().replaceAll("1969 Alfa Romeo Duetto", encoded),
+      }),
+    });
+    expect(result.listings[0]?.title).toBe("1969 Alfa Romeo Duetto, 5'7 & <Prototype>");
   });
   it("uses the full detail identity when the catalog visibly truncates the trim", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");

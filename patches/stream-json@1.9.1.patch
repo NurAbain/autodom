@@ -1,0 +1,23 @@
+diff --git a/filters/FilterBase.js b/filters/FilterBase.js
+index 2e96d1581e8ca67ca600ab9228ec7a4a1c84d4af..2bdbfb0a292c35058f7ceba42604561fa9f97bbe 100644
+--- a/filters/FilterBase.js
++++ b/filters/FilterBase.js
+@@ -25,6 +25,8 @@ class FilterBase extends Transform {
+     super(Object.assign({}, options, {writableObjectMode: true, readableObjectMode: true}));
+     this._transform = this._check;
+     this._stack = [];
++    // Backport the finite path-filter depth guard from stream-json 3.5.0 (GHSA-528h-pc64-c93x).
++    this._maxDepth = (options && options.maxDepth) ?? 1024;
+ 
+     const filter = options && options.filter,
+       separator = (options && options.pathSeparator) || '.';
+@@ -86,6 +88,9 @@ class FilterBase extends Transform {
+         break;
+     }
+     this._previousToken = chunk.name;
++    if (this._stack.length > this._maxDepth) {
++      return callback(new RangeError(`filter: JSON nesting depth exceeds maxDepth (${this._maxDepth})`));
++    }
+     // check, if we allow a chunk
+     if (this._checkChunk(chunk)) {
+       return callback(null);

@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main, ts-migration]
   pull_request:
 
 permissions:
@@ -69,6 +68,15 @@ jobs:
 
       - name: Build runtime
         run: pnpm build
+
+      - name: Validate Autodom monitoring alert rules
+        run: |
+          docker run --rm --network none --entrypoint promtool \
+            -v "$PWD/deploy/prometheus:/rules:ro" prom/prometheus:v2.47.0 \
+            check rules /rules/autodom.rules.yml
+          docker run --rm --network none --entrypoint promtool \
+            -v "$PWD/deploy/prometheus:/rules:ro" prom/prometheus:v2.47.0 \
+            test rules /rules/autodom.rules.test.yml
 
       - name: Validate Compose configuration
         env:

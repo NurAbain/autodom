@@ -1,0 +1,74 @@
+groups:
+  - name: autodom
+    rules:
+      - alert: AutodomTargetDown
+        expr: up{application="autodom",job=~"autodom-bot|autodom-worker"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom metrics target cannot be scraped
+      - alert: AutodomBotTargetMissing
+        expr: absent(up{application="autodom",job="autodom-bot"})
+        for: 2m
+        labels: {severity: critical, role: bot}
+        annotations:
+          summary: Autodom bot scrape job has no target series
+      - alert: AutodomWorkerTargetMissing
+        expr: absent(up{application="autodom",job="autodom-worker"})
+        for: 2m
+        labels: {severity: critical, role: worker}
+        annotations:
+          summary: Autodom worker scrape job has no target series
+      - alert: AutodomStateCollectionFailed
+        expr: autodom_state_collection_success{application="autodom",job=~"autodom-bot|autodom-worker"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom cannot collect its database-backed monitoring state
+      - alert: AutodomStateCollectionStale
+        expr: time() - autodom_state_collection_timestamp_seconds{application="autodom",job=~"autodom-bot|autodom-worker"} > 120
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom monitoring metadata snapshot is stale
+      - alert: AutodomSourceNeverSucceeded
+        expr: |
+          (autodom_source_last_success_timestamp_seconds{application="autodom",job="autodom-worker",role="worker"} == 0)
+          and (autodom_source_enabled{application="autodom",job="autodom-worker",role="worker"} == 1)
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Enabled source has no valid successful page observation
+      - alert: AutodomSourceStale
+        expr: |
+          (time() - autodom_source_last_success_timestamp_seconds{application="autodom",job="autodom-worker",role="worker"} > 1800)
+          and (autodom_source_last_success_timestamp_seconds{application="autodom",job="autodom-worker",role="worker"} > 0)
+          and (autodom_source_enabled{application="autodom",job="autodom-worker",role="worker"} == 1)
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Enabled source has no successful page observation for over 30 minutes
+      - alert: AutodomSourceError
+        expr: |
+          (autodom_source_error{application="autodom",job="autodom-worker",role="worker"} == 1)
+          and (autodom_source_enabled{application="autodom",job="autodom-worker",role="worker"} == 1)
+          and on (application, job, instance, role)
+          (autodom_state_collection_success{application="autodom",job="autodom-worker",role="worker"} == 1)
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Enabled source has a persistent collection error
+      - alert: AutodomRoleHeartbeatStale
+        expr: time() - autodom_role_heartbeat_timestamp_seconds{application="autodom",job=~"autodom-bot|autodom-worker"} > 120
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom role maintenance heartbeat is stale
+      - alert: AutodomMonitorStale
+        expr: |
+          time() - autodom_monitor_timestamp_seconds{application="autodom",job="autodom-bot",role="bot"}
+          > autodom_monitor_max_age_seconds{application="autodom",job="autodom-bot",role="bot"}
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom notification monitor heartbeat is stale

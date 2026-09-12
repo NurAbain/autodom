@@ -1,6 +1,7 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { MockAgent } from "undici";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { VinTransport } from "../src/vin-session.js";
 
 const ORIGIN = "https://www.carhistory.or.kr";
@@ -31,6 +32,36 @@ function setup() {
   });
   transports.push(transport);
   return { transport, mocks };
+}
+
+function setupPacing(requestDelaySeconds = 0.1, timeoutMs = 350) {
+  const requests: { provider: string; page: number; at: number }[] = [];
+  const closes: MockInstance<MockAgent["close"]>[] = [];
+  const transport = new VinTransport({
+    routes: routes.slice(0, 1),
+    requestDelaySeconds,
+    timeoutMs,
+    dispatcherFactory: (_route, page) => {
+      const mock = new MockAgent();
+      mock.disableNetConnect();
+      closes.push(vi.spyOn(mock, "close"));
+      for (const [provider, origin, path] of [
+        ["carhistory", ORIGIN, ENTRY],
+        ["car365", "https://www.car365.go.kr", "/ccpt/carlife/scrcar/schdcarXportView.do"],
+      ] as const) {
+        mock
+          .get(origin)
+          .intercept({ path })
+          .reply(() => {
+            requests.push({ provider, page, at: Date.now() });
+            return { statusCode: 200, data: String(page) };
+          });
+      }
+      return mock;
+    },
+  });
+  transports.push(transport);
+  return { transport, requests, closes };
 }
 
 afterEach(async () => {
@@ -173,6 +204,69 @@ describe("proxy-only VIN sessions", () => {
     }
     expect(await Promise.all(checks)).toEqual(fixtures.map((fixture) => fixture.vin));
     expect(peakActive).toBe(10);
+  });
+
+  it("does not charge cancelled unsent requests against the next workflow's deadline", async () => {
+    const { transport, requests, closes } = setupPacing();
+    await transport.run("carhistory", (session) => session.request(ENTRY));
+    for (let index = 0; index < 7; index++) {
+      const controller = new AbortController();
+      const reason = new Error("Cancelled waiting lookup");
+      await expect(
+        transport.run(
+          "carhistory",
+          (session) => {
+            const pending = session.request(ENTRY);
+            controller.abort(reason);
+            return pending;
+          },
+          controller.signal,
+        ),
+      ).rejects.toBe(reason);
+    }
+    await delay(120);
+    await expect(transport.run("carhistory", (session) => session.request(ENTRY))).resolves.toEqual(
+      { body: "9" },
+    );
+    expect(requests.map(({ page }) => page)).toEqual([1, 9]);
+    for (const close of closes) expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("spaces concurrent admissions in FIFO order without blocking the other provider", async () => {
+    const { transport, requests } = setupPacing(0.1, 1_000);
+    await transport.run("carhistory", (session) => session.request(ENTRY));
+    const waiting = [
+      transport.run("carhistory", (session) => session.request(ENTRY)),
+      transport.run("carhistory", (session) => session.request(ENTRY)),
+      transport.run("car365", (session) =>
+        session.request("/ccpt/carlife/scrcar/schdcarXportView.do"),
+      ),
+    ];
+    await Promise.all(waiting);
+    expect(requests.map(({ page }) => page)).toEqual([1, 4, 2, 3]);
+    const history = requests.filter(({ provider }) => provider === "carhistory");
+    for (let index = 1; index < history.length; index++)
+      expect(history[index]!.at - history[index - 1]!.at).toBeGreaterThanOrEqual(95);
+  });
+
+  it("closes dispatchers and drains pacing and workflow queues when closed", async () => {
+    const { transport, requests, closes } = setupPacing(1, 2_000);
+    await transport.run("carhistory", (session) => session.request(ENTRY));
+    const entered = Promise.withResolvers<void>();
+    let active = 0;
+    const pending = Array.from({ length: 12 }, () =>
+      transport.run("carhistory", (session) => {
+        if (++active === 10) entered.resolve();
+        return session.request(ENTRY);
+      }),
+    );
+    const settled = Promise.allSettled(pending);
+    await entered.promise;
+    await transport.close();
+    expect((await settled).map(({ status }) => status)).toEqual(Array(12).fill("rejected"));
+    expect(requests.map(({ page }) => page)).toEqual([1]);
+    expect(closes).toHaveLength(11);
+    for (const close of closes) expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("does not bypass a provider's rate limit by changing proxies or starting another lookup", async () => {

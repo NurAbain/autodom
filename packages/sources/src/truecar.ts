@@ -343,6 +343,7 @@ function listing(
   requireValue(typeof transmission === "string", "invalid transmission");
   return makeListing({
     id: `truecar:${vin}`,
+    vin,
     title: `${year} ${makeName} ${modelName}${trim ? ` ${trim}` : ""}`,
     url,
     price_usd_minor: price,

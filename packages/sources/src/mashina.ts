@@ -191,10 +191,29 @@ function parseListing(
   if (!Array.isArray(attributes) || !attributes.every(isObject))
     throw new SourceError("Mashina catalog attribute schema changed");
   const amounts: Record<string, number | null> = { USD: null, KGS: null };
+  let original: ObjectValue | undefined;
+  let originalCount = 0;
   for (const price of prices) {
     if (typeof price.currency === "string" && Object.hasOwn(amounts, price.currency))
       amounts[price.currency] = minorUnits(price.amount);
+    if (price.is_original === true) {
+      original = price;
+      originalCount += 1;
+    }
   }
+  // The live catalog identifies the entered price explicitly; array order is not provenance.
+  const originalCurrency =
+    originalCount === 1 &&
+    typeof original?.currency === "string" &&
+    Object.hasOwn(amounts, original.currency) &&
+    amounts[original.currency] !== null &&
+    prices.every(
+      (price) =>
+        (price === original || price.currency !== original.currency) &&
+        (price.is_original == null || typeof price.is_original === "boolean"),
+    )
+      ? original.currency
+      : "";
   const attrs = new Map<string, ObjectValue>();
   for (const attr of attributes) {
     if (typeof attr.slug === "string" && Object.hasOwn(ATTRIBUTE_SLUGS, attr.slug))
@@ -220,6 +239,8 @@ function parseListing(
     url: `https://mashina.kg/details/${encodeURIComponent(item.slug).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`)}`,
     price_usd_minor: amounts.USD ?? null,
     price_kgs_minor: amounts.KGS ?? null,
+    original_currency: originalCurrency,
+    original_price_minor: originalCurrency ? (amounts[originalCurrency] ?? null) : null,
     year,
     mileage: attributeText(attrs.get("mileage") ?? {}),
     transmission: attributeText(attrs.get("gearbox") ?? {}),

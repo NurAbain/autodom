@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
-import { type Dispatcher, fetch, MockAgent } from "undici";
+import { CookieJar } from "tough-cookie";
+import { type Dispatcher, fetch, MockAgent, Response } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BrowserClient } from "../src/bidcars-browser.js";
 import { ProxyTransport, retryAfterSeconds } from "../src/http.js";
+import { RiskBypassError } from "../src/riskbypass.js";
 
 const directories: string[] = [];
 const transports: ProxyTransport[] = [];
@@ -19,9 +22,14 @@ afterEach(async () => {
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
-async function transportWith(agents: MockAgent[], browserRoutes = agents) {
+async function transportWith(
+  agents: MockAgent[],
+  browserRoutes = agents,
+  refresh?: BrowserClient["refresh"],
+) {
   const dataDir = await mkdtemp(join(tmpdir(), "autodom-http-test-"));
   directories.push(dataDir);
   for (const agent of browserRoutes) browserAgents.add(agent);
@@ -46,6 +54,7 @@ async function transportWith(agents: MockAgent[], browserRoutes = agents) {
     },
     browserClientFactory: (_route, _page, index) => ({
       fetch: (url, init) => fetch(url, { ...init, dispatcher: browserRoutes[index]! }),
+      ...(refresh ? { refresh } : {}),
     }),
   });
   transports.push(transport);
@@ -136,6 +145,179 @@ describe("mandatory proxy document transport", () => {
     expect(Number(second) - Number(first)).toBeGreaterThanOrEqual(1900);
   });
 
+  it("distributes BidCars details across the proxy pool between batches", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-bidcars-pool-"));
+    directories.push(dataDir);
+    const agents = Array.from({ length: 3 }, () => {
+      const agent = new MockAgent();
+      agent.disableNetConnect();
+      browserAgents.add(agent);
+      const origin = agent.get("https://bid.cars");
+      origin.intercept({ path: "/en/lot/example" }).reply(200, '{"available":true}');
+      origin
+        .intercept({ path: "/en/lot/example" })
+        .reply(429, "Proxy request allowance exhausted", { headers: { "retry-after": "120" } })
+        .persist();
+      return agent;
+    });
+    const transport = new ProxyTransport({
+      routes: [
+        new ProxyRoute("residential", "http://proxy.test:7000", "Basic ZGVtbzpkZW1v", 7000, 3),
+      ],
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const agent = agents[Number(new URL(route.urlFor(page)).port) - 7000];
+        if (!agent) throw new Error("Missing test proxy");
+        return { fetch: (url, init) => fetch(url, { ...init, dispatcher: agent }) };
+      },
+    });
+    transports.push(transport);
+    const request = {
+      url: "https://bid.cars/en/lot/example",
+      parse: JSON.parse,
+      options: { source: "bid.cars" },
+    };
+    await expect(transport.fetchDocuments([request, request])).resolves.toEqual([
+      { available: true },
+      { available: true },
+    ]);
+    await expect(
+      transport.fetchDocument(request.url, request.parse, request.options),
+    ).resolves.toEqual({ available: true });
+  });
+
+  it("keeps a working BidCars route across subsequent document batches", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first.get("https://bid.cars").intercept({ path: "/en/lot/example" }).reply(403, "blocked");
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/lot/example" })
+      .reply(429, "Do not repeat requests on this route", { headers: { "retry-after": "120" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/lot/example" })
+      .reply(200, '{"available":true}')
+      .times(2);
+    const transport = await transportWith([first, second]);
+    for (let batch = 0; batch < 2; batch++)
+      await expect(
+        transport.fetchDocument("https://bid.cars/en/lot/example", JSON.parse, {
+          source: "bid.cars",
+        }),
+      ).resolves.toEqual({ available: true });
+    second.assertNoPendingInterceptors();
+    expect(first.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("quarantines a challenged BidCars port while keeping healthy sessions usable", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-bidcars-health-"));
+    directories.push(dataDir);
+    const agents = Array.from({ length: 3 }, () => {
+      const agent = new MockAgent();
+      agent.disableNetConnect();
+      browserAgents.add(agent);
+      return agent;
+    });
+    const first = agents[0];
+    if (!first) throw new Error("Missing test proxy");
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/lot/example" })
+      .reply(403, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    for (const agent of agents)
+      agent
+        .get("https://bid.cars")
+        .intercept({ path: "/en/lot/example" })
+        .reply(200, '{"available":true}')
+        .persist();
+    const refresh = vi.fn(async () => {
+      throw new SourceError("Target session unavailable");
+    });
+    const transport = new ProxyTransport({
+      routes: [
+        new ProxyRoute("residential", "http://proxy.test:7000", "Basic ZGVtbzpkZW1v", 7000, 3),
+      ],
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const agent = agents[Number(new URL(route.urlFor(page)).port) - 7000];
+        if (!agent) throw new Error("Missing test proxy");
+        return {
+          async fetch(url, init) {
+            const response = await fetch(url, { ...init, dispatcher: agent });
+            vi.setSystemTime(Date.now() + 2000);
+            return response;
+          },
+          refresh,
+        };
+      },
+    });
+    transports.push(transport);
+    for (let document = 0; document < 6; document++)
+      await expect(
+        transport.fetchDocument("https://bid.cars/en/lot/example", JSON.parse, {
+          source: "bid.cars",
+        }),
+      ).resolves.toEqual({ available: true });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(first.pendingInterceptors()).toHaveLength(1);
+    vi.setSystemTime(Date.now() + 300_000);
+    for (let document = 0; document < 3; document++)
+      await transport.fetchDocument("https://bid.cars/en/lot/example", JSON.parse, {
+        source: "bid.cars",
+      });
+    first.assertNoPendingInterceptors();
+  });
+
+  it("preserves authenticated BidCars sessions across both ten-port tiers", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-bidcars-sessions-"));
+    directories.push(dataDir);
+    const transport = new ProxyTransport({
+      routes: ["datacenter", "residential"].map(
+        (tier) => new ProxyRoute(tier, "http://proxy.test:7000", "Basic ZGVtbzpkZW1v", 7000, 10),
+      ),
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const jar = new CookieJar();
+        const session = `session=${route.tier}-${page}`;
+        return {
+          async fetch(url) {
+            vi.setSystemTime(Date.now() + 2000);
+            if (!url.pathname.includes(`/${route.tier}/`))
+              return new Response("This route is unavailable for this document", { status: 503 });
+            if (url.pathname.endsWith("/catalog")) await jar.setCookie(session, url.href);
+            else if ((await jar.getCookieString(url.href)) !== session)
+              return new Response("The established session cookie is required", { status: 403 });
+            return new Response('{"available":true}');
+          },
+        };
+      },
+    });
+    transports.push(transport);
+    for (let round = 0; round < 10; round++)
+      for (const tier of ["datacenter", "residential"])
+        await transport.fetchDocument(`https://bid.cars/en/${tier}/catalog`, JSON.parse, {
+          source: "bid.cars",
+        });
+    for (const tier of ["datacenter", "residential"])
+      await expect(
+        transport.fetchDocument(`https://bid.cars/en/${tier}/detail`, JSON.parse, {
+          source: "bid.cars",
+        }),
+      ).resolves.toEqual({ available: true });
+  });
+
   it("does not rotate around a source rate limit", async () => {
     const first = agentReply(429, "limited", { "retry-after": "120" });
     const second = agentReply(200, "must not request");
@@ -157,20 +339,120 @@ describe("mandatory proxy document transport", () => {
     first
       .get("https://bid.cars")
       .intercept({ path: "/en/automobile/page/1" })
-      .reply(429, "limited", { headers: { "retry-after": "180" } });
+      .reply(429, "limited", { headers: { server: "cloudflare", "retry-after": "180" } });
     const second = new MockAgent();
     second.disableNetConnect();
     second
       .get("https://bid.cars")
       .intercept({ path: "/en/automobile/page/1" })
       .reply(200, "must not request");
-    const transport = await transportWith([blocked, blocked], [first, second]);
+    const refresh = vi.fn(async () => {});
+    const transport = await transportWith([blocked, blocked], [first, second], refresh);
     await expect(
       transport.fetchDocument("https://bid.cars/en/automobile/page/1", (text) => text, {
         source: "bid.cars",
       }),
     ).rejects.toMatchObject({ retry_after: 180 });
     expect(second.pendingInterceptors()).toHaveLength(1);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("solves a managed 429 challenge and replays only the real document", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    const origin = agent.get("https://bid.cars");
+    origin
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(429, "Enable JavaScript and cookies", { headers: { "cf-mitigated": "challenge" } });
+    origin.intercept({ path: "/en/automobile/page/1" }).reply(200, '{"available":true}');
+    const refresh = vi.fn(async () => {});
+    const transport = await transportWith([agent], [agent], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).resolves.toEqual({ available: true });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    agent.assertNoPendingInterceptors();
+  });
+
+  it("stops after one unusable clearance instead of repeatedly purchasing solves", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    const origin = agent.get("https://bid.cars");
+    origin
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(429, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    origin
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(403, "still challenged", { headers: { "cf-mitigated": "challenge" } });
+    origin.intercept({ path: "/en/automobile/page/1" }).reply(200, "must not request");
+    const refresh = vi.fn(async () => {});
+    const transport = await transportWith([agent], [agent], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).rejects.toBeInstanceOf(SourceError);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(agent.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("does not repeat a failed solver control operation on another proxy", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(403, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(200, "must not request");
+    const refresh = vi.fn(async () => {
+      throw new RiskBypassError("Control service unavailable");
+    });
+    const transport = await transportWith([first, second], [first, second], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).rejects.toBeInstanceOf(RiskBypassError);
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(second.pendingInterceptors()).toHaveLength(1);
+  });
+
+  it("uses the configured fallback when a target-specific clearance attempt fails", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars");
+    const first = new MockAgent();
+    first.disableNetConnect();
+    first
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(403, "challenge", { headers: { "cf-mitigated": "challenge" } });
+    const second = new MockAgent();
+    second.disableNetConnect();
+    second
+      .get("https://bid.cars")
+      .intercept({ path: "/en/automobile/page/1" })
+      .reply(200, '{"available":true}');
+    const refresh = vi.fn(async () => {
+      throw new SourceError("Target session unavailable");
+    });
+    const transport = await transportWith([first, second], [first, second], refresh);
+    await expect(
+      transport.fetchDocument("https://bid.cars/en/automobile/page/1", JSON.parse, {
+        source: "bid.cars",
+      }),
+    ).resolves.toEqual({ available: true });
+    expect(refresh).toHaveBeenCalledTimes(1);
+    first.assertNoPendingInterceptors();
+    second.assertNoPendingInterceptors();
   });
 
   it("rejects browser redirects and oversized documents before parsing", async () => {

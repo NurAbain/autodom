@@ -13,10 +13,12 @@ import {
 } from "@autodom/core";
 import { BasicCrawler } from "@crawlee/basic";
 import { Configuration, KeyValueStore, Log, LogLevel, RequestList } from "@crawlee/core";
-import { Impit, type ImpitResponse } from "impit";
+import type { ImpitResponse } from "impit";
 import pLimit, { type LimitFunction } from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { DETAIL_DELAY_SECONDS } from "./bidcars.js";
+import { BidCarsBrowser, type BrowserClient, REFRESH_COOLDOWN_MS } from "./bidcars-browser.js";
+import { RiskBypass, RiskBypassError } from "./riskbypass.js";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const ORIGINS: Readonly<Record<string, string>> = {
@@ -26,19 +28,6 @@ const ORIGINS: Readonly<Record<string, string>> = {
   "bid.cars": "https://bid.cars",
   "nbkr.kg": "https://www.nbkr.kg",
 };
-
-interface BrowserClient {
-  fetch(
-    url: URL,
-    init: {
-      method: "GET" | "POST";
-      headers: Record<string, string>;
-      body?: string;
-      redirect: "manual";
-      signal: AbortSignal;
-    },
-  ): Promise<Response | ImpitResponse>;
-}
 
 export interface ProxyTransportOptions {
   routes: readonly ProxyRoute[];
@@ -131,10 +120,14 @@ async function readBody(response: Response | ImpitResponse): Promise<string> {
 export class ProxyTransport implements DocumentTransport {
   readonly #options: ProxyTransportOptions;
   readonly #dispatchers = new Map<string, Dispatcher>();
-  readonly #browserClients = new Map<string, BrowserClient>();
+  readonly #browserClients = new Map<number, Map<number, BrowserClient>>();
+  readonly #browserNextPage = new Map<number, number>();
+  readonly #browserUnavailable = new Map<number, Map<number, number>>();
+  #preferredBrowserRoute = 0;
   readonly #nextRequest = new Map<string, number>();
   readonly #abort = new AbortController();
   readonly #limit: LimitFunction;
+  #riskBypass: RiskBypass | undefined;
 
   constructor(options: ProxyTransportOptions) {
     if (!options.routes.length)
@@ -161,35 +154,57 @@ export class ProxyTransport implements DocumentTransport {
     await Promise.all([...this.#dispatchers.values()].map((dispatcher) => dispatcher.close()));
     this.#dispatchers.clear();
     this.#browserClients.clear();
+    this.#browserNextPage.clear();
+    this.#browserUnavailable.clear();
+  }
+
+  private dispatcher(route: ProxyRoute, page: number, index: number): Dispatcher {
+    const endpoint = route.urlFor(page);
+    const key = `${index}:${endpoint}`;
+    let dispatcher = this.#dispatchers.get(key);
+    if (!dispatcher) {
+      dispatcher =
+        this.#options.dispatcherFactory?.(route, page, index) ??
+        new ProxyAgent({ uri: endpoint, token: route.authorization });
+      this.#dispatchers.set(key, dispatcher);
+    }
+    return dispatcher;
+  }
+
+  private solver(fallback: ProxyRoute): RiskBypass {
+    if (!this.#riskBypass) {
+      const route =
+        this.#options.routes.find((candidate) => candidate.tier === "datacenter") ?? fallback;
+      this.#riskBypass = new RiskBypass({
+        apiKey: process.env.RISKBYPASS_API_KEY ?? "",
+        dispatcher: this.dispatcher(route, 1, this.#options.routes.indexOf(route)),
+      });
+    }
+    return this.#riskBypass;
   }
 
   private browserClient(route: ProxyRoute, page: number, index: number): BrowserClient {
-    const endpoint = route.urlFor(page);
-    const key = `${index}:${endpoint}`;
-    let client = this.#browserClients.get(key);
-    if (!client) {
-      client = this.#options.browserClientFactory?.(route, page, index);
-      if (!client) {
-        const proxy = new URL(endpoint);
-        const credentials = Buffer.from(route.authorization.slice(6), "base64").toString("latin1");
-        const separator = credentials.indexOf(":");
-        proxy.username = credentials.slice(0, separator);
-        proxy.password = credentials.slice(separator + 1);
-        client = new Impit({
-          browser: "firefox144",
-          proxyUrl: proxy.href,
-          timeout: 40_000,
-          followRedirects: false,
-          ignoreTlsErrors: false,
-          http3: false,
-        });
-      }
-      this.#browserClients.set(key, client);
-      // Rotating proxy ports must not retain an unbounded number of native connection pools.
-      if (this.#browserClients.size > 16) {
-        const oldest = this.#browserClients.keys().next().value;
-        if (oldest !== undefined) this.#browserClients.delete(oldest);
-      }
+    let clients = this.#browserClients.get(index);
+    if (!clients) {
+      clients = new Map();
+      this.#browserClients.set(index, clients);
+    }
+    const cached = clients.get(page);
+    if (cached) {
+      clients.delete(page);
+      clients.set(page, cached);
+      return cached;
+    }
+    const client =
+      this.#options.browserClientFactory?.(route, page, index) ??
+      new BidCarsBrowser(route, page, {
+        solve: (url, proxy, signal) => this.solver(route).solve(url, proxy, signal),
+      });
+    clients.set(page, client);
+    // A rotating tier must not evict another tier's established sessions.
+    if (clients.size > 16) {
+      const oldest = clients.keys().next().value;
+      if (oldest !== undefined) clients.delete(oldest);
     }
     return client;
   }
@@ -279,78 +294,125 @@ export class ProxyTransport implements DocumentTransport {
     }
   }
 
+  private browserPage(route: ProxyRoute, index: number): number | undefined {
+    const count = Math.max(1, route.port_count);
+    const unavailable = this.#browserUnavailable.get(index);
+    const now = Date.now();
+    let page = this.#browserNextPage.get(index) ?? 1;
+    for (let checked = 0; checked < count; checked++) {
+      const next = (page % count) + 1;
+      this.#browserNextPage.set(index, next);
+      if ((unavailable?.get(page) ?? 0) <= now) {
+        unavailable?.delete(page);
+        return page;
+      }
+      page = next;
+    }
+    return undefined;
+  }
+
   private async fetchThroughRoutes<T>(
     request: DocumentRequest<T>,
     batchSignal: AbortSignal,
   ): Promise<T> {
     const failures: string[] = [];
     const { options } = request;
-    const page = options.page ?? 1;
     const signals = [this.#abort.signal, batchSignal];
     if (this.#options.signal) signals.push(this.#options.signal);
     if (options.signal) signals.push(options.signal);
     const signal = AbortSignal.any(signals);
-    for (const [index, route] of this.#options.routes.entries()) {
-      signal.throwIfAborted();
-      const instant = Date.now();
-      const start = Math.max(instant, this.#nextRequest.get(options.source) ?? 0);
-      const minimumDelay = options.source === "bid.cars" ? DETAIL_DELAY_SECONDS : 0;
-      this.#nextRequest.set(
-        options.source,
-        start + Math.max(minimumDelay, this.#options.requestDelaySeconds ?? 2) * 1000,
-      );
-      if (start > instant) await delay(start - instant, undefined, { signal });
-      const url = requestUrl(request.url, options);
-      // Cancel the deadline after a response instead of retaining a completed
-      // request's async-local context for the full timeout.
-      const deadline = new AbortController();
-      const timer = setTimeout(
-        () => deadline.abort(new DOMException("Request deadline exceeded", "TimeoutError")),
-        40_000,
-      ).unref();
+    const routes = this.#options.routes;
+    const browserRequest = options.source === "bid.cars";
+    const preferred = browserRequest ? this.#preferredBrowserRoute : 0;
+    let alternatePorts: Set<number> | undefined;
+    // At most one alternate port per tier, only after an unresolved managed challenge.
+    for (let offset = 0; offset < routes.length * (browserRequest ? 2 : 1); offset++) {
+      const index = (preferred + offset) % routes.length;
+      if (offset >= routes.length && !alternatePorts?.has(index)) continue;
+      const route = routes[index];
+      if (!route) throw new SourceError("Configured proxy route is missing");
+      const page = browserRequest ? this.browserPage(route, index) : (options.page ?? 1);
+      if (page === undefined) {
+        failures.push(`${route.tier}: Bid.Cars proxy sessions are cooling down`);
+        continue;
+      }
+      let reported = false;
+      let challenged = false;
       try {
-        const browser = options.source === "bid.cars";
-        const init = {
-          method: options.method ?? "GET",
-          headers: {
-            // Preserve the browser's coherent headers rather than mixing them with AutodomBot.
-            ...(browser
-              ? {}
-              : {
-                  "User-Agent": "AutodomBot/0.2",
-                  Accept: "application/json,text/html,*/*",
-                }),
-            ...options.headers,
-            ...(options.payload !== undefined ? { "Content-Type": "application/json" } : {}),
-          },
-          ...(options.payload !== undefined ? { body: JSON.stringify(options.payload) } : {}),
-          redirect: "manual" as const,
-          signal: AbortSignal.any([signal, deadline.signal]),
-        };
-        let response: Response | ImpitResponse;
-        if (browser) {
-          response = await this.browserClient(route, page, index).fetch(url, init);
-        } else {
-          const endpoint = route.urlFor(page);
-          const key = `${index}:${endpoint}`;
-          let dispatcher = this.#dispatchers.get(key);
-          if (!dispatcher) {
-            dispatcher =
-              this.#options.dispatcherFactory?.(route, page, index) ??
-              new ProxyAgent({ uri: endpoint, token: route.authorization });
-            this.#dispatchers.set(key, dispatcher);
+        const browser = browserRequest ? this.browserClient(route, page, index) : undefined;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          signal.throwIfAborted();
+          const instant = Date.now();
+          const start = Math.max(instant, this.#nextRequest.get(options.source) ?? 0);
+          const minimumDelay = options.source === "bid.cars" ? DETAIL_DELAY_SECONDS : 0;
+          this.#nextRequest.set(
+            options.source,
+            start + Math.max(minimumDelay, this.#options.requestDelaySeconds ?? 2) * 1000,
+          );
+          if (start > instant) await delay(start - instant, undefined, { signal });
+          reported = false;
+          const url = requestUrl(request.url, options);
+          const generation = browser?.generation ?? 0;
+          const deadline = new AbortController();
+          const timer = setTimeout(
+            () => deadline.abort(new DOMException("Request deadline exceeded", "TimeoutError")),
+            40_000,
+          ).unref();
+          try {
+            const init = {
+              method: options.method ?? "GET",
+              headers: {
+                ...(browser
+                  ? {}
+                  : {
+                      "User-Agent": "AutodomBot/0.2",
+                      Accept: "application/json,text/html,*/*",
+                    }),
+                ...options.headers,
+                ...(options.payload !== undefined ? { "Content-Type": "application/json" } : {}),
+              },
+              ...(options.payload !== undefined ? { body: JSON.stringify(options.payload) } : {}),
+              redirect: "manual" as const,
+              signal: AbortSignal.any([signal, deadline.signal]),
+            };
+            const response = browser
+              ? await browser.fetch(url, init)
+              : await fetch(url, { ...init, dispatcher: this.dispatcher(route, page, index) });
+            if (browser && response.headers.get("cf-mitigated") === "challenge") {
+              challenged = true;
+              await response.body?.cancel();
+              if (attempt !== 0 || !browser.refresh)
+                throw new SourceError("Bid.Cars Cloudflare challenge remains unresolved");
+              this.#options.onRequest?.({
+                source: options.source,
+                tier: route.tier,
+                outcome: "error",
+              });
+              reported = true;
+            } else {
+              if (response.status !== 200) {
+                await response.body?.cancel();
+                if (response.status === 429)
+                  throw new SourceRateLimited(
+                    retryAfterSeconds(response.headers.get("retry-after")),
+                  );
+                throw new SourceError(`${options.source} returned HTTP ${response.status}`);
+              }
+              const result = request.parse(await readBody(response));
+              if (browser) this.#preferredBrowserRoute = index;
+              this.#options.onRequest?.({
+                source: options.source,
+                tier: route.tier,
+                outcome: "success",
+              });
+              return result;
+            }
+          } finally {
+            clearTimeout(timer);
           }
-          response = await fetch(url, { ...init, dispatcher });
+          // Solving has its own bounded deadline; never retain a completed page's 40s timer.
+          await browser?.refresh?.(url, generation, signal);
         }
-        if (response.status !== 200) {
-          await response.body?.cancel();
-          if (response.status === 429)
-            throw new SourceRateLimited(retryAfterSeconds(response.headers.get("retry-after")));
-          throw new SourceError(`${options.source} returned HTTP ${response.status}`);
-        }
-        const result = request.parse(await readBody(response));
-        this.#options.onRequest?.({ source: options.source, tier: route.tier, outcome: "success" });
-        return result;
       } catch (error) {
         signal.throwIfAborted();
         if (error instanceof SourceRateLimited) {
@@ -361,7 +423,21 @@ export class ProxyTransport implements DocumentTransport {
           });
           throw error;
         }
-        this.#options.onRequest?.({ source: options.source, tier: route.tier, outcome: "error" });
+        if (!reported)
+          this.#options.onRequest?.({ source: options.source, tier: route.tier, outcome: "error" });
+        if (error instanceof RiskBypassError) throw error;
+        if (challenged) {
+          let unavailable = this.#browserUnavailable.get(index);
+          if (!unavailable) {
+            unavailable = new Map();
+            this.#browserUnavailable.set(index, unavailable);
+          }
+          unavailable.set(page, Date.now() + REFRESH_COOLDOWN_MS);
+          if (route.port_count > 1) {
+            alternatePorts ??= new Set();
+            alternatePorts.add(index);
+          }
+        }
         const reason =
           error instanceof SourceError
             ? error.message
@@ -369,8 +445,6 @@ export class ProxyTransport implements DocumentTransport {
               ? error.name
               : "RequestError";
         failures.push(`${route.tier}: ${reason}`);
-      } finally {
-        clearTimeout(timer);
       }
     }
     throw new SourceError(`${options.source}: all proxy routes failed: ${failures.join("; ")}`);

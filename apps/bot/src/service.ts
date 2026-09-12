@@ -172,7 +172,7 @@ export async function runBotService(
   let failure: unknown;
   let failed = false;
   const tasks: Promise<void>[] = [];
-  const metrics = new Metrics("bot");
+  const metrics = new Metrics("bot", store, settings);
   const watchServer = (server: Server, name: string) => {
     server.on("error", () => abort.abort(new Error(`${name} HTTP listener failed`)));
     server.on("close", () => {
@@ -247,7 +247,7 @@ export async function runBotService(
         ...(context.conversation
           ? {
               dialogue: (userId: number, text: string) =>
-                store.withLock(`autodom:user:${userId}`, () => {
+                store.tryWithLock(`autodom:user:${userId}`, () => {
                   bot.clearVinInput(userId);
                   return context.conversation!.handle(userId, userId, text);
                 }),

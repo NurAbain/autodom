@@ -166,6 +166,7 @@ describe("TrueCar connected retail inventory", () => {
     expect(result.listings.map((car) => car.id)).toEqual([`truecar:${VIN}`]);
     expect([result.total, result.pages]).toEqual([1, 1]);
     expect(result.listings[0]).toMatchObject({
+      vin: VIN,
       title: "2020 Toyota Camry LE",
       trim: "LE",
       year: 2020,

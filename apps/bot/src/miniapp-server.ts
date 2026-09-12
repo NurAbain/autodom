@@ -77,7 +77,8 @@ export interface MiniAppServerOptions {
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
   checkVin?: VinLookup;
-  dialogue?: (userId: number, text: string) => Promise<Reply[]>;
+  /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
+  dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
   payments?: PaymentService;
 }
 
@@ -179,6 +180,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           if (!options.dialogue)
             throw new RequestError(503, "Диалог недоступен. Откройте личный чат с ботом.");
           const replies = await options.dialogue(user.id, text);
+          if (replies === null)
+            throw new RequestError(429, "Предыдущий ответ ещё обрабатывается. Повторите позже.");
           if (!response.destroyed) respond(response, 200, { replies });
           return;
         }

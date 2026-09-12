@@ -31,7 +31,7 @@ export async function runWorkerService(
   let failure: unknown;
   let failed = false;
   const tasks: Promise<void>[] = [];
-  const metrics = new Metrics("worker");
+  const metrics = new Metrics("worker", store, settings);
   try {
     transport = new ProxyTransport({
       routes,

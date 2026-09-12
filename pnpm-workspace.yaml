@@ -1,7 +1,10 @@
 packages:
   - packages/*
   - apps/*
+overrides:
+  adm-zip@<0.6.1: 0.6.1
 onlyBuiltDependencies:
   - esbuild
 patchedDependencies:
   bullmq@5.81.4: patches/bullmq@5.81.4.patch
+  stream-json@1.9.1: patches/stream-json@1.9.1.patch

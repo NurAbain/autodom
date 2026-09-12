@@ -727,11 +727,55 @@ describe("PostgreSQL Store", () => {
     expect(await db.getProfile(1)).toEqual(buyer);
     expect(await db.getDraft(1)).toEqual(["budget", { minimum: 100 }]);
   });
+  it("lets another user progress while same-user lock waiters remain stalled and ordered", async () => {
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    const held = db.withLock("autodom:user:1", async () => {
+      entered.resolve();
+      await resume.promise;
+    });
+    await entered.promise;
+    const order: number[] = [];
+    const waiting = Array.from({ length: 12 }, (_, index) =>
+      db.withLock("autodom:user:1", async () => {
+        order.push(index);
+      }),
+    );
+    const progressed = db.withLock("autodom:user:2", async () => {
+      await db.setMeta("user-two-progress", "saved");
+      return db.getMeta("user-two-progress");
+    });
+    // Bound a real PostgreSQL deadlock, not a scheduling sleep; fake time cannot drive DB I/O.
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      expect(
+        await Promise.race([
+          progressed,
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error("Another user starved")), 1_500);
+          }),
+        ]),
+      ).toBe("saved");
+      expect(order).toEqual([]);
+      expect(await db.tryWithLock("autodom:user:1", async () => "overtaken")).toBeNull();
+    } finally {
+      clearTimeout(timer);
+      resume.resolve();
+      await Promise.all([held, ...waiting, progressed]);
+    }
+    expect(order).toEqual(Array.from({ length: 12 }, (_, index) => index));
+    expect(await db.tryWithLock("autodom:user:1", async () => "released")).toBe("released");
+  });
   it("reuses locked connections and releases ownership on callback failure", async () => {
     const other = await open(url);
     await expect(
       db.withLock("owner", async () => {
         expect(await other.tryWithLock("owner", async () => "acquired")).toBeNull();
+        expect(
+          await db.withLock("owner", () =>
+            db.transaction(() => db.tryWithLock("owner", async () => "reentrant")),
+          ),
+        ).toBe("reentrant");
         await db.withLock("nested", async () => {
           await db.setMeta("nested", "ok");
         });
@@ -739,6 +783,9 @@ describe("PostgreSQL Store", () => {
       }),
     ).rejects.toThrow("callback failure");
     expect(await other.tryWithLock("owner", async () => db.getMeta("nested"))).toBe("ok");
+    expect(await db.tryWithLock("owner", async () => "local admission released")).toBe(
+      "local admission released",
+    );
     await expect(
       db.transaction(() =>
         db.withLock("transaction-owner", () => db.setMeta("invalid", null as unknown as string)),

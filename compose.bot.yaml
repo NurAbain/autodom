@@ -46,7 +46,8 @@ services:
     expose: ["8080", "8081", "9901"]
     ports: ["${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"]
     networks:
-      default: {}
+      default:
+        aliases: [autodom-bot-metrics]
       proxy:
         aliases: [autodom-payment-events]
     volumes: [snapshots:/backups]

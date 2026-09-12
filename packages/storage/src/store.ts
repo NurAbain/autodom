@@ -174,6 +174,7 @@ export class Store {
   private readonly pool: pg.Pool;
   private readonly pooledDb: NodePgDatabase<typeof schema>;
   private readonly sessions = new AsyncLocalStorage<Session>();
+  private readonly lockQueues = new Map<string, Promise<void>>();
   private closing: Promise<void> | undefined;
   private constructor(databaseUrl: string) {
     this.pool = new pg.Pool({ connectionString: databaseUrl });
@@ -277,11 +278,33 @@ export class Store {
       }
     });
   }
+  private async admittedLock<T>(
+    key: string,
+    fn: () => Promise<T>,
+    attempt: boolean,
+  ): Promise<T | null> {
+    // Nested calls already own a connection. PostgreSQL remains responsible for their
+    // reentrant/session/transaction lock semantics; waiting locally could deadlock them.
+    if (this.sessions.getStore()) return this.advisory(key, fn, attempt);
+    const predecessor = this.lockQueues.get(key);
+    if (attempt && predecessor) return null;
+    const { promise, resolve: release } = Promise.withResolvers<void>();
+    this.lockQueues.set(key, promise);
+    // At most one top-level caller per key acquires a pool client, including when
+    // another process holds the PostgreSQL lock. Local waiters preserve arrival order.
+    await predecessor;
+    try {
+      return await this.advisory(key, fn, attempt);
+    } finally {
+      if (this.lockQueues.get(key) === promise) this.lockQueues.delete(key);
+      release();
+    }
+  }
   async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    return (await this.advisory(key, fn, false)) as T;
+    return (await this.admittedLock(key, fn, false)) as T;
   }
   async tryWithLock<T>(key: string, fn: () => Promise<T>): Promise<T | null> {
-    return this.advisory(key, fn, true);
+    return this.admittedLock(key, fn, true);
   }
   async migrate(): Promise<void> {
     const directory = process.env.AUTODOM_MIGRATIONS_DIR ?? "packages/storage/migrations";

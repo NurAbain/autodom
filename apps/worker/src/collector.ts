@@ -42,10 +42,20 @@ export async function recordPage(
       throw new SourceError("Source search scope changed; restart from the first page");
     }
     return store.transaction(async () => {
+      if (page.page === 1 && priorScope !== page.scope) {
+        await store.setMeta(`${prefix}crawl_next_page`, "1");
+        await store.setMeta(`${prefix}full_scan_completed_at`, "0");
+      }
+      const pagesKey = `${prefix}catalog_pages`;
+      const pages =
+        !page.pages_exact && priorScope === page.scope
+          ? Math.max(page.pages, Number(await store.getMeta(pagesKey, "1")))
+          : page.pages;
       const count = await store.upsertListings(page.listings, observedAt);
       await store.setMeta(`${prefix}catalog_total`, page.total === null ? "" : String(page.total));
-      await store.setMeta(`${prefix}catalog_pages`, String(page.pages));
+      await store.setMeta(pagesKey, String(pages));
       await store.setMeta(`${prefix}scope`, page.scope);
+      await store.setMeta(`${prefix}last_success_at`, String(observedAt));
       await store.setMeta(
         `${prefix}last_sync_at`,
         `${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC`,

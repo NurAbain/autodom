@@ -1,4 +1,10 @@
-import { type DocumentTransport, makeProfile, matches, SourceError } from "@autodom/core";
+import {
+  type DocumentTransport,
+  isPriceDrop,
+  makeProfile,
+  matches,
+  SourceError,
+} from "@autodom/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchPage, parsePage } from "../src/mashina.js";
 
@@ -81,6 +87,67 @@ describe("Mashina Flight catalog", () => {
         ],
       }),
     ).toMatchObject({ price_usd_minor: null, price_kgs_minor: 90001, original_currency: "" });
+  });
+
+  it("distinguishes the marked seller price from a changing converted display price", () => {
+    const before = listing({
+      prices: [
+        { currency: "USD", amount: 34000, is_original: false },
+        { currency: "KGS", amount: 2973300, is_original: true },
+      ],
+    });
+    const converted = listing({
+      prices: [
+        { currency: "USD", amount: 33000, is_original: false },
+        { currency: "KGS", amount: 2973300, is_original: true },
+      ],
+    });
+    const event = {
+      id: 1,
+      kind: "price_change",
+      listing: converted,
+      previous_usd_minor: before.price_usd_minor,
+      previous_kgs_minor: before.price_kgs_minor,
+      previous_original_price_minor: before.original_price_minor,
+      previous_original_currency: before.original_currency,
+    };
+    expect(isPriceDrop(event, "USD")).toBe(false);
+    const reduced = listing({
+      prices: [
+        { currency: "USD", amount: 32000, is_original: false },
+        { currency: "KGS", amount: 2883200, is_original: true },
+      ],
+    });
+    expect(isPriceDrop({ ...event, listing: reduced }, "USD")).toBe(true);
+    expect(reduced.original_currency).toBe("KGS");
+    expect(reduced.original_price_minor).toBe(288320000);
+  });
+
+  it("leaves conflicting or malformed original-price evidence unknown", () => {
+    for (const prices of [
+      [
+        { currency: "USD", amount: 100, is_original: true },
+        { currency: "KGS", amount: 9000, is_original: true },
+      ],
+      [
+        { currency: "USD", amount: 100, is_original: true },
+        { currency: "USD", amount: 90, is_original: false },
+      ],
+      [
+        { currency: "USD", amount: 100, is_original: "true" },
+        { currency: "KGS", amount: 9000, is_original: true },
+      ],
+      [
+        { currency: "USD", amount: 100, is_original: false },
+        { currency: "KGS", amount: null, is_original: true },
+      ],
+      [{ currency: "USD", amount: 100 }],
+      [{ currency: "EUR", amount: 100, is_original: true }],
+    ]) {
+      const value = listing({ prices });
+      expect(value.original_currency).toBe("");
+      expect(value.original_price_minor).toBeNull();
+    }
   });
 
   it("keeps decimal JSON prices exact and rounds half cents upwards", () => {

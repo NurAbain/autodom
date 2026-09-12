@@ -367,6 +367,42 @@ it("keeps car access and readiness independent of VIN API transport failure", as
   expect((await fetch(`${base}/ready`)).status).toBe(200);
 });
 
+it("reports refused dialogue admission as retryable without confusing an empty successful reply", async () => {
+  let busy = true;
+  const dialogueServer = await startMiniAppServer({
+    token: TOKEN,
+    publicUrl: PUBLIC_URL,
+    host: "127.0.0.1",
+    port: 0,
+    assetsDirectory: directory,
+    ready: async () => true,
+    store: { getProfile: async () => null, getListing: async () => null },
+    dialogue: async () => (busy ? null : []),
+  });
+  try {
+    const address = dialogueServer.address();
+    if (!address || typeof address === "string") throw new Error("No listening address");
+    const endpoint = `http://127.0.0.1:${address.port}/miniapp/api/dialogue`;
+    const request = {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "/cancel" }),
+    };
+    const rejected = await fetch(endpoint, request);
+    expect(rejected.status).toBe(429);
+    expect(await rejected.json()).not.toHaveProperty("replies");
+    busy = false;
+    const admitted = await fetch(endpoint, request);
+    expect(admitted.status).toBe(200);
+    expect(await admitted.json()).toEqual({ replies: [] });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      dialogueServer.close((error) => (error ? reject(error) : resolve()));
+      dialogueServer.closeAllConnections();
+    });
+  }
+});
+
 it("cancels the remote lookup when the authenticated client disconnects", async () => {
   const entered = Promise.withResolvers<void>();
   const aborted = Promise.withResolvers<void>();

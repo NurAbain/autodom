@@ -53,6 +53,7 @@ export class VinTransport {
   readonly #limit = pLimit(10);
   readonly #active = new Set<Promise<unknown>>();
   readonly #nextRequest = new Map<KoreanVinProvider, number>();
+  readonly #requestQueues = new Map<KoreanVinProvider, Set<() => void>>();
   readonly #rateLimitedUntil = new Map<KoreanVinProvider, number>();
   #page = 0;
 
@@ -118,6 +119,50 @@ export class VinTransport {
     if (remaining > 0) throw new SourceRateLimited(Math.ceil(remaining / 1000));
   }
 
+  async #dispatch(
+    provider: KoreanVinProvider,
+    signal: AbortSignal,
+    request: () => Promise<Response>,
+  ): Promise<Response> {
+    signal.throwIfAborted();
+    let queue = this.#requestQueues.get(provider);
+    if (!queue) {
+      queue = new Set();
+      this.#requestQueues.set(provider, queue);
+    }
+    const turn = Promise.withResolvers<void>();
+    const resume = () => turn.resolve();
+    const release = () => {
+      const first = queue.values().next().value === resume;
+      queue.delete(resume);
+      if (first) queue.values().next().value?.();
+    };
+    const abort = () => {
+      turn.reject(signal.reason);
+      release();
+    };
+    queue.add(resume);
+    signal.addEventListener("abort", abort, { once: true });
+    if (queue.size === 1) resume();
+    try {
+      await turn.promise;
+      signal.throwIfAborted();
+      let wait = (this.#nextRequest.get(provider) ?? 0) - Date.now();
+      while (wait > 0) {
+        await delay(wait, undefined, { signal });
+        wait = (this.#nextRequest.get(provider) ?? 0) - Date.now();
+      }
+      signal.throwIfAborted();
+      this.#requireNotRateLimited(provider);
+      // Charge only real admissions; cancelled queue entries leave no future debt.
+      this.#nextRequest.set(provider, Date.now() + (this.#options.requestDelaySeconds ?? 2) * 1000);
+      return request();
+    } finally {
+      signal.removeEventListener("abort", abort);
+      release();
+    }
+  }
+
   #session(provider: KoreanVinProvider, dispatcher: Dispatcher, signal: AbortSignal): VinSession {
     const origin = new URL(VIN_SOURCE_URLS[provider]).origin;
     const cookies = new Map<string, SessionCookie>();
@@ -158,28 +203,21 @@ export class VinTransport {
           .sort((a, b) => b.path.length - a.path.length);
         if (matching.length)
           headers.set("Cookie", matching.map(({ name, value }) => `${name}=${value}`).join("; "));
-        const wait = Math.max(0, (this.#nextRequest.get(provider) ?? 0) - now);
-        this.#nextRequest.set(
-          provider,
-          now + wait + (this.#options.requestDelaySeconds ?? 2) * 1000,
-        );
-        if (wait) await delay(wait, undefined, { signal });
-        signal.throwIfAborted();
-        this.#requireNotRateLimited(provider);
-        let response: Response;
-        try {
-          response = await fetch(url, {
-            dispatcher,
-            method,
-            headers,
-            ...(options.form ? { body: new URLSearchParams(options.form).toString() } : {}),
-            redirect: "manual",
-            signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
-          });
-        } catch {
-          signal.throwIfAborted();
-          throw new VinRequestError(`${provider}: proxy request failed`);
-        }
+        const response = await this.#dispatch(provider, signal, async () => {
+          try {
+            return await fetch(url, {
+              dispatcher,
+              method,
+              headers,
+              ...(options.form ? { body: new URLSearchParams(options.form).toString() } : {}),
+              redirect: "manual",
+              signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+            });
+          } catch {
+            signal.throwIfAborted();
+            throw new VinRequestError(`${provider}: proxy request failed`);
+          }
+        });
         if (response.status !== 200) {
           await response.body?.cancel();
           if (response.status === 429) {

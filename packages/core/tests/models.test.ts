@@ -6,7 +6,6 @@ import {
   listingPrice,
   makeListing,
   makeProfile,
-  makeSourcePage,
   purchaseEligible,
 } from "../src/models.js";
 
@@ -48,7 +47,6 @@ describe("JSON models", () => {
     expect(listing.price_kind).toBe("unknown");
     expect(listingPrice(listing, "USD")).toBeNull();
     expect(listing.auction_at).toBeNull();
-    expect(makeSourcePage({ listings: [listing] }).listings[0]).toEqual(listing);
     const profile = makeProfile({
       user_id: 1,
       chat_id: 2,

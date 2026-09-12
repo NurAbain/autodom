@@ -9,6 +9,7 @@ import {
 } from "@autodom/core";
 import { type Cheerio, type CheerioAPI, load } from "cheerio";
 import type { AnyNode } from "domhandler";
+import { decodeHTMLStrict } from "entities";
 
 export const CATALOG_URL = "https://bid.cars/en/automobile/page/1";
 /** The shared Crawlee transport owns source pacing, including this legacy detail interval. */
@@ -204,6 +205,20 @@ function optional(value: unknown): string {
   return UNKNOWN[normalized.toLowerCase()] === true ? "" : normalized;
 }
 
+function vehicleVin(...values: unknown[]): string {
+  let vin = "";
+  for (const value of values) {
+    if (value === null || value === undefined) continue;
+    if (typeof value !== "string") throw new SourceError("Bid.Cars VIN schema changed");
+    const provided = value.trim();
+    if (!provided) continue;
+    if (!/^[A-Z0-9]{5,25}$/.test(provided) || (vin && provided !== vin))
+      throw new SourceError("Conflicting or malformed Bid.Cars VIN");
+    vin = provided;
+  }
+  return vin;
+}
+
 function amount(value: string, dom = false): number | null {
   if (typeof value !== "string") throw new SourceError("Bid.Cars amount schema changed");
   value = value.trim();
@@ -272,9 +287,20 @@ function vehicle($: CheerioAPI): Record<string, unknown> {
       vehicles.push(data as Record<string, unknown>);
     }
   });
-  if (vehicles.length !== 1)
+  if (vehicles.length > 1)
     throw new SourceError("Bid.Cars expected one structured vehicle identity");
-  return vehicles[0]!;
+  if (vehicles.length === 1) return vehicles[0]!;
+  // Some identified lots omit Vehicle JSON-LD entirely when optional vehicle data is absent.
+  const title = nodeText(one($(".lot-name .title_lot"), "displayed vehicle title"));
+  const name = one($('meta[property="og:title"]'), "vehicle title metadata").attr("content") ?? "";
+  if (!name.startsWith(`${title} |`))
+    throw new SourceError("Bid.Cars vehicle title identity mismatch");
+  return {
+    url: one($('meta[property="og:url"]'), "vehicle URL metadata").attr("content"),
+    name,
+    vehicleModelDate: /^([12][0-9]{3})\s+\S/.exec(title)?.[1],
+    image: $('meta[property="og:image"]').attr("content"),
+  };
 }
 
 function deadline($: CheerioAPI, value: string): number | null {
@@ -315,12 +341,8 @@ function mileage(value: string): string {
   throw new SourceError("Bid.Cars odometer schema changed");
 }
 
-function location($: CheerioAPI, lot: string, vin: string): string | null {
-  const description = one($('meta[name="description"]'), "location evidence").attr("content") ?? "";
-  if (
-    !new RegExp(`\\bLot:\\s*${lot}(?:[,\\s]|$)`).test(description) ||
-    !new RegExp(`\\bVIN:\\s*${vin}(?:[,\\s]|$)`).test(description)
-  ) {
+function location($: CheerioAPI, lot: string, description: string): string | null {
+  if (!new RegExp(`\\bLot:\\s*${lot}(?:[,\\s]|$)`).test(description)) {
     throw new SourceError("Bid.Cars location identity mismatch");
   }
   const match = /Location:\s*([^|]+),\s*(USA|Canada)\s*\|/.exec(description);
@@ -365,8 +387,14 @@ export function parseDetail(text: string, url: string): Listing | null {
   ) {
     throw new SourceError("Bid.Cars detail attribute schema changed");
   }
-  const vin = optional(identity.vehicleIdentificationNumber);
-  if (!/^[A-Z0-9]{5,25}$/.test(vin) || main.vin !== vin || main.lot!.replaceAll(" ", "") !== lot) {
+  const vinFields = [
+    identity.vehicleIdentificationNumber,
+    main.vin,
+    ...$(".lot-name .copy-vin")
+      .toArray()
+      .map((node) => nodeText($(node))),
+  ];
+  if (main.lot!.replaceAll(" ", "") !== lot) {
     throw new SourceError("Conflicting Bid.Cars lot or vehicle identity");
   }
   if (
@@ -378,7 +406,10 @@ export function parseDetail(text: string, url: string): Listing | null {
   if (!["0", "1"].includes(declarations.isArchived))
     throw new SourceError("Bid.Cars archive declaration schema changed");
   const archived = declarations.isArchived === "1";
-  const city = location($, lot, vin);
+  const description = one($('meta[name="description"]'), "location evidence").attr("content") ?? "";
+  const describedVin = /\bVIN:\s*(.*?)\s*Lot:/.exec(description);
+  if (!describedVin) throw new SourceError("Bid.Cars location identity mismatch");
+  const city = location($, lot, description);
   const bidding = one($('[id="bidding-info"]'), "bidding-info");
   const prices = one(bidding.find(".lot-price-info"), "lot-price-info");
   const bidNode = one(prices.find(".current_bid"), "current_bid");
@@ -454,7 +485,12 @@ export function parseDetail(text: string, url: string): Listing | null {
       .find("b")
       .toArray()
       .map((node) => amount(nodeText($(node)), true) || null);
-    if (amounts.length !== 2 || amounts[0] !== estimateMin || amounts[1] !== estimateMax) {
+    if (
+      amounts.length < 1 ||
+      amounts.length > 2 ||
+      amounts[0] !== estimateMin ||
+      amounts.at(-1) !== estimateMax
+    ) {
       throw new SourceError("Bid.Cars labeled estimate conflicts with declaration");
     }
   });
@@ -463,11 +499,14 @@ export function parseDetail(text: string, url: string): Listing | null {
   const year = identity.vehicleModelDate;
   if (typeof year !== "string" || !/^[12][0-9]{3}$/.test(year))
     throw new SourceError("Bid.Cars vehicle year schema changed");
-  const name = optional(identity.name);
-  const suffix = ` | ${vin} | ${archived ? "Bid History | " : ""}BidCars`;
-  if (!name.endsWith(suffix) || !name.startsWith(`${year} `))
+  const name = optional(
+    typeof identity.name === "string" ? decodeHTMLStrict(identity.name) : identity.name,
+  );
+  const named = /^(.*?)\s+\|\s*([^|]*?)\s*\|\s*(Bid History \| )?BidCars$/.exec(name);
+  if (!named || Boolean(named[3]) !== archived || !named[1]!.startsWith(`${year} `))
     throw new SourceError("Bid.Cars vehicle title identity mismatch");
-  const title = name.slice(0, -suffix.length);
+  const title = named[1]!;
+  const vin = vehicleVin(...vinFields, named[2], describedVin[1]);
   const photos: string[] = [];
   for (const photo of Array.isArray(identity.image) ? identity.image : [identity.image]) {
     if (
@@ -593,7 +632,7 @@ export function parseCatalog(
     if (row.attr("id") !== lot)
       throw new SourceError("Bid.Cars catalog row and link identity conflict");
     const vinNode = one(row.find("h2.vin_title"), "catalog VIN");
-    const vin = nodeText(vinNode);
+    const vin = vehicleVin(nodeText(vinNode));
     const vinLinks = vinNode
       .find("a")
       .toArray()
@@ -603,7 +642,6 @@ export function parseCatalog(
       .toArray()
       .map((node) => nodeText($(node)));
     if (
-      !/^[A-Z0-9]{5,25}$/.test(vin) ||
       vinLinks.length !== 1 ||
       vinLinks[0] !== url ||
       lotLabels.length !== 1 ||
@@ -616,9 +654,15 @@ export function parseCatalog(
       throw new SourceError("Bid.Cars catalog title schema changed");
     const found = { lot, url, title, vin };
     const previous = lots.get(lot);
-    if (previous && (previous.url !== url || previous.title !== title || previous.vin !== vin)) {
+    if (
+      previous &&
+      (previous.url !== url ||
+        previous.title !== title ||
+        (previous.vin && vin && previous.vin !== vin))
+    ) {
       throw new SourceError("Bid.Cars duplicate lot has conflicting identity");
     }
+    if (previous?.vin && !found.vin) found.vin = previous.vin;
     lots.set(lot, found);
   });
   const breadcrumbs = one($(".breadcrumbs"), "breadcrumbs");
@@ -636,7 +680,7 @@ export function parseCatalog(
     const anchor = $(element);
     const target = anchor.attr("href") ?? "";
     const label = nodeText(anchor);
-    if (target === "#" && ["...", "…"].includes(label)) return;
+    if (target === "#" && ["-", "...", "…"].includes(label)) return;
     const number = Number(publicUrl(target, CATALOG_PATH)[1]);
     if (target !== prefix + number)
       throw new SourceError("Bid.Cars pagination escapes requested scope");
@@ -672,7 +716,7 @@ export async function fetchPage({ page = 1, transport }: FetchPageOptions): Prom
         const listing = parseDetail(text, lot.url);
         if (
           listing !== null &&
-          (listing.vin !== lot.vin ||
+          ((listing.vin && lot.vin && listing.vin !== lot.vin) ||
             (listing.title !== lot.title &&
               !(lot.title.endsWith("...") && listing.title.startsWith(lot.title.slice(0, -3)))) ||
             listing.auction_lot !== lot.lot ||
@@ -680,6 +724,7 @@ export async function fetchPage({ page = 1, transport }: FetchPageOptions): Prom
         ) {
           throw new SourceError("Bid.Cars catalog and detail identity conflict");
         }
+        if (listing !== null && !listing.vin) listing.vin = lot.vin;
         return listing;
       },
       options: { source: "bid.cars", headers: { Accept: "text/html" } },
@@ -689,6 +734,7 @@ export async function fetchPage({ page = 1, transport }: FetchPageOptions): Prom
     listings: details.filter((listing): listing is Listing => listing !== null),
     page,
     pages: catalog.pages,
+    pages_exact: page >= catalog.pages,
     total: null,
     scope: `США: аукционы Copart/IAAI; каталог ${base}; экспорт не подтверждён`,
   });

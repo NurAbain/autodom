@@ -111,6 +111,8 @@ export const sourcePageSchema = z
     page: integer.default(1),
     total: optionalInteger,
     pages: integer.default(1),
+    // False denotes a lower bound from a sliding navigation window.
+    pages_exact: z.boolean().default(true),
     scope: text,
   })
   .passthrough();
