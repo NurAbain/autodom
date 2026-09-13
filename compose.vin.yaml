@@ -19,8 +19,8 @@ services:
     cpus: 0.5
     command: [serve]
     labels:
-      io.autodom.application: autodom
-      io.autodom.role: vin
+      - io.autodom.application=autodom
+      - io.autodom.role=vin
     environment:
       AUTODOM_VIN_API_HOST: "0.0.0.0"
       AUTODOM_VIN_API_PORT: "8080"

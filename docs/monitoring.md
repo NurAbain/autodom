@@ -66,9 +66,11 @@ Compose помечает только выбранные контейнеры:
 
 ```yaml
 labels:
-  io.autodom.application: autodom
-  io.autodom.role: bot # либо worker / vin
+  - io.autodom.application=autodom
+  - io.autodom.role=bot # либо worker / vin
 ```
+
+Использовать list-форму labels: установленный Coolify добавляет собственные labels через append; map-форма превращается в смешанный YAML с числовым ключом и ломает deploy (`non-string key in services.*.labels: 0`).
 
 Alloy обнаруживает только эти labels. Loki labels: `application`, `role`, `level`. Container ID, VIN, chat/user ID, URL, request body, бюджет и контакты в labels не попадают.
 

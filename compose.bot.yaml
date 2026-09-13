@@ -24,8 +24,8 @@ services:
     cpus: 1.0
     command: [serve]
     labels:
-      io.autodom.application: autodom
-      io.autodom.role: bot
+      - io.autodom.application=autodom
+      - io.autodom.role=bot
     environment:
       AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:-}
       AUTODOM_BOT_TOKEN: ${AUTODOM_BOT_TOKEN:-}
