@@ -19,13 +19,14 @@ import {
   type VinArchiveStatus,
 } from "@autodom/core/vin-archive";
 
-export const VIN_ARCHIVE_LABEL = "Архивные фото США";
-export const VIN_ARCHIVE_DISCLOSURE =
-  "Отдельный поиск: только по нажатию кнопки VIN передаётся подключённым Copart и Bid.Cars через сервис Autodom и настроенный прокси. Ищем сохранившиеся завершённые аукционы и фотографии. Copart проверяем напрямую, лоты Copart и IAAI — также через посредника Bid.Cars. Прямого запроса в IAAI нет.";
+export const VIN_ARCHIVE_LABEL = "Архивные фото США / ОАЭ";
+export const VIN_ARCHIVE_CARWAY_NOTICE =
+  "Carway — сторонний архив, не официальная история EmiratesAuction. В данных встречаются противоречия. Поиск ограничен первым найденным результатом; полнота записей и галереи не подтверждена.";
+export const VIN_ARCHIVE_DISCLOSURE = `Отдельный поиск: VIN передаётся архивным источникам только по нажатию кнопки «${VIN_ARCHIVE_LABEL}», не при обычной проверке VIN. Через сервис Autodom запрашиваем подключённые Copart и Bid.Cars (через настроенный прокси), а также Carway для ОАЭ, если он отдельно подключён (напрямую). Ищем сохранившиеся записи и фотографии. Лоты Copart и IAAI доступны также через посредника Bid.Cars; прямого запроса в IAAI нет. ${VIN_ARCHIVE_CARWAY_NOTICE}`;
 export const VIN_ARCHIVE_STATUS_TEXT: Record<VinArchiveStatus, string> = {
   available: "Найдены сохранившиеся фотографии.",
-  no_photos: "Завершённые аукционы найдены, но фотографии недоступны.",
-  not_found: "В завершённом поиске не найдены сохранившиеся завершённые аукционы по этому VIN.",
+  no_photos: "Архивные записи найдены, но фотографии недоступны.",
+  not_found: "По этому VIN архивные записи не найдены. Это не подтверждает отсутствие истории.",
   unavailable: "Поиск временно недоступен. Результат неизвестен — это не отсутствие истории.",
   disabled: "Поиск архивных фото не подключён. Запрос не отправлен.",
 };
@@ -47,22 +48,35 @@ const archiveBid = new Intl.NumberFormat("ru-RU", {
 
 export function vinArchiveLotText(lot: VinArchiveLot, provider: VinArchiveProvider): string {
   return [
-    `Данные: ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}${provider === "bidcars" ? ` (посредник, аукцион ${VIN_ARCHIVE_AUCTION_NAMES[lot.auction]})` : " (аукцион напрямую)"}.`,
-    ...lot.events.map((event) =>
-      [
-        event.status === "sold"
-          ? "SOLD (продан по данным источника)."
-          : "ENDED (торги завершены; продажа не подтверждена).",
-        `Дата аукциона: ${event.auction_date ?? vinArchiveTime(event.auction_at)}.`,
-        ...(event.auction_date !== null && event.auction_at !== null
-          ? [`Время: ${vinArchiveTime(event.auction_at)}.`]
-          : []),
-        `Финальная ставка: ${event.final_bid_usd_minor === null ? "неизвестна / скрыта" : archiveBid.format(event.final_bid_usd_minor / 100)}.`,
-      ].join(" "),
-    ),
-    "Ставка не равна цене сделки. Статус не подтверждает переход права собственности.",
+    `Данные: ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}${
+      provider === "carway"
+        ? ` (сторонний архив; аукцион по данным Carway: ${VIN_ARCHIVE_AUCTION_NAMES[lot.auction]})`
+        : provider === "bidcars"
+          ? ` (посредник, аукцион ${VIN_ARCHIVE_AUCTION_NAMES[lot.auction]})`
+          : " (аукцион напрямую)"
+    }.`,
+    ...(provider === "carway"
+      ? [
+          "Исход торгов, дата аукциона и финальная ставка не подтверждены.",
+          "Пробег не подтверждён; данные архива не заменяют проверку автомобиля.",
+        ]
+      : [
+          ...lot.events.map((event) =>
+            [
+              event.status === "sold"
+                ? "SOLD (продан по данным источника)."
+                : "ENDED (торги завершены; продажа не подтверждена).",
+              `Дата аукциона: ${event.auction_date ?? vinArchiveTime(event.auction_at)}.`,
+              ...(event.auction_date !== null && event.auction_at !== null
+                ? [`Время: ${vinArchiveTime(event.auction_at)}.`]
+                : []),
+              `Финальная ставка: ${event.final_bid_usd_minor === null ? "неизвестна / скрыта" : archiveBid.format(event.final_bid_usd_minor / 100)}.`,
+            ].join(" "),
+          ),
+          "Ставка не равна цене сделки. Статус не подтверждает переход права собственности.",
+        ]),
     ...(!lot.photos_complete
-      ? ["Фотографии получены не полностью; часть может быть недоступна."]
+      ? ["Полнота галереи не подтверждена; часть фотографий может быть недоступна."]
       : []),
     ...(!lot.photos.length ? ["Фотографии этого лота недоступны."] : []),
   ].join("\n");

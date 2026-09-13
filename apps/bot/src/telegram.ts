@@ -23,6 +23,7 @@ import { paymentOrderStatus } from "./payment-text.js";
 import type { PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
+  VIN_ARCHIVE_CARWAY_NOTICE,
   VIN_ARCHIVE_DISCLOSURE,
   VIN_ARCHIVE_LABEL,
   VIN_ARCHIVE_STATUS_TEXT,
@@ -313,6 +314,7 @@ export function createTelegramBot(
             [
               `${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}: ${VIN_ARCHIVE_STATUS_TEXT[source.status]}`,
               `Данные получены: ${vinArchiveTime(source.checked_at)}.`,
+              ...(source.provider === "carway" ? [VIN_ARCHIVE_CARWAY_NOTICE] : []),
               ...(source.partial ? ["Поиск или получение фотографий выполнены не полностью."] : []),
               `Источник: ${sourceUrl}`,
             ].join("\n"),

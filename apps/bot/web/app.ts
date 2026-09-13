@@ -28,6 +28,7 @@ import {
   confirmedEncarListings,
   encarHistorySummary,
   encarListingFacts,
+  VIN_ARCHIVE_CARWAY_NOTICE,
   VIN_ARCHIVE_DISCLOSURE,
   VIN_ARCHIVE_LABEL,
   VIN_ARCHIVE_STATUS_TEXT,
@@ -809,7 +810,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     const revision = ++archiveRevision;
     archiveButton.disabled = true;
     archiveButton.textContent = "Ищем архивные фото…";
-    archiveResults.replaceChildren(element("p", "", `Поиск сохранившихся аукционов: ${vin}`));
+    archiveResults.replaceChildren(element("p", "", `Поиск архивных записей и фото: ${vin}`));
     try {
       const result = await request<VinArchiveResult>(
         "/miniapp/api/vin/archive-photos",
@@ -841,6 +842,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             `Источник: ${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}`,
           ),
         );
+        if (source.provider === "carway")
+          section.append(element("p", "notice", VIN_ARCHIVE_CARWAY_NOTICE));
         if (source.partial)
           section.append(
             element("p", "notice", "Поиск или получение фотографий выполнены не полностью."),

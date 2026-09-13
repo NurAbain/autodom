@@ -18,8 +18,10 @@ Usage: pnpm vin [serve|health] [--help]
 
 serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters) and at least
 one explicit AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev) or
-AUTODOM_VIN_ARCHIVE_PROVIDERS (copart,bidcars). Archive photos require an explicit
-action, use existing proxies, and cover indexed completed auction lots only.
+AUTODOM_VIN_ARCHIVE_PROVIDERS (copart,bidcars,carway). Archive photos require an explicit
+action. Copart/Bid.Cars require existing proxies; Carway uses direct public HTTPS.
+Carway returns partial UAE archive cards with unconfirmed outcome, dates and bids,
+not official auction history. It needs no API key; photos are fetched only on demand.
 Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
 free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
@@ -95,7 +97,7 @@ export async function main(
     if (!delayText.trim() || !Number.isFinite(requestDelaySeconds) || requestDelaySeconds < 0)
       throw new Error("AUTODOM_CRAWL_DELAY must be a non-negative number of seconds.");
     const routes =
-      archiveProviders.length ||
+      archiveProviders.some((provider) => provider !== "carway") ||
       providers.some(
         (provider) => provider === "carhistory" || provider === "car365" || provider === "encar",
       )

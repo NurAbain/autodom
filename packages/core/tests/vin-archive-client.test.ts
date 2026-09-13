@@ -271,3 +271,109 @@ it("delivers bounded raster bytes and rejects unsafe requests, HTML, oversized b
     );
   }
 });
+
+it("accepts partial Carway cards without events while preserving US evidence and URL boundaries", async () => {
+  const vin = "WP0ZZZ99ZES180140";
+  const result: VinArchiveResult = {
+    vin,
+    checked_at: 1_789_000_000,
+    coverage: "indexed_lots_only",
+    sources: [
+      ...(["copart", "bidcars"] as const).map((provider) => ({
+        provider,
+        status: "disabled" as const,
+        source_url: provider === "copart" ? "https://www.copart.com/" : "https://bid.cars/",
+        checked_at: null,
+        partial: false,
+        lots: [],
+      })),
+      {
+        provider: "carway",
+        status: "available",
+        source_url: "https://carway.pro/",
+        checked_at: 1_789_000_000,
+        partial: true,
+        lots: [
+          {
+            auction: "copart_uae",
+            lot_id: "52984784",
+            source_url: `https://carway.pro/search-vin?vin_number=${vin}`,
+            events: [],
+            photos: ["https://carway.pro/car_image/52984784_Image_1.jpg"],
+            photos_complete: false,
+          },
+        ],
+      },
+    ],
+  };
+  const source = result.sources[2]!;
+  const lot = source.lots[0]!;
+  let body: unknown = result;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      /* Consume the bounded request. */
+    }
+    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing fixture address");
+    const lookup = createVinArchiveApiLookup({
+      AUTODOM_VIN_API_URL: `http://127.0.0.1:${address.port}`,
+      AUTODOM_VIN_API_TOKEN: "carway-client-test-token-with-32-characters",
+    })!;
+    await expect(lookup(vin)).resolves.toMatchObject({
+      sources: [
+        { provider: "copart" },
+        { provider: "bidcars" },
+        {
+          provider: "carway",
+          partial: true,
+          lots: [{ auction: "copart_uae", events: [], photos: lot.photos, photos_complete: false }],
+        },
+      ],
+    });
+    for (const invalidLot of [
+      { ...lot, source_url: lot.source_url.replace(vin, "WP0ZZZ99ZES180141") },
+      { ...lot, auction: "copart" },
+      { ...lot, photos: [lot.photos[0]!.replace("52984784", "52984785")] },
+      { ...lot, photos: ["https://carway.pro.attacker.invalid/car_image/52984784_Image_1.jpg"] },
+      { ...lot, photos_complete: true },
+      {
+        ...lot,
+        events: [{ status: "sold", auction_at: null, auction_date: null, final_bid_usd_minor: 0 }],
+      },
+    ]) {
+      body = { ...result, sources: [{ ...source, lots: [invalidLot] }] };
+      await expect(lookup(vin)).rejects.toThrow();
+    }
+    body = {
+      ...result,
+      sources: [
+        {
+          ...source,
+          provider: "copart",
+          source_url: "https://www.copart.com/",
+          status: "no_photos",
+          partial: false,
+          lots: [
+            {
+              ...lot,
+              auction: "copart",
+              source_url: "https://www.copart.com/lot/52984784",
+              photos: [],
+              photos_complete: true,
+            },
+          ],
+        },
+      ],
+    };
+    await expect(lookup(vin)).rejects.toThrow();
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});

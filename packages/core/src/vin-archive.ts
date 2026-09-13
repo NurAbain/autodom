@@ -1,27 +1,38 @@
 import { normalizeVin } from "./vin.js";
 
-export const VIN_ARCHIVE_PROVIDERS = ["copart", "bidcars"] as const;
+export const VIN_ARCHIVE_PROVIDERS = ["copart", "bidcars", "carway"] as const;
 export type VinArchiveProvider = (typeof VIN_ARCHIVE_PROVIDERS)[number];
 export type VinArchiveStatus = "available" | "no_photos" | "not_found" | "unavailable" | "disabled";
-export type VinArchiveAuction = "copart" | "iaai";
+export type VinArchiveAuction = "copart" | "iaai" | "emiratesauction" | "copart_uae";
 
 export const VIN_ARCHIVE_PROVIDER_NAMES: Readonly<Record<VinArchiveProvider, string>> = {
   copart: "Copart",
   bidcars: "Bid.Cars",
+  carway: "Carway",
 };
 
 export const VIN_ARCHIVE_AUCTION_NAMES: Readonly<Record<VinArchiveAuction, string>> = {
   copart: "Copart",
   iaai: "IAAI",
+  emiratesauction: "Emirates Auction (ОАЭ)",
+  copart_uae: "Copart UAE",
 };
 
 export const VIN_ARCHIVE_SOURCE_URLS: Readonly<Record<VinArchiveProvider, string>> = {
   copart: "https://www.copart.com/",
   bidcars: "https://bid.cars/",
+  carway: "https://carway.pro/",
 };
 
 export const VIN_ARCHIVE_COVERAGE_NOTICE =
   "Поиск охватывает только лоты, которые источник ещё находит по VIN. Старые фотографии могут сохраняться вне этого поиска. Пустой результат не означает отсутствия аукционов, ДТП или повреждений.";
+
+export const CARWAY_ARCHIVE_MAX_PHOTOS = 64;
+
+export function carwayArchiveSearchUrl(value: string): string | null {
+  const vin = normalizeVin(value);
+  return vin ? `https://carway.pro/search-vin?vin_number=${vin}` : null;
+}
 
 export interface VinArchiveEvent {
   /** Ended auctions are not automatically sold vehicles or completed transactions. */
@@ -39,7 +50,7 @@ export interface VinArchiveLot {
   /** Original auction lot/stock ID, without the intermediary's auction prefix. */
   lot_id: string;
   source_url: string;
-  /** Different auctions of the same lot remain distinct history entries. */
+  /** Different auctions remain distinct; Carway's unverified outcome/dates have no events. */
   events: readonly VinArchiveEvent[];
   photos: readonly string[];
   /** False when the manifest or any of its photographs could not be verified. */
@@ -95,15 +106,18 @@ export function parseVinArchivePhotoRequest(value: unknown): VinArchivePhotoRequ
   if (
     Object.keys(fields).length !== 5 ||
     !vin ||
-    (provider !== "copart" && provider !== "bidcars") ||
-    (auction !== "copart" && auction !== "iaai") ||
+    !VIN_ARCHIVE_PROVIDERS.includes(provider as VinArchiveProvider) ||
+    (auction !== "copart" &&
+      auction !== "iaai" &&
+      auction !== "emiratesauction" &&
+      auction !== "copart_uae") ||
     typeof lot_id !== "string" ||
     typeof photo_url !== "string" ||
     photo_url.length > 768 ||
-    !isVinArchivePhotoUrl(photo_url, provider, auction, lot_id, vin)
+    !isVinArchivePhotoUrl(photo_url, provider as VinArchiveProvider, auction, lot_id, vin)
   )
     throw new RangeError("Invalid archive photo request");
-  return { vin, provider, auction, lot_id, photo_url };
+  return { vin, provider: provider as VinArchiveProvider, auction, lot_id, photo_url };
 }
 
 export function configuredVinArchiveProviders(
@@ -118,7 +132,7 @@ export function configuredVinArchiveProviders(
     providers.some((value) => !VIN_ARCHIVE_PROVIDERS.includes(value as VinArchiveProvider))
   )
     throw new Error(
-      "AUTODOM_VIN_ARCHIVE_PROVIDERS must contain unique copart,bidcars provider IDs",
+      `AUTODOM_VIN_ARCHIVE_PROVIDERS must contain unique ${VIN_ARCHIVE_PROVIDERS.join(",")} provider IDs`,
     );
   return providers as VinArchiveProvider[];
 }
@@ -167,6 +181,12 @@ export function isVinArchiveLotUrl(
   if (!/^[1-9]\d{0,11}$/u.test(lotId) || normalizeVin(vin) !== vin) return false;
   if (provider === "copart")
     return auction === "copart" && value === `https://www.copart.com/lot/${lotId}`;
+  if (provider === "carway")
+    return (
+      (auction === "emiratesauction" || auction === "copart_uae") &&
+      value === carwayArchiveSearchUrl(vin)
+    );
+  if (provider !== "bidcars" || (auction !== "copart" && auction !== "iaai")) return false;
   try {
     const url = new URL(value);
     const prefix = auction === "copart" ? "1" : "0";
@@ -185,6 +205,11 @@ export function isVinArchiveLotUrl(
   }
 }
 
+const CARWAY_PHOTO_URL =
+  /^https:\/\/(?:www\.)?carway\.pro\/car_image\/([1-9]\d{0,11})_Image_[1-9]\d{0,2}\.jpg$/u;
+const EMIRATES_ARCHIVE_PHOTO_URL =
+  /^https:\/\/cdn\.emiratesauction\.com\/media\/[a-z0-9]{16,64}\/t_,w_800,h_600\/images[1-9]\d{0,2}\.jpg\?v=2$/u;
+
 export function isVinArchivePhotoUrl(
   value: string,
   provider: VinArchiveProvider,
@@ -194,6 +219,14 @@ export function isVinArchivePhotoUrl(
 ): boolean {
   if (provider === "copart") return auction === "copart" && isCopartPhotoUrl(value);
   if (!/^[1-9]\d{0,11}$/u.test(lotId) || normalizeVin(vin) !== vin) return false;
+  if (provider === "carway") {
+    if (auction !== "emiratesauction" && auction !== "copart_uae") return false;
+    return (
+      CARWAY_PHOTO_URL.exec(value)?.[1] === lotId ||
+      (auction === "emiratesauction" && EMIRATES_ARCHIVE_PHOTO_URL.test(value))
+    );
+  }
+  if (provider !== "bidcars" || (auction !== "copart" && auction !== "iaai")) return false;
   try {
     const url = new URL(value);
     const prefix = auction === "copart" ? "1" : "0";

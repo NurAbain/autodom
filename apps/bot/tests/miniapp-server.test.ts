@@ -421,12 +421,9 @@ it("reports an unconfigured VIN service without fabricating observations", async
       },
     );
     expect(archiveResponse.status).toBe(200);
-    expect(await archiveResponse.json()).toMatchObject({
-      sources: [
-        { provider: "copart", status: "disabled", checked_at: null, lots: [] },
-        { provider: "bidcars", status: "disabled", checked_at: null, lots: [] },
-      ],
-    });
+    const archive = (await archiveResponse.json()) as VinArchiveResult;
+    for (const source of archive.sources)
+      expect(source).toMatchObject({ status: "disabled", checked_at: null, lots: [] });
     const photoResponse = await fetch(
       `http://127.0.0.1:${address.port}/miniapp/api/vin/archive-photo`,
       {

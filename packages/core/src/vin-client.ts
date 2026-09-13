@@ -12,10 +12,12 @@ import {
   type VinLookup,
 } from "./vin.js";
 import {
+  CARWAY_ARCHIVE_MAX_PHOTOS,
   isVinArchiveLotUrl,
   isVinArchivePhotoUrl,
   parseVinArchivePhotoRequest,
   VIN_ARCHIVE_PHOTO_MAX_BYTES,
+  VIN_ARCHIVE_PROVIDERS,
   VIN_ARCHIVE_SOURCE_URLS,
   type VinArchiveLookup,
   type VinArchivePhoto,
@@ -258,10 +260,10 @@ const archiveEventSchema = z
 
 const archiveLotSchema = z
   .object({
-    auction: z.enum(["copart", "iaai"]),
+    auction: z.enum(["copart", "iaai", "emiratesauction", "copart_uae"]),
     lot_id: z.string().regex(/^[1-9]\d{0,11}$/u),
     source_url: z.string(),
-    events: z.array(archiveEventSchema).min(1).max(200),
+    events: z.array(archiveEventSchema).max(200),
     photos: z.array(z.string().max(2048)).max(200),
     photos_complete: z.boolean(),
   })
@@ -275,7 +277,7 @@ const archiveResultSchema = z
       .array(
         z
           .object({
-            provider: z.enum(["copart", "bidcars"]),
+            provider: z.enum(VIN_ARCHIVE_PROVIDERS),
             status: z.enum(["available", "no_photos", "not_found", "unavailable", "disabled"]),
             source_url: z.string(),
             checked_at: instant.int().nullable(),
@@ -285,7 +287,7 @@ const archiveResultSchema = z
           .strict(),
       )
       .min(1)
-      .max(2),
+      .max(VIN_ARCHIVE_PROVIDERS.length),
   })
   .strict();
 
@@ -323,6 +325,15 @@ function parseVinArchiveResult(value: unknown, vin: string): VinArchiveResult {
         (!lot.photos_complete && !source.partial)
       )
         throw new Error("Invalid archive lot provenance or state");
+      if (
+        source.provider === "carway"
+          ? lot.events.length !== 0 ||
+            lot.photos.length > CARWAY_ARCHIVE_MAX_PHOTOS ||
+            lot.photos_complete ||
+            !source.partial
+          : lot.events.length === 0
+      )
+        throw new Error("Invalid archive evidence or completeness");
       for (const event of lot.events) {
         const date = event.auction_date;
         const parsedDate = date === null ? null : new Date(`${date}T00:00:00Z`);

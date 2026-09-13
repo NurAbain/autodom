@@ -16,6 +16,7 @@ import pLimit from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { BidCarsArchive } from "./bidcars-archive.js";
 import type { BrowserClient } from "./bidcars-browser.js";
+import { CarwayArchive } from "./carway-archive.js";
 import {
   abortable,
   readBody,
@@ -109,6 +110,7 @@ export class VinArchiveService {
   readonly #options: VinArchiveServiceOptions;
   readonly #dispatcher: Dispatcher | undefined;
   readonly #bidcars: BidCarsArchive | undefined;
+  readonly #carway: CarwayArchive | undefined;
   readonly #abort = new AbortController();
   readonly #active = new Set<Promise<unknown>>();
   readonly #metadataQueue = new Set<() => void>();
@@ -126,7 +128,7 @@ export class VinArchiveService {
       options.providers.some((provider) => !VIN_ARCHIVE_PROVIDERS.includes(provider))
     )
       throw new SourceError("Configure unique supported VIN archive providers");
-    if (!options.routes.length)
+    if (options.providers.some((provider) => provider !== "carway") && !options.routes.length)
       throw new SourceError(
         "VIN archive checks require configured proxies; direct access is disabled",
       );
@@ -141,16 +143,19 @@ export class VinArchiveService {
     const preferred = options.routes.findIndex((route) => route.tier === "residential");
     const index = preferred < 0 ? 0 : preferred;
     const route = options.routes[index];
-    if (!route) throw new SourceError("VIN archive proxy route is missing");
     try {
-      if (options.providers.includes("copart"))
+      if (options.providers.includes("copart")) {
+        if (!route) throw new SourceError("VIN archive proxy route is missing");
         this.#dispatcher =
           options.dispatcherFactory?.(route, 1, index) ??
           new ProxyAgent({ uri: route.urlFor(1), token: route.authorization });
+      }
       if (options.providers.includes("bidcars")) this.#bidcars = new BidCarsArchive(options);
     } catch {
       throw new SourceError("VIN archive proxy initialization failed");
     }
+    if (options.providers.includes("carway"))
+      this.#carway = new CarwayArchive(options.requestDelaySeconds);
   }
 
   readonly check: VinArchiveLookup = async (value, signal) => {
@@ -168,6 +173,10 @@ export class VinArchiveService {
       this.#options.providers.map(async (provider): Promise<VinArchiveObservation> => {
         try {
           if (provider === "copart") return await this.#lookup(vin, combined);
+          if (provider === "carway") {
+            if (!this.#carway) throw new SourceError("Carway archive requests are disabled");
+            return await this.#carway.check(vin, combined);
+          }
           if (!this.#bidcars) throw new SourceError("Bid.Cars archive requests are disabled");
           return await this.#bidcars.check(vin, cancellation, budget);
         } catch {
@@ -251,14 +260,16 @@ export class VinArchiveService {
     const task =
       request.provider === "bidcars"
         ? this.#bidcars!.getPhoto(request, combined, () => this.#requirePhotoGrant(request))
-        : this.#images(async () => {
-            combined.throwIfAborted();
-            this.#requirePhotoGrant(request);
-            return readImage(
-              await this.#response(request.photo_url, combined, undefined, false),
-              combined,
-            );
-          });
+        : request.provider === "carway"
+          ? this.#carway!.getPhoto(request, combined, () => this.#requirePhotoGrant(request))
+          : this.#images(async () => {
+              combined.throwIfAborted();
+              this.#requirePhotoGrant(request);
+              return readImage(
+                await this.#response(request.photo_url, combined, undefined, false),
+                combined,
+              );
+            });
     this.#active.add(task);
     void task.then(
       () => this.#active.delete(task),
