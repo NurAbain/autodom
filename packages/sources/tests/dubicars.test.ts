@@ -87,6 +87,21 @@ describe("DubiCars Dubai native asking prices", () => {
     expect(result.listings[0]!.condition).toContain("2026-09-13 18:18:00");
   });
 
+  it("preserves uppercase image extensions without allowing another host", () => {
+    const photo =
+      "https://www.dubicars.com/images/3a2219/650x380/private-sellers/75421c1d-de68-4158-b3db-705bced98fe1.JPG";
+    const withPhoto = (url: string) =>
+      document(($) => {
+        const item = vehicle($);
+        item.car.image = url;
+        item.save();
+      });
+    expect(parsePage(withPhoto(photo)).listings[0]!.photo_url).toBe(photo);
+    expect(() =>
+      parsePage(withPhoto(photo.replace("www.dubicars.com", "www.dubicars.com.evil.invalid"))),
+    ).toThrow(SourceError);
+  });
+
   it("admits published UAE asking offers into the free car-only buyer search", () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "dubicars.com");
     const buyer = makeProfile({

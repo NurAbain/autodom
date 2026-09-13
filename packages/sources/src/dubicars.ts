@@ -103,7 +103,7 @@ function photo(value: unknown): string | null {
   if (value == null || value === "") return null;
   const url = text(value);
   requireValue(
-    /^https:\/\/www\.dubicars\.com\/images\/[a-f0-9]+\/[1-9][0-9]*x[1-9][0-9]*\/[a-z0-9-]+\/[a-zA-Z0-9_-]+\.(?:jpe?g|png|webp)$/.test(
+    /^https:\/\/www\.dubicars\.com\/images\/[a-f0-9]+\/[1-9][0-9]*x[1-9][0-9]*\/[a-z0-9-]+\/[a-zA-Z0-9_-]+\.(?:jpe?g|png|webp)$/i.test(
       url,
     ),
     "unverified photo URL",

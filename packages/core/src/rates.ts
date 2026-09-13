@@ -21,6 +21,8 @@ const ARCHIVES: Readonly<Record<string, readonly [string, string]>> = {
 };
 const LAST_REFRESH = "nbkr:last_refresh";
 const NEXT_REFRESH = "nbkr:next_refresh";
+const REFRESH_CURRENCIES = "nbkr:refresh_currencies";
+const CURRENCY_SIGNATURE = Object.keys(FEEDS).join(",");
 const ExactDecimal = Decimal.clone({ precision: 50, rounding: Decimal.ROUND_HALF_UP });
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -255,6 +257,8 @@ export class RateBook {
       scheduled <= this.lastRefresh + 3600
         ? scheduled
         : this.lastRefresh + 3600;
+    // An older currency set's cooldown does not cover newly supported currencies.
+    if ((await this.store.getMeta(REFRESH_CURRENCIES)) !== CURRENCY_SIGNATURE) this.nextRefresh = 0;
   }
 
   async refresh(): Promise<void> {
@@ -268,6 +272,9 @@ export class RateBook {
     await this.store.setMeta(LAST_REFRESH, String(now));
     this.nextRefresh = now + 3600;
     await this.store.setMeta(NEXT_REFRESH, String(this.nextRefresh));
+    // Persist the attempted set before I/O, including failures/rate limits, so
+    // reopening cannot turn a missing quote into a request on every page.
+    await this.store.setMeta(REFRESH_CURRENCIES, CURRENCY_SIGNATURE);
     let nextRefresh = this.nextRefresh;
     const documents = new Map<string, string>();
     for (const [currency, feed] of Object.entries(FEEDS)) {

@@ -207,6 +207,44 @@ it("hydrates exact persisted quotes before honoring the hourly throttle on reope
   expect(reloaded.convert(car("AED", 100000))).toEqual(book.convert(car("AED", 100000)));
 });
 
+it("fetches newly supported currencies despite a recent pre-upgrade refresh", async () => {
+  const store = metadata();
+  await store.setMeta("nbkr:last_refresh", String(instant("2026-09-10T11:50:00")));
+  await store.setMeta("nbkr:next_refresh", String(instant("2026-09-10T12:50:00")));
+  await store.setMeta(
+    "nbkr:USD",
+    JSON.stringify({ date: "2026-09-10", nominal: "1", value: "87.45", valid_days: 4 }),
+  );
+  await store.setMeta(
+    "nbkr:KRW",
+    JSON.stringify({ date: "2026-09-05", nominal: "1", value: "0.0647", valid_days: 7 }),
+  );
+  const book = new RateBook(
+    store,
+    transport((url) =>
+      url.includes("daily")
+        ? xml("USD", "87,45")
+        : xml("KRW", "0,0647", "05.09.2026").replace(
+            "</CurrencyRates>",
+            `${entry("AED", "23,8108")}</CurrencyRates>`,
+          ),
+    ),
+  );
+  await book.refresh();
+  expect(book.convert(car("AED", 10000))).toMatchObject({
+    price_kgs_minor: 238108,
+    price_usd_minor: 2723,
+  });
+  const reopened = new RateBook(
+    store,
+    transport(() => {
+      throw new Error("A completed refresh must still throttle across restart");
+    }),
+  );
+  await reopened.refresh();
+  expect(reopened.convert(car("AED", 10000))).toEqual(book.convert(car("AED", 10000)));
+});
+
 it("retains weekly cache on feed failure while committing a new daily quote", async () => {
   const store = metadata();
   const book = new RateBook(
