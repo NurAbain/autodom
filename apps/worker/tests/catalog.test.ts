@@ -30,7 +30,7 @@ it("exposes planning candidates offline without granting collection or listing a
   expect(await main(["sources"])).toBe(0);
   expect(output).not.toContain("private-token-must-not-be-used");
   const report = JSON.parse(output);
-  const candidate = report.sources.find((source: { id: string }) => source.id === "lalafo.kg");
+  const candidate = report.sources.find((source: { id: string }) => source.id === "kolesa.kz");
   expect(candidate).toMatchObject({ adapter: "not_implemented", enabled: false });
   expect(
     report.coverage.find((group: { group: string }) => group.group === "neighboring"),
@@ -38,12 +38,12 @@ it("exposes planning candidates offline without granting collection or listing a
     enabled_sources: [],
   });
   expect(() => approvedSources({ AUTODOM_APPROVED_SOURCES: candidate.id })).toThrow();
-  expect(listingUrlAllowed(candidate.id, "https://lalafo.kg/kyrgyzstan/cars")).toBe(false);
+  expect(listingUrlAllowed(candidate.id, "https://kolesa.kz/cars")).toBe(false);
   expect(enabledSources().map((source) => source.id)).toEqual(["mashina.kg"]);
 
   const statuses = await sourceStatus({
     async sourceStats() {
-      return { "lalafo.kg": { listings: 12, last_seen: 2_000_000_000 } };
+      return { "kolesa.kz": { listings: 12, last_seen: 2_000_000_000 } };
     },
     async getMeta(_key, fallback = null) {
       return fallback;

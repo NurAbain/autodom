@@ -58,7 +58,8 @@ export class VinTransport {
   #page = 0;
 
   constructor(options: VinTransportOptions) {
-    if (!options.routes.length)
+    const routes = options.routes.filter((route) => route.tier !== "lalafo");
+    if (!routes.length)
       throw new SourceError("VIN checks require configured proxies; direct access is disabled");
     if (
       !Number.isFinite(options.requestDelaySeconds ?? 2) ||
@@ -67,7 +68,7 @@ export class VinTransport {
       throw new SourceError("VIN request delay must be non-negative");
     if (!Number.isSafeInteger(options.timeoutMs ?? 40_000) || (options.timeoutMs ?? 40_000) < 1)
       throw new SourceError("VIN workflow timeout must be a positive integer");
-    this.#options = options;
+    this.#options = { ...options, routes };
   }
 
   async run<T>(

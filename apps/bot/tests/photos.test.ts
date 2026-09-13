@@ -77,6 +77,24 @@ describe("source gallery safety", () => {
       listingPhotoUrls(makeListing({ ...identity, source: "__proto__", photo_urls: [photo] })),
     ).toEqual([]);
   });
+
+  it("accepts only the verified Lalafo CDN, never sibling hosts or cross-source photos", () => {
+    const verified = "https://img5.lalafo.com/i/posters/original/one.jpg";
+    const listing = makeListing({
+      ...identity,
+      source: "lalafo.kg",
+      photo_url: verified,
+      photo_urls: [
+        "https://img4.lalafo.com/i/posters/one.jpg",
+        "https://cdn.img5.lalafo.com/i/posters/one.jpg",
+        "https://img5.lalafo.com.evil.example/i/posters/one.jpg",
+        "http://img5.lalafo.com/i/posters/one.jpg",
+        photo,
+      ],
+    });
+    expect(listingPhotoUrls(listing)).toEqual([verified]);
+    expect(listingPhotoUrls({ ...listing, source: "mashina.kg", photo_urls: [] })).toEqual([]);
+  });
 });
 
 describe("Telegram listing delivery", () => {

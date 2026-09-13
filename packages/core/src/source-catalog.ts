@@ -212,10 +212,10 @@ export const SOURCES: readonly SourceSpec[] = [
     listing_type: "dealer_inventory",
     adapter: "implemented",
     fields: {
-      available: [...VEHICLE_FIELDS, "vin_based_identity", "advertised_accident_history"],
+      available: [...VEHICLE_FIELDS, "vin", "vin_based_identity", "advertised_accident_history"],
       requested: [],
       notes:
-        "VIN проверяется для идентификатора, но не сохраняется отдельным полем vin. Цена предложения дилера, не итог покупки. AUTODOM_TRUECAR_SEARCH_URL: исходно Toyota Camry, ZIP 10017, 75 миль, не вся страна. Неизвестная история ДТП не равна отсутствию ДТП.",
+        "Проверенный VIN сохраняется в общей модели. Цена предложения дилера, не итог покупки. AUTODOM_TRUECAR_SEARCH_URL по умолчанию ограничен Toyota Camry и Нью-Йорком; фактически применённые фильтры и радиус сохраняются в source scope, не вся страна. Неизвестная история ДТП не равна отсутствию ДТП.",
     },
     access: {
       method: "public_pages",
@@ -329,34 +329,40 @@ export const SOURCES: readonly SourceSpec[] = [
     market: "KG",
     group: "local",
     hosts: ["lalafo.kg"],
-    currencies: [],
+    currencies: ["USD", "KGS"],
     priority: "P0",
     listing_type: "classifieds",
-    adapter: "not_implemented",
+    adapter: "implemented",
     fields: {
-      available: [],
-      requested: VEHICLE_FIELDS,
+      available: [...VEHICLE_FIELDS, "make", "model", "published_at"],
+      requested: ["vin", "confirmed_stock", "vehicle_history"],
       notes:
-        "Плановая валюта KGS, возможный USD не проверен. Схема, валюты/единицы выгрузки и автомобильный охват в Autodom не подтверждены.",
+        "Публичная лента категории 1502 «Продажа авто»; марки сверяются с официальной страницей. Исходная USD/KGS, фото, город и доступные характеристики; поля из заголовка не заменяют VIN-проверку. «Опубликовано» не подтверждает физическое наличие, неизвестные пробег/характеристики остаются неизвестными.",
     },
     access: {
-      method: "partner_feed",
-      technical_status: "unverified",
+      method: "public_api",
+      technical_status: "previously_verified",
       permission_status: "not_documented",
       approval_owner: APPROVAL_OWNER,
       terms_url: "https://lalafo.kg/page/user-agreement",
       restrictions: [
-        "Запросить разрешённую выгрузку или согласование публичных страниц; наличие внутренних API не означает разрешения.",
+        "Только отдельный настроенный Dedicated ISP маршрут с собственной Cloudflare-сессией; без прямого fallback и без cookies других площадок.",
+        "Владелец разрешил подключение 13.09.2026; включение через AUTODOM_APPROVED_SOURCES не является лицензией площадки.",
       ],
       blockers: [
-        NO_ADAPTER,
         NO_AGREEMENT,
-        "Юридические страницы и контакты вернули HTTP 403; получить полные условия, согласованный канал и квоты без обхода ограничения.",
+        "Права повторного показа, квоты и актуальные условия площадки не подтверждены; партнёрская выгрузка не подключена.",
       ],
     },
     cost: UNKNOWN_COST,
-    refresh: UNSCHEDULED,
+    refresh: RUNTIME_REFRESH,
     evidence: [
+      {
+        url: "https://lalafo.kg/kyrgyzstan/avtomobili-s-probegom",
+        checked_on: "2026-09-13",
+        finding:
+          "Официальный bootstrap: category_id=1502 «Продажа авто», дочерние категории марок. Публичный feed/search вернул USD/KGS, фото и _meta пагинацию; category1501 включает лишние виды транспорта и не используется.",
+      },
       {
         url: "https://lalafo.kg/page/user-agreement",
         checked_on: "2026-09-11",
@@ -663,8 +669,8 @@ export const COVERAGE: readonly { group: SourceGroup; name: string; gaps: readon
     group: "local",
     name: "Местные автомобильные площадки",
     gaps: [
-      "Подключена только Mashina.kg; другие местные площадки не обеспечивают полный охват.",
-      "Технический запуск Mashina.kg не подтверждает договор на повторный показ.",
+      "Mashina.kg и Lalafo имеют адаптеры; включаются отдельно, полный охват местного рынка не гарантируется.",
+      "Техническое подключение не подтверждает договор на повторный показ; публикация Lalafo не доказывает физическое наличие автомобиля.",
     ],
   },
   {
@@ -721,6 +727,7 @@ export const VEHICLE_HISTORY_COVERAGE: readonly {
     markets: ["KG"],
     listing_sources: [
       { source_id: "mashina.kg", claims: ["Заявленные продавцом характеристики и пробег"] },
+      { source_id: "lalafo.kg", claims: ["Заявленные продавцом характеристики и пробег; публикация не подтверждает наличие"] },
     ],
     unavailable: [
       "Официальный VIN-отчёт",

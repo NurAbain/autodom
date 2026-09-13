@@ -17,17 +17,19 @@ import type { ImpitResponse } from "impit";
 import pLimit, { type LimitFunction } from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { DETAIL_DELAY_SECONDS } from "./bidcars.js";
-import { BidCarsBrowser, type BrowserClient, REFRESH_COOLDOWN_MS } from "./bidcars-browser.js";
+import { type BrowserClient, CloudflareBrowser, REFRESH_COOLDOWN_MS } from "./cloudflare-browser.js";
 import { RiskBypass, RiskBypassError } from "./riskbypass.js";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const ORIGINS: Readonly<Record<string, string>> = {
   "mashina.kg": "https://mashina.kg",
+  "lalafo.kg": "https://lalafo.kg",
   "encar.com": "https://api.encar.com",
   "truecar.com": "https://www.truecar.com",
   "bid.cars": "https://bid.cars",
   "nbkr.kg": "https://www.nbkr.kg",
 };
+const LALAFO_CLEARANCE_URL = "https://lalafo.kg/kyrgyzstan/avtomobili-s-probegom";
 
 export interface ProxyTransportOptions {
   routes: readonly ProxyRoute[];
@@ -120,10 +122,11 @@ async function readBody(response: Response | ImpitResponse): Promise<string> {
 export class ProxyTransport implements DocumentTransport {
   readonly #options: ProxyTransportOptions;
   readonly #dispatchers = new Map<string, Dispatcher>();
-  readonly #browserClients = new Map<number, Map<number, BrowserClient>>();
-  readonly #browserNextPage = new Map<number, number>();
-  readonly #browserUnavailable = new Map<number, Map<number, number>>();
-  #preferredBrowserRoute = 0;
+  readonly #routes: Readonly<Record<string, readonly ProxyRoute[]>>;
+  readonly #browserClients = new Map<string, Map<number, BrowserClient>>();
+  readonly #browserNextPage = new Map<string, number>();
+  readonly #browserUnavailable = new Map<string, Map<number, number>>();
+  readonly #preferredBrowserRoute = new Map<string, number>();
   readonly #nextRequest = new Map<string, number>();
   readonly #abort = new AbortController();
   readonly #limit: LimitFunction;
@@ -146,6 +149,14 @@ export class ProxyTransport implements DocumentTransport {
       throw new SourceError("Invalid request delay");
     }
     this.#options = options;
+    const sharedRoutes = options.routes.filter((route) => route.tier !== "lalafo");
+    const lalafoRoutes = options.routes.filter((route) => route.tier === "lalafo");
+    this.#routes = Object.fromEntries(
+      Object.keys(ORIGINS).map((source) => [
+        source,
+        source === "lalafo.kg" ? lalafoRoutes : sharedRoutes,
+      ]),
+    );
     this.#limit = pLimit(options.concurrency ?? 2);
   }
 
@@ -156,6 +167,7 @@ export class ProxyTransport implements DocumentTransport {
     this.#browserClients.clear();
     this.#browserNextPage.clear();
     this.#browserUnavailable.clear();
+    this.#preferredBrowserRoute.clear();
   }
 
   private dispatcher(route: ProxyRoute, page: number, index: number): Dispatcher {
@@ -183,11 +195,12 @@ export class ProxyTransport implements DocumentTransport {
     return this.#riskBypass;
   }
 
-  private browserClient(route: ProxyRoute, page: number, index: number): BrowserClient {
-    let clients = this.#browserClients.get(index);
+  private browserClient(route: ProxyRoute, page: number, index: number, source: string): BrowserClient {
+    const key = `${source}:${index}`;
+    let clients = this.#browserClients.get(key);
     if (!clients) {
       clients = new Map();
-      this.#browserClients.set(index, clients);
+      this.#browserClients.set(key, clients);
     }
     const cached = clients.get(page);
     if (cached) {
@@ -197,7 +210,7 @@ export class ProxyTransport implements DocumentTransport {
     }
     const client =
       this.#options.browserClientFactory?.(route, page, index) ??
-      new BidCarsBrowser(route, page, {
+      new CloudflareBrowser(route, page, {
         solve: (url, proxy, signal) => this.solver(route).solve(url, proxy, signal),
       });
     clients.set(page, client);
@@ -221,6 +234,10 @@ export class ProxyTransport implements DocumentTransport {
   async fetchDocuments<T>(requests: readonly DocumentRequest<T>[]): Promise<T[]> {
     if (!requests.length) return [];
     const urls = requests.map((request) => requestUrl(request.url, request.options));
+    for (const { options } of requests) {
+      if (!this.#routes[options.source]?.length)
+        throw new SourceError("Source requires its configured proxy route; direct access is disabled");
+    }
     const name = `autodom-${randomUUID()}`;
     const config = new Configuration({
       purgeOnStart: false,
@@ -294,14 +311,14 @@ export class ProxyTransport implements DocumentTransport {
     }
   }
 
-  private browserPage(route: ProxyRoute, index: number): number | undefined {
+  private browserPage(route: ProxyRoute, key: string): number | undefined {
     const count = Math.max(1, route.port_count);
-    const unavailable = this.#browserUnavailable.get(index);
+    const unavailable = this.#browserUnavailable.get(key);
     const now = Date.now();
-    let page = this.#browserNextPage.get(index) ?? 1;
+    let page = this.#browserNextPage.get(key) ?? 1;
     for (let checked = 0; checked < count; checked++) {
       const next = (page % count) + 1;
-      this.#browserNextPage.set(index, next);
+      this.#browserNextPage.set(key, next);
       if ((unavailable?.get(page) ?? 0) <= now) {
         unavailable?.delete(page);
         return page;
@@ -321,9 +338,11 @@ export class ProxyTransport implements DocumentTransport {
     if (this.#options.signal) signals.push(this.#options.signal);
     if (options.signal) signals.push(options.signal);
     const signal = AbortSignal.any(signals);
-    const routes = this.#options.routes;
-    const browserRequest = options.source === "bid.cars";
-    const preferred = browserRequest ? this.#preferredBrowserRoute : 0;
+    const routes = this.#routes[options.source];
+    if (!routes?.length)
+      throw new SourceError("Source requires its configured proxy route; direct access is disabled");
+    const browserRequest = options.source === "bid.cars" || options.source === "lalafo.kg";
+    const preferred = browserRequest ? (this.#preferredBrowserRoute.get(options.source) ?? 0) : 0;
     let alternatePorts: Set<number> | undefined;
     // At most one alternate port per tier, only after an unresolved managed challenge.
     for (let offset = 0; offset < routes.length * (browserRequest ? 2 : 1); offset++) {
@@ -331,15 +350,18 @@ export class ProxyTransport implements DocumentTransport {
       if (offset >= routes.length && !alternatePorts?.has(index)) continue;
       const route = routes[index];
       if (!route) throw new SourceError("Configured proxy route is missing");
-      const page = browserRequest ? this.browserPage(route, index) : (options.page ?? 1);
+      const key = `${options.source}:${index}`;
+      const page = browserRequest ? this.browserPage(route, key) : (options.page ?? 1);
       if (page === undefined) {
-        failures.push(`${route.tier}: Bid.Cars proxy sessions are cooling down`);
+        failures.push(`${route.tier}: proxy sessions are cooling down`);
         continue;
       }
       let reported = false;
       let challenged = false;
       try {
-        const browser = browserRequest ? this.browserClient(route, page, index) : undefined;
+        const browser = browserRequest
+          ? this.browserClient(route, page, index, options.source)
+          : undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           signal.throwIfAborted();
           const instant = Date.now();
@@ -377,12 +399,15 @@ export class ProxyTransport implements DocumentTransport {
             };
             const response = browser
               ? await browser.fetch(url, init)
-              : await fetch(url, { ...init, dispatcher: this.dispatcher(route, page, index) });
+              : await fetch(url, {
+                  ...init,
+                  dispatcher: this.dispatcher(route, page, this.#options.routes.indexOf(route)),
+                });
             if (browser && response.headers.get("cf-mitigated") === "challenge") {
               challenged = true;
               await response.body?.cancel();
               if (attempt !== 0 || !browser.refresh)
-                throw new SourceError("Bid.Cars Cloudflare challenge remains unresolved");
+                throw new SourceError("Cloudflare challenge remains unresolved");
               this.#options.onRequest?.({
                 source: options.source,
                 tier: route.tier,
@@ -399,7 +424,7 @@ export class ProxyTransport implements DocumentTransport {
                 throw new SourceError(`${options.source} returned HTTP ${response.status}`);
               }
               const result = request.parse(await readBody(response));
-              if (browser) this.#preferredBrowserRoute = index;
+              if (browser) this.#preferredBrowserRoute.set(options.source, index);
               this.#options.onRequest?.({
                 source: options.source,
                 tier: route.tier,
@@ -411,7 +436,11 @@ export class ProxyTransport implements DocumentTransport {
             clearTimeout(timer);
           }
           // Solving has its own bounded deadline; never retain a completed page's 40s timer.
-          await browser?.refresh?.(url, generation, signal);
+          await browser?.refresh?.(
+            options.source === "lalafo.kg" ? new URL(LALAFO_CLEARANCE_URL) : url,
+            generation,
+            signal,
+          );
         }
       } catch (error) {
         signal.throwIfAborted();
@@ -427,10 +456,10 @@ export class ProxyTransport implements DocumentTransport {
           this.#options.onRequest?.({ source: options.source, tier: route.tier, outcome: "error" });
         if (error instanceof RiskBypassError) throw error;
         if (challenged) {
-          let unavailable = this.#browserUnavailable.get(index);
+          let unavailable = this.#browserUnavailable.get(key);
           if (!unavailable) {
             unavailable = new Map();
-            this.#browserUnavailable.set(index, unavailable);
+            this.#browserUnavailable.set(key, unavailable);
           }
           unavailable.set(page, Date.now() + REFRESH_COOLDOWN_MS);
           if (route.port_count > 1) {

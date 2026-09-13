@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { makeListing } from "../src/models.js";
+import { listingPrice, makeListing } from "../src/models.js";
 import { type MetadataStore, parseQuote, RateBook } from "../src/rates.js";
 import { type DocumentTransport, SourceError, SourceRateLimited } from "../src/transport.js";
 
@@ -85,6 +85,62 @@ it("clears expired conversions but preserves native USD", () => {
   expect(book.convert(usd).price_kgs_minor).toBe(10756);
   vi.setSystemTime(instant("2026-09-14") * 1000);
   expect(book.convert(usd)).toMatchObject({ price_usd_minor: 123, price_kgs_minor: null });
+});
+
+it.each([
+  { currency: "USD", amount: 123 },
+  { currency: "KGS", amount: 10756 },
+])("expires only the converted side of a KG $currency advertisement", ({ currency, amount }) => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.USD = parseQuote(xml("USD", "874,5000", "10.09.2026", "10"), "USD");
+  const original = makeListing({
+    id: "lalafo:single",
+    source: "lalafo.kg",
+    market: "KG",
+    title: "Toyota Camry",
+    url: "https://lalafo.kg/bishkek/ads/toyota-camry-id-1",
+    availability: "опубликовано",
+    original_currency: currency,
+    original_price_minor: amount,
+    price_usd_minor: currency === "USD" ? amount : null,
+    price_kgs_minor: currency === "KGS" ? amount : null,
+  });
+  const converted = book.convert(original);
+  expect(converted).toMatchObject({
+    original_price_minor: amount,
+    price_usd_minor: 123,
+    price_kgs_minor: 10756,
+    fx_expires_at: instant("2026-09-14"),
+  });
+  const other = currency === "USD" ? "KGS" : "USD";
+  expect(listingPrice(converted, other)).toBe(other === "USD" ? 123 : 10756);
+  vi.setSystemTime(instant("2026-09-14") * 1000);
+  expect(listingPrice(converted, other)).toBeNull();
+  expect(listingPrice(converted, currency)).toBe(amount);
+  const expired = book.convert(converted);
+  expect(listingPrice(expired, other)).toBeNull();
+  expect(listingPrice(expired, currency)).toBe(amount);
+  expect(expired.original_price_minor).toBe(amount);
+});
+
+it("preserves source-supplied domestic dual prices rather than replacing them with NBKR FX", () => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.USD = parseQuote(xml("USD", "87,4500"), "USD");
+  const supplied = makeListing({
+    id: "mashina:dual",
+    title: "Toyota Camry",
+    url: "https://mashina.kg/details/1",
+    original_currency: "KGS",
+    original_price_minor: 9000,
+    price_usd_minor: 100,
+    price_kgs_minor: 9000,
+  });
+  const converted = book.convert(supplied);
+  expect(listingPrice(converted, "USD")).toBe(100);
+  expect(listingPrice(converted, "KGS")).toBe(9000);
+  vi.setSystemTime(instant("2026-09-14") * 1000);
+  expect(listingPrice(converted, "USD")).toBe(100);
+  expect(listingPrice(converted, "KGS")).toBe(9000);
 });
 
 it("can convert weekly KRW to som independently but cannot normalize lease prices", () => {

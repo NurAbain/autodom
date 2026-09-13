@@ -75,7 +75,17 @@ async function collectPage(
 ): Promise<SourcePage> {
   let page = await fetchSourcePage(source.id, { page: pageNumber, transport });
   const observedAt = Date.now() / 1000;
-  if (source.market !== "KG") {
+  if (
+    source.market !== "KG" ||
+    page.listings.some(
+      (listing) =>
+        listing.original_currency &&
+        (listing.price_usd_minor === null ||
+          listing.price_kgs_minor === null ||
+          listing.fx_expires_at !== null ||
+          listing.fx_date !== ""),
+    )
+  ) {
     await store.withLock("autodom:fx-rates", () => rates.refresh());
     page = { ...page, listings: page.listings.map((listing) => rates.convert(listing)) };
   }

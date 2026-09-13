@@ -7,7 +7,7 @@ import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { CookieJar } from "tough-cookie";
 import { type Dispatcher, fetch, MockAgent, Response } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BrowserClient } from "../src/bidcars-browser.js";
+import type { BrowserClient } from "../src/cloudflare-browser.js";
 import { ProxyTransport, retryAfterSeconds } from "../src/http.js";
 import { RiskBypassError } from "../src/riskbypass.js";
 
@@ -316,6 +316,107 @@ describe("mandatory proxy document transport", () => {
           source: "bid.cars",
         }),
       ).resolves.toEqual({ available: true });
+  });
+
+  it("isolates Lalafo clearance and session caches from BidCars preferred routes", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "bid.cars,lalafo.kg");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-isolated-clearance-"));
+    directories.push(dataDir);
+    let datacenterUsed = false;
+    const transport = new ProxyTransport({
+      routes: ["datacenter", "residential", "lalafo"].map(
+        (tier) => new ProxyRoute(tier, "http://proxy.test:7000", "Basic ZGVtbzpkZW1v"),
+      ),
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route) => {
+        const jar = new CookieJar();
+        const origin = route.tier === "lalafo" ? "https://lalafo.kg" : "https://bid.cars";
+        return {
+          async fetch(url) {
+            vi.setSystemTime(Date.now() + 2000);
+            if (url.origin !== origin) return new Response("Wrong session origin", { status: 403 });
+            if (route.tier === "datacenter") {
+              const status = datacenterUsed ? 429 : 503;
+              datacenterUsed = true;
+              return new Response("Unavailable route", { status });
+            }
+            if (url.pathname === "/en/catalog")
+              await jar.setCookie("session=auction; Secure; Path=/", url.href);
+            const expected = route.tier === "lalafo" ? "session=classified" : "session=auction";
+            if ((await jar.getCookieString(url.href)) !== expected)
+              return new Response("Missing clearance", {
+                status: 403,
+                headers: { "cf-mitigated": "challenge" },
+              });
+            return new Response('{"available":true}');
+          },
+          async refresh(url) {
+            if (
+              route.tier !== "lalafo" ||
+              url.href !== "https://lalafo.kg/kyrgyzstan/avtomobili-s-probegom"
+            )
+              throw new SourceError("Clearance requires the public passenger root");
+            await jar.setCookie("session=classified; Secure; Path=/", url.href);
+          },
+        };
+      },
+      dispatcherFactory: () => {
+        throw new Error("Protected origins must not use the plain HTTP transport");
+      },
+    });
+    transports.push(transport);
+    const documents = [
+      ["bid.cars", "https://bid.cars/en/catalog"],
+      ["lalafo.kg", "https://lalafo.kg/api/search/v3/feed/search"],
+      ["bid.cars", "https://bid.cars/en/detail"],
+      ["lalafo.kg", "https://lalafo.kg/api/search/v3/feed/search?page=2"],
+    ] as const;
+    for (const [source, url] of documents)
+      await expect(transport.fetchDocument(url, JSON.parse, { source })).resolves.toEqual({
+        available: true,
+      });
+  });
+
+  it("fails closed when Lalafo is missing or challenged without using shared routes", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,lalafo.kg");
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-lalafo-fail-closed-"));
+    directories.push(dataDir);
+    const shared = new ProxyRoute("datacenter", "http://proxy.test:7000", "Basic ZGVtbzpkZW1v");
+    const plain = vi.fn(() => {
+      throw new Error("Shared route must not be used for Lalafo");
+    });
+    const browser = vi.fn((route: ProxyRoute): BrowserClient => ({
+      fetch: async () => {
+        if (route.tier !== "lalafo") throw new Error("Shared browser must not be used for Lalafo");
+        return new Response("Managed challenge", {
+          status: 403,
+          headers: { "cf-mitigated": "challenge" },
+        });
+      },
+    }));
+    for (const routes of [
+      [shared],
+      [shared, new ProxyRoute("lalafo", "http://isp.test:7000", "Basic ZGVtbzpkZW1v")],
+    ]) {
+      const transport = new ProxyTransport({
+        routes,
+        dataDir,
+        requestDelaySeconds: 0,
+        dispatcherFactory: plain,
+        browserClientFactory: browser,
+      });
+      transports.push(transport);
+      for (let request = 0; request < 2; request++)
+        await expect(
+          transport.fetchDocument("https://lalafo.kg/api/search/v3/feed/search", JSON.parse, {
+            source: "lalafo.kg",
+          }),
+        ).rejects.toBeInstanceOf(SourceError);
+    }
+    expect(plain).not.toHaveBeenCalled();
+    expect(browser.mock.calls.map(([route]) => route.tier)).toEqual(["lalafo"]);
   });
 
   it("does not rotate around a source rate limit", async () => {

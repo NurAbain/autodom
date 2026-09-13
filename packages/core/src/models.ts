@@ -174,7 +174,7 @@ export function listingPrice(
   if (currency !== "USD" && currency !== "KGS") throw new Error("Unsupported currency");
   if (!purchaseEligible(listing, now)) return null;
   if (
-    listing.market !== "KG" &&
+    (listing.market !== "KG" || listing.fx_expires_at !== null || listing.fx_date !== "") &&
     currency !== listing.original_currency &&
     (listing.fx_expires_at === null || listing.fx_expires_at <= now)
   )

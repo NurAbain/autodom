@@ -1,4 +1,5 @@
 import { inspect } from "node:util";
+import { approvedSources } from "./config.js";
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -93,5 +94,27 @@ export function loadProxyRoutes(env: Environment = process.env): readonly ProxyR
     (env.SMARTPROXY_RESIDENTIAL_PASSWORD ?? "").trim(),
     env,
   );
-  return [datacenter, residential];
+  const routes = [datacenter, residential];
+  if (
+    approvedSources(env).includes("lalafo.kg") ||
+    [
+      env.SMARTPROXY_LALAFO_ENDPOINT,
+      env.SMARTPROXY_LALAFO_USERNAME,
+      env.SMARTPROXY_LALAFO_PASSWORD,
+    ].some((value) => value?.trim()) ||
+    [env.SMARTPROXY_LALAFO_PORT_START, env.SMARTPROXY_LALAFO_PORT_COUNT].some(
+      (value) => value?.trim() && value.trim() !== "0",
+    )
+  ) {
+    routes.push(
+      route(
+        "lalafo",
+        (env.SMARTPROXY_LALAFO_ENDPOINT ?? "").trim(),
+        (env.SMARTPROXY_LALAFO_USERNAME ?? "").trim(),
+        (env.SMARTPROXY_LALAFO_PASSWORD ?? "").trim(),
+        env,
+      ),
+    );
+  }
+  return routes;
 }

@@ -94,6 +94,60 @@ it("rejects invalid auth and port rotation bounds", () => {
     expect(() => loadProxyRoutes({ ...credentials, ...changes })).toThrow();
 });
 
+it("requires a complete dedicated Lalafo route without borrowing shared credentials", () => {
+  const enabled = { ...credentials, AUTODOM_APPROVED_SOURCES: "mashina.kg,lalafo.kg" };
+  const dedicated = {
+    SMARTPROXY_LALAFO_ENDPOINT: "isp.example:12000",
+    SMARTPROXY_LALAFO_USERNAME: "lalafo-user",
+    SMARTPROXY_LALAFO_PASSWORD: "lalafo-secret",
+  };
+  expect(() => loadProxyRoutes(enabled)).toThrow();
+  for (const key of Object.keys(dedicated))
+    expect(() => loadProxyRoutes({ ...enabled, ...dedicated, [key]: "" })).toThrow();
+  expect(() =>
+    loadProxyRoutes({
+      ...enabled,
+      ...dedicated,
+      SMARTPROXY_LALAFO_PORT_START: "65535",
+      SMARTPROXY_LALAFO_PORT_COUNT: "2",
+    }),
+  ).toThrow();
+  const routes = loadProxyRoutes({
+    ...enabled,
+    ...dedicated,
+    SMARTPROXY_LALAFO_PORT_START: "12001",
+    SMARTPROXY_LALAFO_PORT_COUNT: "2",
+  });
+  const lalafo = routes.find((candidate) => candidate.tier === "lalafo")!;
+  expect([lalafo.urlFor(1), lalafo.urlFor(2), lalafo.urlFor(3)]).toEqual([
+    "http://isp.example:12001",
+    "http://isp.example:12002",
+    "http://isp.example:12001",
+  ]);
+  expect(Buffer.from(lalafo.authorization.slice(6), "base64").toString("latin1")).toBe(
+    "lalafo-user:lalafo-secret",
+  );
+  expect(routes.filter((candidate) => candidate.tier !== "lalafo")).toEqual(
+    loadProxyRoutes(credentials),
+  );
+});
+
+it("keeps an unused Lalafo route optional but rejects partially configured credentials", () => {
+  expect(
+    loadProxyRoutes({
+      ...credentials,
+      SMARTPROXY_LALAFO_ENDPOINT: "",
+      SMARTPROXY_LALAFO_USERNAME: "",
+      SMARTPROXY_LALAFO_PASSWORD: "",
+      SMARTPROXY_LALAFO_PORT_START: "0",
+      SMARTPROXY_LALAFO_PORT_COUNT: "0",
+    }).map((candidate) => candidate.tier),
+  ).toEqual(["datacenter", "residential"]);
+  expect(() =>
+    loadProxyRoutes({ ...credentials, SMARTPROXY_LALAFO_USERNAME: "lalafo-user" }),
+  ).toThrow();
+});
+
 it("accepts only source-specific HTTPS listing hosts", () => {
   expect(listingUrlAllowed("encar.com", "https://fem.encar.com/cars/detail/1")).toBe(true);
   for (const url of [

@@ -322,7 +322,16 @@ export class RateBook {
   convert(listing: Listing, now = Date.now() / 1000): Listing {
     const currency = listing.original_currency;
     const original = listing.original_price_minor;
-    if (!currency) return listing;
+    // Domestic sources may supply both prices themselves; these are not NBKR quotes.
+    if (
+      !currency ||
+      (listing.market === "KG" &&
+        listing.price_usd_minor !== null &&
+        listing.price_kgs_minor !== null &&
+        listing.fx_expires_at === null &&
+        listing.fx_date === "")
+    )
+      return listing;
     const validPrice =
       (listing.price_kind === "asking" || listing.price_kind === "buy_now") &&
       original !== null &&
@@ -331,12 +340,19 @@ export class RateBook {
     let dollars = validPrice && currency === "USD" ? original : null;
     let som = validPrice && currency === "KGS" ? original : null;
     let used: Quote[] = [];
-    if (validPrice && original !== null && (currency === "USD" || currency === "KRW")) {
+    if (
+      validPrice &&
+      original !== null &&
+      (currency === "USD" || currency === "KGS" || currency === "KRW")
+    ) {
       const usd = this.quotes.USD?.validAt(now) ? this.quotes.USD : undefined;
       const krw = this.quotes.KRW?.validAt(now) ? this.quotes.KRW : undefined;
       if (currency === "USD" && usd) {
         som = minor(new ExactDecimal(original).mul(usd.value).div(usd.nominal));
         if (som !== null) used.push(usd);
+      } else if (currency === "KGS" && usd) {
+        dollars = minor(new ExactDecimal(original).mul(usd.nominal).div(usd.value));
+        if (dollars !== null) used.push(usd);
       } else if (currency === "KRW" && krw) {
         // Whole won becomes KGS minor units; do not round this intermediate for USD.
         const somAmount = new ExactDecimal(original).mul(100).mul(krw.value).div(krw.nominal);

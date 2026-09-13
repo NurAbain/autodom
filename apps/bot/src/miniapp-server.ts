@@ -111,7 +111,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
       response.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
+        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://img5.lalafo.com https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);

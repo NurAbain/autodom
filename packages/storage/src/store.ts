@@ -36,6 +36,7 @@ import {
   gt,
   gte,
   inArray,
+  isNull,
   lte,
   or,
   type SQL,
@@ -569,14 +570,15 @@ export class Store {
     const clauses: (SQL | undefined)[] = [
       gt(price, 0),
       between(price, p.budget_min_minor, p.budget_max_minor),
-      or(
-        eq(listings.availability, "в наличии"),
-        and(sql`${listings.market} != 'KG'`, eq(listings.availability, "опубликовано")),
-      ),
+      inArray(listings.availability, ["в наличии", "опубликовано"]),
       gte(listings.last_seen, now - FRESH_SECONDS),
       inArray(listings.source, sources),
       or(
-        eq(listings.market, "KG"),
+        and(
+          eq(listings.market, "KG"),
+          isNull(listings.fx_expires_at),
+          sql`COALESCE(${listings.data}->>'fx_date', '') = ''`,
+        ),
         eq(listings.original_currency, p.currency),
         gt(listings.fx_expires_at, now),
       ),

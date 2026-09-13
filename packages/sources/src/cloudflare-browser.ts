@@ -67,7 +67,7 @@ async function pinProxy(route: ProxyRoute, page: number): Promise<URL> {
     proxy.hostname = address;
     return proxy;
   } catch {
-    throw new SourceError("Unable to pin a public IPv4 Bid.Cars proxy gateway");
+    throw new SourceError("Unable to pin a public IPv4 proxy gateway");
   }
 }
 
@@ -110,7 +110,7 @@ function nativeClient(proxy: URL, jar: CookieJar, userAgent?: string): Impit {
   });
 }
 
-export class BidCarsBrowser implements BrowserClient {
+export class CloudflareBrowser implements BrowserClient {
   readonly #route: ProxyRoute;
   readonly #page: number;
   readonly #solver: Pick<RiskBypass, "solve">;
@@ -154,7 +154,7 @@ export class BidCarsBrowser implements BrowserClient {
     let pending = this.#refresh;
     if (!pending) {
       if (performance.now() - this.#lastSubmission < REFRESH_COOLDOWN_MS) {
-        throw new SourceError("Bid.Cars clearance refresh is cooling down after a submission");
+        throw new SourceError("Clearance refresh is cooling down after a submission");
       }
       const abort = new AbortController();
       const promise = this.solve(url, abort.signal).finally(() => {
@@ -201,7 +201,7 @@ export class BidCarsBrowser implements BrowserClient {
       this.#generation++;
     } catch {
       signal.throwIfAborted();
-      throw new RiskBypassError("Unable to install the Bid.Cars clearance session");
+      throw new RiskBypassError("Unable to install the clearance session");
     }
   }
 }

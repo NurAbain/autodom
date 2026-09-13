@@ -4,6 +4,7 @@ import {
   makeListing,
   makeProfile,
   makeSourcePage,
+  parseQuote,
   RateBook,
   type Settings,
   SOURCES,
@@ -334,4 +335,72 @@ it("notifies a real Mashina native reduction once but never a converted USD disp
   expect(await notifyOnce(db, send)).toBe(1);
   expect(send).toHaveBeenCalledTimes(1);
   expect(await notifyOnce(db, send)).toBe(0);
+});
+
+it("collects and notifies published single-currency KG ads without reporting FX-only drops", async () => {
+  vi.stubEnv("AUTODOM_APPROVED_SOURCES", "lalafo.kg");
+  const lalafo = SOURCES.find((candidate) => candidate.id === "lalafo.kg")!;
+  const quoteDate = new Date((NOW + 6 * 3600) * 1000)
+    .toISOString().slice(0, 10).split("-").reverse().join(".");
+  rates.quotes.USD = parseQuote(
+    `<CurrencyRates Date="${quoteDate}"><Currency ISOCode="USD"><Nominal>1</Nominal><Value>90</Value></Currency></CurrencyRates>`,
+    "USD",
+  );
+  let native = 9000;
+  vi.mocked(fetchSourcePage).mockImplementation(async () => makeSourcePage({
+    page: 1,
+    pages: 1,
+    pages_exact: true,
+    scope: "passenger-cars",
+    listings: [makeListing({
+      id: "lalafo:1",
+      source: "lalafo.kg",
+      market: "KG",
+      title: "Toyota Camry",
+      url: "https://lalafo.kg/bishkek/ads/toyota-camry-id-1",
+      availability: "опубликовано",
+      original_currency: "KGS",
+      original_price_minor: native,
+      price_kgs_minor: native,
+    })],
+  }));
+  await db.saveProfile(makeProfile({
+    user_id: 1,
+    chat_id: 1,
+    currency: "USD",
+    budget_min_minor: 0,
+    budget_max_minor: 200,
+    monitoring: true,
+  }));
+  const collect = () => collectTick(
+    db, lalafo, settings, transport, rates, new AbortController().signal,
+  );
+  const send = vi.fn(async () => undefined);
+  await collect();
+  expect(await db.getListing("lalafo:1")).toMatchObject({
+    original_price_minor: 9000,
+    price_usd_minor: 100,
+    price_kgs_minor: 9000,
+    availability: "опубликовано",
+  });
+  expect(await notifyOnce(db, send)).toBe(1);
+  const cursor = (await db.getProfile(1))!.cursor;
+
+  vi.setSystemTime((NOW + 60) * 1000);
+  rates.quotes.USD = parseQuote(
+    `<CurrencyRates Date="${quoteDate}"><Currency ISOCode="USD"><Nominal>1</Nominal><Value>100</Value></Currency></CurrencyRates>`,
+    "USD",
+  );
+  await collect();
+  expect((await db.getListing("lalafo:1"))?.price_usd_minor).toBe(90);
+  expect(await db.eventsAfter(cursor)).toEqual([]);
+  expect(await notifyOnce(db, send)).toBe(0);
+
+  vi.setSystemTime((NOW + 120) * 1000);
+  native = 8000;
+  await collect();
+  expect((await db.getListing("lalafo:1"))?.price_usd_minor).toBe(80);
+  expect(await notifyOnce(db, send)).toBe(1);
+  expect(await notifyOnce(db, send)).toBe(0);
+  expect(send).toHaveBeenCalledTimes(2);
 });

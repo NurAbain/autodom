@@ -586,6 +586,54 @@ describe("PostgreSQL Store", () => {
     await db.upsertListings([car({ id: "boundary" })], NOW - 48 * 3600);
     expect(await db.getListing("boundary", true)).not.toBeNull();
   });
+  it("matches published KG ads in SQL and notifications without admitting transit or expired conversions", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,lalafo.kg,truecar.com");
+    const published = car({
+      source: "lalafo.kg",
+      availability: "Опубликовано",
+      original_currency: "USD",
+      original_price_minor: 100,
+      fx_date: "USD:2033-05-18",
+      fx_expires_at: NOW + 1,
+    });
+    const cars = [
+      { ...published, id: "01-usd" },
+      { ...published, id: "02-kgs", original_currency: "KGS", original_price_minor: 9000 },
+      car({ id: "03-source-dual", original_currency: "KGS", original_price_minor: 9000 }),
+      { ...published, id: "04-transit", availability: "В пути" },
+      { ...published, id: "05-order", availability: "На заказ" },
+      { ...published, id: "06-unknown", availability: "" },
+      { ...published, id: "07-import", market: "US", source: "truecar.com" },
+      { ...published, id: "08-unknown-price", original_price_minor: null, price_usd_minor: null, price_kgs_minor: null },
+    ];
+    await db.upsertListings(cars);
+    const selected = {
+      ...profile(),
+      market: "ALL",
+      budget_scope: "total",
+      allow_import: false,
+      budget_max_minor: 10000,
+    };
+    for (const currency of ["USD", "KGS"]) {
+      const filter = { ...selected, currency };
+      expect(cars.filter((item) => matches(filter, item)).map((item) => item.id)).toEqual([
+        "01-usd", "02-kgs", "03-source-dual",
+      ]);
+      expect((await db.search(filter)).map((item) => item.id)).toEqual([
+        "01-usd", "02-kgs", "03-source-dual",
+      ]);
+      expect(await db.countMatches(filter)).toBe(3);
+    }
+    vi.setSystemTime((NOW + 1) * 1000);
+    for (const currency of ["USD", "KGS"]) {
+      const filter = { ...selected, currency };
+      const expected = [currency === "USD" ? "01-usd" : "02-kgs", "03-source-dual"];
+      expect(cars.filter((item) => matches(filter, item)).map((item) => item.id)).toEqual(expected);
+      expect((await db.search(filter)).map((item) => item.id)).toEqual(expected);
+      expect(await db.countMatches(filter)).toBe(2);
+    }
+    expect((await db.getListing("01-usd"))?.availability).toBe("Опубликовано");
+  });
   it("upgrades a populated v1 catalog without narrowing the normalized mileage range", async () => {
     const legacyUrl = await database();
     const legacy = new pg.Client({ connectionString: legacyUrl });

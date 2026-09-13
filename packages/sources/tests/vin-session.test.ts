@@ -75,6 +75,37 @@ describe("proxy-only VIN sessions", () => {
     expect(() => new VinTransport({ routes: [] })).toThrow(SourceError);
   });
 
+  it("never uses the dedicated Lalafo ISP, including when every shared VIN route fails", async () => {
+    const lalafo = new ProxyRoute("lalafo", "http://isp.invalid:7000", "Basic aXNwOnNlY3JldA==");
+    expect(() => new VinTransport({ routes: [lalafo] })).toThrow(SourceError);
+    const dedicated = new MockAgent();
+    dedicated.disableNetConnect();
+    agents.add(dedicated);
+    dedicated.get(ORIGIN).intercept({ path: ENTRY }).reply(200, "Wrong dedicated ISP");
+    const shared = routes.map(() => {
+      const mock = new MockAgent();
+      mock.disableNetConnect();
+      agents.add(mock);
+      mock.get(ORIGIN).intercept({ path: ENTRY }).reply(503, "Unavailable");
+      return mock;
+    });
+    const transport = new VinTransport({
+      routes: [lalafo, ...routes, lalafo],
+      requestDelaySeconds: 0,
+      dispatcherFactory: (route) => {
+        const mock = route.tier === "lalafo" ? dedicated : shared[routes.indexOf(route)]!;
+        agents.delete(mock);
+        return mock;
+      },
+    });
+    transports.push(transport);
+    await expect(
+      transport.run("carhistory", (session) => session.request(ENTRY)),
+    ).rejects.toBeInstanceOf(SourceError);
+    for (const mock of shared) mock.assertNoPendingInterceptors();
+    expect(dedicated.pendingInterceptors()).toHaveLength(1);
+  });
+
   it.each([
     `${ORIGIN}/payment/pay.car`,
     "https://another-provider.invalid/search/carhistory/search.car",

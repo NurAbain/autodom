@@ -111,7 +111,7 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
     price <= 0 ||
     price < profile.budget_min_minor ||
     price > profile.budget_max_minor ||
-    (availability !== "в наличии" && !(listing.market !== "KG" && availability === "опубликовано"))
+    (availability !== "в наличии" && availability !== "опубликовано")
   )
     return false;
   const groups = queryGroups(profile.query);

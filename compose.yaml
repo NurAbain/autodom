@@ -27,6 +27,7 @@ services:
     extends:
       file: compose.worker.yaml
       service: worker
+    # Inherits the dedicated SMARTPROXY_LALAFO_* route and solver key from compose.worker.yaml.
     environment:
       AUTODOM_DATABASE_URL: postgresql://autodom:${AUTODOM_POSTGRES_PASSWORD:?Set a URL-safe Autodom database password}@postgres:5432/autodom
       AUTODOM_REDIS_URL: redis://:${AUTODOM_REDIS_PASSWORD:?Set a URL-safe Autodom Redis password}@redis:6379/0

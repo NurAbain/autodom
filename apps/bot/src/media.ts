@@ -3,6 +3,7 @@ import type { Listing } from "@autodom/core";
 // Exact source CDN hosts, never arbitrary source subdomains or seller-supplied hosts.
 const PHOTO_HOSTS: Readonly<Record<string, readonly string[]>> = {
   "mashina.kg": ["im.mashina.kg", "pictures.mashina.kg", "storage.mashina.kg", "s3.mashina.kg"],
+  "lalafo.kg": ["img5.lalafo.com"],
   "encar.com": ["ci.encar.com"],
   "bid.cars": ["images.bid.cars", "mercury.bid.cars", "pluto.bid.car"],
   "truecar.com": ["listings-prod.tcimg.net"],

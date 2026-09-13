@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { makeListing, makeProfile } from "@autodom/core";
+import { makeListing, makeProfile, money } from "@autodom/core";
 import type { VinCheckResult, VinLookup } from "@autodom/core/vin";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMiniAppServer } from "../src/miniapp-server.js";
@@ -32,6 +32,17 @@ const listing = makeListing({
   price_usd_minor: 2_000_000,
   availability: "В наличии",
   vin: "JTDBR32E720000001",
+});
+const lalafoListing = makeListing({
+  id: "lalafo:published",
+  source: "lalafo.kg",
+  title: "Toyota Camry",
+  url: "https://lalafo.kg/bishkek/ads/toyota-camry-id-1",
+  original_currency: "KGS",
+  original_price_minor: 1_800_000,
+  price_kgs_minor: 1_800_000,
+  availability: "опубликовано",
+  photo_url: "https://img5.lalafo.com/i/posters/original/one.jpg",
 });
 const vinResult: VinCheckResult = {
   vin: "KMHDU41DBAU123456",
@@ -67,7 +78,7 @@ function authorization(userId = 42): string {
 }
 
 beforeAll(async () => {
-  vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
+  vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,lalafo.kg");
   directory = await mkdtemp(join(tmpdir(), "autodom-details-"));
   await Promise.all([
     writeFile(join(directory, "index.html"), "<!doctype html><title>Details</title>"),
@@ -94,6 +105,7 @@ beforeAll(async () => {
       async getListing(id, freshOnly) {
         if (id === "storage-error") throw storageError;
         if (id === listing.id) return listing;
+        if (id === lalafoListing.id) return lalafoListing;
         if (id === "stale") return freshOnly ? null : { ...listing, id };
         if (id === "disabled") return { ...listing, id, source: "encar.com" };
         if (id === "unsafe") return { ...listing, id, url: "javascript:alert(1)", vin: "" };
@@ -147,6 +159,22 @@ it("opens a specific older notification independently of the current saved filte
   expect(await response.json()).toMatchObject({ id: listing.id, vin: listing.vin });
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+});
+
+it("serves a published Lalafo ad with its native price and exact permitted photo origin", async () => {
+  const response = await fetch(`${base}/miniapp/api/car?id=${encodeURIComponent(lalafoListing.id)}`, {
+    headers: { Authorization: authorization(), Origin: PUBLIC_ORIGIN },
+  });
+  expect(response.status).toBe(200);
+  const car = await response.json();
+  expect(car.availability).toBe("опубликовано");
+  expect(car.photoUrls).toEqual([lalafoListing.photo_url]);
+  expect(car.price).toBe(money(lalafoListing.original_price_minor!, "KGS"));
+  expect(car.detailsHtml).not.toContain("в наличии");
+  const imagePolicy = response.headers.get("content-security-policy")!
+    .split(";").find((directive) => directive.trim().startsWith("img-src "))!.trim().split(/\s+/);
+  expect(imagePolicy).toContain("https://img5.lalafo.com");
+  expect(imagePolicy).not.toContain("https://*.lalafo.com");
 });
 
 it("does not disclose stale, missing or disabled-source listings", async () => {
