@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Synchronize only Autodom artifacts into an existing Domcom monitoring checkout.
+// Synchronize only Autodom artifacts into the shared Monitoring infrastructure checkout.
 // This writes files, never starts containers or changes the running stack.
 import { copyFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -9,7 +9,7 @@ import { isSeq, parseDocument } from "yaml";
 const source = dirname(fileURLToPath(import.meta.url));
 const target = process.argv[2];
 if (!target || process.argv.length !== 3) {
-  console.error("Usage: node deploy/sync-monitoring.mjs /path/to/domcom-checkout");
+  console.error("Usage: node deploy/sync-monitoring.mjs /path/to/monitoring-checkout");
   process.exitCode = 1;
 } else {
   const root = resolve(target);
@@ -28,7 +28,7 @@ if (!target || process.argv.length !== 3) {
   const incoming = additions.get("scrape_configs", true);
   const rules = config.get("rule_files", true);
   if (!isSeq(jobs) || !isSeq(incoming) || !isSeq(rules))
-    throw new Error("Expected existing Domcom scrape_configs and rule_files sequences");
+    throw new Error("Expected existing monitoring scrape_configs and rule_files sequences");
   const allowed = new Set(["autodom-bot", "autodom-worker", "autodom-vin"]);
   const seen = new Set();
   for (const job of incoming.items) {

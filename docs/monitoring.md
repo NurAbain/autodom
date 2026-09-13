@@ -2,7 +2,7 @@
 
 ## Архитектура и границы
 
-Расширяем существующий стек Domcom: **Prometheus → Alertmanager**, **Docker → Alloy → Loki**, **Grafana**. Вторые Prometheus/Grafana/Loki для production Autodom не нужны. Bot + Mini App, parser и VIN API выпускаются независимо; мониторинг не меняет allowlist источников, Korea-first, лимиты VIN или пользовательские уведомления.
+Используем общий инфраструктурный проект **Monitoring / production** в Coolify: **Prometheus → Alertmanager**, **Docker → Alloy → Loki**, **Grafana**. Он выделен из Domcom без создания второго production-стека. Bot + Mini App, parser и VIN API выпускаются независимо; мониторинг не меняет allowlist источников, Korea-first, лимиты VIN или пользовательские уведомления.
 
 | Роль | Private scrape target | Job | Что измеряется |
 | --- | --- | --- | --- |
@@ -23,10 +23,10 @@ Grafana: существующие datasource UIDs **`prometheus`** и **`loki`**
 - `deploy/grafana/dashboards/autodom-overview.json`: дашборд.
 - `deploy/grafana/provisioning/dashboards/autodom.yml`: файловый provider для окружений, где файловое provisioning действительно доступно.
 - `deploy/alloy/autodom.alloy`: добавочный pipeline, использует **существующий** `loki.write.loki`.
-- `deploy/sync-monitoring.mjs`: синхронизация этих артефактов в checkout Domcom без запуска контейнеров.
+- `deploy/sync-monitoring.mjs`: синхронизация этих артефактов в checkout [NurAbain/monitoring](https://github.com/NurAbain/monitoring) без запуска контейнеров.
 - `deploy/provision-grafana.mjs`: адресный импорт только Autodom; не меняет datasource, чужие папки и дашборды.
 
-Не редактировать две независимые копии правил: исходник — Autodom, копия в Domcom создаётся синхронизацией. Изменения обоих репозиториев должны попасть в согласованный release. Production pins и результаты конкретного выпуска записываются в Trello, а не выводятся из имени image tag.
+Не редактировать две независимые копии правил: исходник — Autodom, копия в инфраструктурном репозитории `NurAbain/monitoring` создаётся синхронизацией. Изменения обоих репозиториев должны попасть в согласованный release. Старый checkout Domcom больше не является целью синхронизации. Production pins и результаты конкретного выпуска записываются в Trello, а не выводятся из имени image tag.
 
 ## Метрики и семантика
 
@@ -96,7 +96,7 @@ sum by (role) (count_over_time({application="autodom", level=~"error|fatal"}[15m
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm build
-node deploy/sync-monitoring.mjs /path/to/domcom-release
+node deploy/sync-monitoring.mjs /path/to/monitoring-checkout
 ```
 
 Синхронизация меняет только три одноимённых scrape jobs, подключение Autodom rules, их файл, отмеченный блок Alloy и каталог Autodom dashboards. Другие jobs остаются. Повторный запуск даёт тот же результат. Не выполняет deploy/restart.
@@ -112,9 +112,9 @@ docker run --rm --network none --entrypoint promtool \
   test rules /rules/autodom.rules.test.yml
 ```
 
-Полный собранный Prometheus config проверить `promtool check config`, Alloy — `alloy validate` **после объединения с конфигом Domcom**, поскольку фрагмент ссылается на его `loki.write.loki`.
+Полный собранный Prometheus config проверить `promtool check config`, Alloy — `alloy validate` **после объединения с общим конфигом Monitoring**, поскольку фрагмент ссылается на его `loki.write.loki`.
 
-Импорт в существующую Grafana — по API, как в Domcom; это не требует перезапуска Grafana. Credentials загрузить из секрет-хранилища в environment, не передавать позиционными аргументами и не помещать в Git/чат:
+Импорт в существующую общую Grafana — через API; это не требует её перезапуска. Credentials загрузить из секрет-хранилища в environment, не передавать позиционными аргументами и не помещать в Git/чат:
 
 ```bash
 export GRAFANA_URL=https://grafana.skup.kg
@@ -129,7 +129,7 @@ node deploy/provision-grafana.mjs
 1. Сверить реальные Coolify git pins, image IDs, env, aliases, Compose и ID всех monitoring-контейнеров. Сохранить конфигурацию/предыдущие images и закрытый backup; не печатать env с секретами.
 2. Собрать независимые bot/worker/VIN images из проверенного SHA. Переключать роли отдельно. Перед bot-релизом сохранить singleton polling: старый poller должен завершиться до нового. Не менять DB/Redis, миграции, allowlists, proxy session settings и платёжные credentials.
 3. Проверить private `/metrics` и labels контейнеров; `/health`/`/ready` и VIN Bearer 401. Scrape не должен вызывать провайдеров. Не посылать VIN в платные/внешние источники ради проверки мониторинга.
-4. Зафиксировать синхронизированную конфигурацию Domcom и pin мониторинга. Его Prometheus config **встроен в image**, простое изменение checkout и reload не обновляет его. Собрать новый monitoring image; использовать сохранённый production Compose и адресный `docker compose up -d --no-deps --no-build --pull never prometheus`, не `down` и не общий Coolify redeploy.
+4. Зафиксировать синхронизированную конфигурацию инфраструктурного репозитория `NurAbain/monitoring` и pin мониторинга. Его Prometheus config **встроен в image**, простое изменение checkout и reload не обновляет его. Собрать новый monitoring image; использовать сохранённый production Compose и адресный `docker compose up -d --no-deps --no-build --pull never prometheus`, не `down` и не общий Coolify redeploy.
 5. Обновить существующий bind-файл Alloy после `alloy validate`, затем вызвать его reload или перезапустить **только Alloy**, сохранив positions volume. При обновлении одиночного bind-файла заменой inode контейнер может видеть прежние байты: использовать запись в существующий файл либо пересоздать только Alloy.
 6. Импортировать Grafana dashboard через API. Сверить 3 Autodom targets `up=1`, evaluations `health=ok`, актуальный queue snapshot, запросы datasource и реальные строки Loki. Проверить dashboard в браузере. Остальные monitoring containers/images/volumes и jobs должны сохраниться.
 
@@ -208,3 +208,17 @@ Coolify deployments завершены: VIN `5hgynvicyiyoxq2fwxm6ug2w` и parser
 На сервере `192.168.0.2`: `/data/autodom-detailed-monitoring-20260914/before/` (0700, файлы 0600) содержит прежний операторский Compose, Alloy и закрытые снимки pins/env. Рядом `release-proof.json` — несекретные идентификаторы и результаты. Не копировать закрытые снимки в Git/Trello.
 
 Предыдущие фактические pins: bot `35d5454d8b9192cf75f3f862b5379f40a845ea8f`, parser `5f8d32e770421ed96ff85709e133b26a278c5338`, VIN `f2b19500de96daf6d8c0a98bed149d32b715e328`. Предыдущий monitoring pin/image — `62084a5a47829e2f7718fd4867c14263235b90d3` / `autodom-monitoring:62084a5a47829e2f7718fd4867c14263235b90d3`. При его возврате восстановить также `AUTODOM_MONITORING_IMAGE`, а не только Git pin. Сначала сверить новые параллельные релизы: эти значения — точка до данного выпуска, не разрешение затирать более новый код.
+
+## Перенос общего Monitoring из Domcom — 14.09.2026 по Бишкеку
+
+Карточка: [самостоятельный Monitoring](https://trello.com/c/RgrdNhUX). Источник конфигурации теперь — закрытый [NurAbain/monitoring](https://github.com/NurAbain/monitoring), **`main` / `5418f4815054b751cf9485c90332652a19f0622e`**. Текущие инструкции, неизменяемые имена production volumes и адресный откат — в его README. Историческая строка Domcom в таблице первого выпуска выше описывает состояние **до** этого переноса.
+
+Тот же Coolify resource `rmabpgf6s08mfrjl60v8d6zj` находится в [Monitoring / production](http://192.168.0.2:8000/project/whp47n0e9zjgxnt0r11b4gkf), environment `nxxzw5yscfta0fqng6uotop6`. Подключён существующий GitHub App id 3, repository id `1368941096`; чтение `main` через него проверено. Git auto-deploy и preview deployments выключены. Это не новый стек и не второй collector.
+
+Перенос — только организационная смена environment и источника: все шесть container IDs/start times, volumes, networks, домен и env совпали с before snapshot. Фактический Prometheus image остался `autodom-monitoring:55f070c4fbca17e5478a580f8e11ba00b3521284`. Приложения bot/parser/VIN этой операцией не выпускались; чужие последующие релизы не откатывать.
+
+Проверены 34 targets `UP` и все 98 alert/recording rules `health=ok`. Сохранены полный JSON, IDs/UIDs, версии и папки 20 dashboards и 5 datasources. В Chromium работают вход в Grafana и реальный dashboard Autodom; Loki возвращает существующие строки bot/worker/vin и Domcom `visual-parser`/`bot-kg`. Конфиги Prometheus/Alloy, разрешение Compose с действующими env, обязательность Grafana password, shell и dashboard JSON проверены. Реальный `sync-monitoring.mjs` против отдельной копии нового репозитория не изменил ни одного байта. Длительные legacy rule-fixtures Domcom превысили timeout запуска; их итог не зафиксирован и не объявляется успешным.
+
+Domcom остаётся потребителем общего стека. Его отдельный postgres-exporter/DSN сохранён, доступ Autodom к нему не добавлен. Вносить новые общие изменения в `NurAbain/monitoring`, не синхронизировать их обратно в старую ветку Domcom. Старый Git pin сохранён только как история/точка адресного отката.
+
+Закрытый snapshot: `/data/monitoring-project-move-20260914/before/state.json` (0700/0600), результат проверки — `after.json` рядом. Откат владения не требует перезапуска: при выключенном auto-deploy восстановить старые repo/branch/pin, выбрать GitHub App id 1 с обновлением repository id и выполнить организационный `/move` обратно в прежний environment. Не применять `/migrate`, `/clone`, общий deploy или восстановление volume поверх актуальных данных.
