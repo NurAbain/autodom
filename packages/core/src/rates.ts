@@ -12,10 +12,12 @@ export interface MetadataStore {
 const FEEDS: Readonly<Record<string, readonly [string, number]>> = {
   USD: ["https://www.nbkr.kg/XML/daily.xml", 4],
   KRW: ["https://www.nbkr.kg/XML/weekly.xml", 7],
+  AED: ["https://www.nbkr.kg/XML/weekly.xml", 7],
 };
 const ARCHIVES: Readonly<Record<string, readonly [string, string]>> = {
   USD: ["15", "Доллар США"],
   KRW: ["25", "Вона Республики Корея/южно-корейский вон"],
+  AED: ["103", "Дирхам ОАЭ"],
 };
 const LAST_REFRESH = "nbkr:last_refresh";
 const NEXT_REFRESH = "nbkr:next_refresh";
@@ -130,8 +132,7 @@ export function parseQuote(text: string, currency: string, now = Date.now() / 10
     );
     if (required.length !== 1) throw new Error("Required NBKR currency missing or duplicated");
     const entry = required[0]!;
-    if (currency === "KRW" && entry.ValidFor !== "7")
-      throw new Error("Unverified NBKR weekly validity");
+    if (feed[1] === 7 && entry.ValidFor !== "7") throw new Error("Unverified NBKR weekly validity");
     return quote(currency, day, entry.Nominal, entry.Value, feed[1], now);
   } catch (cause) {
     throw new SourceError(`Invalid or unavailable NBKR ${currency} quote`, { cause });
@@ -180,6 +181,8 @@ function parseArchive(text: string, currency: string, now: number): Quote {
       headers.eq(1).text().replace(/\s+/gu, "") !== "Курс(ккыргызскомусому)"
     )
       throw new Error("Unverified NBKR archive dates");
+    const unit = decimal(nominal);
+    if (!unit.isInteger()) throw new Error("Invalid NBKR nominal");
     let newest: Quote | undefined;
     const dates = new Set<string>();
     for (const row of rows.slice(1)) {
@@ -189,8 +192,15 @@ function parseArchive(text: string, currency: string, now: number): Quote {
       const day = calendarDate(Number(date[3]), Number(date[2]), Number(date[1]));
       if (dates.has(day)) throw new Error("Duplicated NBKR archive date");
       dates.add(day);
-      const candidate = quote(currency, day, nominal, cells.eq(1).text(), FEEDS[currency]![1], now);
-      if (!newest || candidate.date > newest.date) newest = candidate;
+      const candidate = new Quote(
+        currency,
+        day,
+        unit,
+        decimal(cells.eq(1).text()),
+        FEEDS[currency]![1],
+      );
+      if (candidate.starts_at > now) throw new PrepublishedQuote("NBKR quote is not effective yet");
+      if (candidate.validAt(now) && (!newest || candidate.date > newest.date)) newest = candidate;
     }
     if (!newest) throw new Error("No effective NBKR archive quote");
     return newest;
@@ -259,25 +269,30 @@ export class RateBook {
     this.nextRefresh = now + 3600;
     await this.store.setMeta(NEXT_REFRESH, String(this.nextRefresh));
     let nextRefresh = this.nextRefresh;
+    const documents = new Map<string, string>();
     for (const [currency, feed] of Object.entries(FEEDS)) {
       let fetched: Quote | null;
       try {
-        fetched = await this.transport.fetchDocument(
-          feed[0],
-          (text) => {
-            try {
-              return parseQuote(text, currency);
-            } catch (error) {
-              if (error instanceof SourceError && error.cause instanceof PrepublishedQuote)
-                return null;
-              throw error;
-            }
-          },
-          {
-            source: "nbkr.kg",
-            headers: { Accept: "application/xml,text/xml" },
-          },
-        );
+        const parse = (text: string): Quote | null => {
+          let result: Quote | null;
+          try {
+            result = parseQuote(text, currency);
+          } catch (error) {
+            if (error instanceof SourceError && error.cause instanceof PrepublishedQuote)
+              result = null;
+            else throw error;
+          }
+          documents.set(feed[0], text);
+          return result;
+        };
+        const document = documents.get(feed[0]);
+        fetched =
+          document === undefined
+            ? await this.transport.fetchDocument(feed[0], parse, {
+                source: "nbkr.kg",
+                headers: { Accept: "application/xml,text/xml" },
+              })
+            : parse(document);
         if (fetched === null) {
           const cached = this.quotes[currency];
           if (cached?.validAt(now)) {
@@ -331,20 +346,27 @@ export class RateBook {
     let dollars = validPrice && currency === "USD" ? original : null;
     let som = validPrice && currency === "KGS" ? original : null;
     let used: Quote[] = [];
-    if (validPrice && original !== null && (currency === "USD" || currency === "KRW")) {
+    if (
+      validPrice &&
+      original !== null &&
+      (currency === "USD" || currency === "KRW" || currency === "AED")
+    ) {
       const usd = this.quotes.USD?.validAt(now) ? this.quotes.USD : undefined;
-      const krw = this.quotes.KRW?.validAt(now) ? this.quotes.KRW : undefined;
+      const native = this.quotes[currency]?.validAt(now) ? this.quotes[currency] : undefined;
       if (currency === "USD" && usd) {
         som = minor(new ExactDecimal(original).mul(usd.value).div(usd.nominal));
         if (som !== null) used.push(usd);
-      } else if (currency === "KRW" && krw) {
-        // Whole won becomes KGS minor units; do not round this intermediate for USD.
-        const somAmount = new ExactDecimal(original).mul(100).mul(krw.value).div(krw.nominal);
+      } else if ((currency === "KRW" || currency === "AED") && native) {
+        // Won is whole units; AED is fils. Keep KGS minor units exact until each output rounds.
+        const somAmount = new ExactDecimal(original)
+          .mul(currency === "KRW" ? 100 : 1)
+          .mul(native.value)
+          .div(native.nominal);
         som = minor(somAmount);
-        if (som !== null) used.push(krw);
+        if (som !== null) used.push(native);
         if (usd) {
           dollars = minor(somAmount.mul(usd.nominal).div(usd.value));
-          if (dollars !== null) used = [usd, krw];
+          if (dollars !== null) used = [usd, native];
         }
       }
     }

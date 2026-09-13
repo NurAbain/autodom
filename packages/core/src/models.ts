@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-export const MARKETS = { KG: "Кыргызстан", KR: "Корея", US: "США", ALL: "Все рынки" } as const;
+export const MARKETS = {
+  KG: "Кыргызстан",
+  KR: "Корея",
+  US: "США",
+  AE: "ОАЭ",
+  ALL: "Все рынки",
+} as const;
 export const BUDGET_SCOPES = {
   car: "Только автомобиль",
   total: "Весь бюджет, включая доставку и оформление",

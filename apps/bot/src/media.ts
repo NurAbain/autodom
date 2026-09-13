@@ -6,6 +6,7 @@ const PHOTO_HOSTS: Readonly<Record<string, readonly string[]>> = {
   "encar.com": ["ci.encar.com"],
   "bid.cars": ["images.bid.cars", "mercury.bid.cars", "pluto.bid.car"],
   "truecar.com": ["listings-prod.tcimg.net"],
+  "dubicars.com": ["www.dubicars.com"],
 };
 
 function safePhotoUrl(source: string, value: unknown): string | null {

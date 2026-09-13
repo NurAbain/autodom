@@ -5,8 +5,10 @@ import { type DocumentTransport, SourceError, SourceRateLimited } from "../src/t
 
 const instant = (day: string) =>
   Date.parse(`${day.includes("T") ? day : `${day}T00:00:00`}+06:00`) / 1000;
+const entry = (currency: string, value: string, nominal = "1", valid = "7") =>
+  `<Currency ISOCode="${currency}"><Nominal>${nominal}</Nominal>${currency === "KRW" || currency === "AED" ? `<ValidFor>${valid}</ValidFor>` : ""}<Value>${value}</Value></Currency>`;
 const xml = (currency: string, value: string, date = "10.09.2026", nominal = "1", valid = "7") =>
-  `<CurrencyRates Date="${date}"><Currency ISOCode="${currency}"><Nominal>${nominal}</Nominal>${currency === "KRW" ? `<ValidFor>${valid}</ValidFor>` : ""}<Value>${value}</Value></Currency></CurrencyRates>`;
+  `<CurrencyRates Date="${date}">${entry(currency, value, nominal, valid)}</CurrencyRates>`;
 const car = (currency = "KRW", amount = 1) =>
   makeListing({
     id: "encar:synthetic",
@@ -62,6 +64,20 @@ it("uses nominal, comma decimals and half-up without double-rounding", () => {
   expect(book.convert(car("USD", 1)).price_kgs_minor).toBe(2);
 });
 
+it("converts fils with nominal and rounds each target only once", () => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.USD = parseQuote(xml("USD", "2,0000"), "USD");
+  book.quotes.AED = parseQuote(xml("AED", "25,0000", "10.09.2026", "10"), "AED");
+  expect(book.convert(car("AED", 1))).toMatchObject({
+    original_currency: "AED",
+    original_price_minor: 1,
+    price_kgs_minor: 3,
+    price_usd_minor: 1,
+    fx_date: "USD:2026-09-10;AED:2026-09-10",
+    fx_expires_at: instant("2026-09-14"),
+  });
+});
+
 it("clears expired conversions but preserves native USD", () => {
   const book = new RateBook(metadata(), unavailable);
   const usd = { ...car("USD", 123), price_kgs_minor: 999, fx_date: "old", fx_expires_at: 1 };
@@ -103,10 +119,42 @@ it("can convert weekly KRW to som independently but cannot normalize lease price
   });
 });
 
+it("keeps AED native value as daily and weekly conversions expire independently", () => {
+  const book = new RateBook(metadata(), unavailable);
+  book.quotes.AED = parseQuote(xml("AED", "23,8108"), "AED");
+  const original = car("AED", 100000);
+  expect(book.convert(original)).toMatchObject({
+    price_kgs_minor: 2381080,
+    price_usd_minor: null,
+    fx_date: "AED:2026-09-10",
+    fx_expires_at: instant("2026-09-17"),
+  });
+  book.quotes.USD = parseQuote(xml("USD", "87,4500"), "USD");
+  const converted = book.convert(original);
+  expect(converted.fx_expires_at).toBe(instant("2026-09-14"));
+  vi.setSystemTime(instant("2026-09-14") * 1000);
+  expect(book.convert(converted)).toMatchObject({
+    price_kgs_minor: 2381080,
+    price_usd_minor: null,
+    fx_date: "AED:2026-09-10",
+    fx_expires_at: instant("2026-09-17"),
+  });
+  vi.setSystemTime(instant("2026-09-17") * 1000);
+  expect(book.convert(converted)).toMatchObject({
+    original_currency: "AED",
+    original_price_minor: 100000,
+    price_kgs_minor: null,
+    price_usd_minor: null,
+    fx_date: "",
+    fx_expires_at: null,
+  });
+});
+
 it.each([
   xml("KRW", "NaN"),
   xml("KRW", "0,0647", "10.09.2026", "0"),
   xml("KRW", "0,0647", "10.09.2026", "1", "30"),
+  xml("KRW", "0,0647").replace("<ValidFor>7</ValidFor>", ""),
   xml("KRW", "0,0647", "11.09.2026"),
   xml("KRW", "0,0647", "03.09.2026"),
   xml("KRW", "0,0647", "31.02.2026"),
@@ -120,6 +168,7 @@ it.each([
   xml("KRW", "1").replace("</Value>", "</Wrong>"),
 ])("rejects untrustworthy NBKR XML %#", (payload) => {
   expect(() => parseQuote(payload, "KRW")).toThrow(SourceError);
+  expect(() => parseQuote(payload.replaceAll("KRW", "AED"), "AED")).toThrow(SourceError);
 });
 
 it("accepts weekend daily quotes and expires at the exact Bishkek four-day boundary", () => {
@@ -136,12 +185,16 @@ it("hydrates exact persisted quotes before honoring the hourly throttle on reope
     transport((url) =>
       url.includes("daily")
         ? xml("USD", "87,45005", "10.09.2026", "10")
-        : xml("KRW", "0,0647", "05.09.2026"),
+        : xml("KRW", "0,0647", "05.09.2026").replace(
+            "</CurrencyRates>",
+            `${entry("AED", "23,8108")}</CurrencyRates>`,
+          ),
     ),
   );
   await book.refresh();
   const original = book.convert(car("USD", 10000000));
   expect(original.price_kgs_minor).toBe(87450050);
+  expect(book.convert(car("AED", 100000)).price_kgs_minor).toBe(2381080);
   const reloaded = new RateBook(
     store,
     transport(() => {
@@ -151,6 +204,7 @@ it("hydrates exact persisted quotes before honoring the hourly throttle on reope
   await reloaded.refresh();
   expect(reloaded.convert(car("USD", 10000000))).toEqual(original);
   expect(reloaded.convert(car("KRW", 18500000))).toEqual(book.convert(car("KRW", 18500000)));
+  expect(reloaded.convert(car("AED", 100000))).toEqual(book.convert(car("AED", 100000)));
 });
 
 it("retains weekly cache on feed failure while committing a new daily quote", async () => {
@@ -258,16 +312,26 @@ it.each([false, true])(
       store,
       transport((url) => {
         if (url.includes("daily")) return xml("USD", "87,4500", "12.09.2026");
-        if (url.includes("weekly")) return xml("KRW", "0,0651", "12.09.2026");
+        if (url.includes("weekly"))
+          return xml("KRW", "0,0651", "12.09.2026").replace(
+            "</CurrencyRates>",
+            `${entry("AED", "23,8108")}</CurrencyRates>`,
+          );
         const params = new URL(url).searchParams;
-        const usd = params.get("valuta_id") === "15";
-        const name = usd ? "1 Доллар США" : "1 Вона Республики Корея/южно-корейский вон";
+        const id = params.get("valuta_id");
+        const usd = id === "15";
+        const aed = id === "103";
+        const name = usd
+          ? "1 Доллар США"
+          : aed
+            ? "1 Дирхам ОАЭ"
+            : "1 Вона Республики Корея/южно-корейский вон";
         return `<center>
-        <form><select name="valuta_id"><option selected value="${usd ? "15" : "25"}">${name}</option></select></form>
+        <form><select name="valuta_id"><option selected value="${id}">${name}</option></select></form>
         <span align="center">${name}</span><br>
         <table><tr><td>Дата<br>(курсы действуют с указанных дат)</td><td>Курс<br>(к кыргызскому сому)</td></tr>
         <tr><td class="stat-center"><!--date-->${usd ? "11.09.2026" : "05.09.2026"}<!--date--></td>
-        <td class="stat-right"><!--value-->${usd ? "87,4500" : "0,0647"}<!--value-->&nbsp;&nbsp;</td></tr></table>
+        <td class="stat-right"><!--value-->${usd ? "87,4500" : aed ? "23,8000" : "0,0647"}<!--value-->&nbsp;&nbsp;</td></tr></table>
       </center>`;
       }),
     );
@@ -278,19 +342,58 @@ it.each([false, true])(
       fx_date: "USD:2026-09-11;KRW:2026-09-05",
       fx_expires_at: boundary,
     });
+    expect(book.convert(car("AED", 10000))).toMatchObject({
+      price_kgs_minor: 238000,
+      price_usd_minor: 2722,
+      fx_date: "USD:2026-09-11;AED:2026-09-05",
+      fx_expires_at: boundary,
+    });
     vi.setSystemTime((boundary - 1) * 1000);
     await book.refresh();
     expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBe(119695000);
     vi.setSystemTime(boundary * 1000);
     if (reopen) book = new RateBook(store, book.transport);
     expect(book.convert(car("KRW", 18500000)).price_kgs_minor).toBeNull();
+    expect(book.convert(car("AED", 10000)).price_kgs_minor).toBeNull();
     await book.refresh();
     expect(book.convert(car("KRW", 18500000))).toMatchObject({
       price_kgs_minor: 120435000,
       fx_date: "USD:2026-09-12;KRW:2026-09-12",
     });
+    expect(book.convert(car("AED", 10000))).toMatchObject({
+      price_kgs_minor: 238108,
+      price_usd_minor: 2723,
+      fx_date: "USD:2026-09-12;AED:2026-09-12",
+    });
   },
 );
+
+it("uses the effective AED archive quote even when NBKR includes the preceding expired row", async () => {
+  vi.setSystemTime(instant("2026-09-13T23:00:00") * 1000);
+  const book = new RateBook(
+    metadata(),
+    transport((url) => {
+      if (url.includes("daily")) return xml("USD", "87,4500", "13.09.2026");
+      if (url.includes("weekly")) return xml("AED", "23,8108", "14.09.2026");
+      return `<center>
+        <form><select name="valuta_id"><option selected value="103">1 Дирхам ОАЭ</option></select></form>
+        <span align="center">1 Дирхам ОАЭ</span>
+        <table><tr><td>Дата<br>(курсы действуют с указанных дат)</td><td>Курс<br>(к кыргызскому сому)</td></tr>
+        <tr><td>12.09.2026</td><td>23,8108</td></tr>
+        <tr><td>05.09.2026</td><td>23,8112</td></tr></table>
+      </center>`;
+    }),
+  );
+  await book.refresh();
+  expect(book.convert(car("AED", 10000))).toMatchObject({
+    original_currency: "AED",
+    original_price_minor: 10000,
+    price_kgs_minor: 238108,
+    price_usd_minor: 2723,
+    fx_date: "USD:2026-09-13;AED:2026-09-12",
+    fx_expires_at: instant("2026-09-17"),
+  });
+});
 
 it.each([
   { id: "25", date: "12.09.2026", duplicate: false },

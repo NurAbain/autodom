@@ -803,6 +803,41 @@ describe("PostgreSQL Store", () => {
 });
 
 describe("portable snapshots and read-only legacy import", () => {
+  it("restores UAE searches and native-price events without bypassing source or FX gates", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "dubicars.com");
+    const listing = car({
+      id: "dubicars:123",
+      source: "dubicars.com",
+      market: "AE",
+      url: "https://www.dubicars.com/toyota-camry-123.html",
+      city: "Dubai",
+      original_currency: "AED",
+      original_price_minor: 500,
+      fx_expires_at: NOW + 60,
+    });
+    const buyer = await db.saveProfile({ ...profile(), market: "AE" });
+    await db.upsertListings([listing], NOW - 2);
+    // A new conversion is not a seller price change.
+    expect(await db.upsertListings([{ ...listing, price_usd_minor: 130 }], NOW - 1)).toBe(0);
+    const snapshot = join(directory, "uae.ndjson");
+    await backup(db, snapshot);
+    const targetUrl = await database();
+    await restore(snapshot, targetUrl);
+    const target = await open(targetUrl);
+    expect((await target.getProfile(buyer.user_id))?.market).toBe("AE");
+    expect((await target.search(buyer)).map((item) => item.id)).toEqual([listing.id]);
+    expect(
+      (await target.eventsAfter(0)).map((event) => event.listing.original_price_minor),
+    ).toEqual([500]);
+    expect(await target.countMatches({ ...buyer, budget_scope: "total" })).toBe(0);
+    expect(await target.countMatches({ ...buyer, allow_import: false })).toBe(0);
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
+    expect(await target.countMatches(buyer)).toBe(0);
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "dubicars.com");
+    vi.setSystemTime((NOW + 60) * 1000);
+    expect(await target.countMatches(buyer)).toBe(0);
+    expect((await target.getListing(listing.id))?.original_price_minor).toBe(500);
+  });
   it("round trips all committed private/catalog state, uses private exclusive files, and restores sequences", async () => {
     const initial = car({
       photo_url: "https://cdn.mashina.kg/cover.jpg",

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, type ReadStream } from "node:fs";
 import { mkdir, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { makeListing, makeProfile } from "@autodom/core";
+import { MARKETS, makeListing, makeProfile } from "@autodom/core";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
   finikPaymentId,
@@ -81,7 +81,8 @@ export async function insertSnapshotRow(
     const data = makeListing(row.data as Parameters<typeof makeListing>[0]);
     if (data.id !== (table === "listings" ? row.id : row.listing_id))
       throw new Error("Listing identity does not match its snapshot row");
-    if (!["KG", "KR", "US"].includes(data.market)) throw new Error("Invalid listing market");
+    if (data.market === "ALL" || !Object.hasOwn(MARKETS, data.market))
+      throw new Error("Invalid listing market");
   }
   if (table === "profiles") {
     const p = validateProfile(

@@ -50,7 +50,7 @@ function carView(listing: Listing, currency: string): MiniAppCar {
   let priceText = price === null ? "Цена для сравнения недоступна" : money(price, currency);
   if (
     listing.original_price_minor !== null &&
-    ["USD", "KGS", "KRW"].includes(listing.original_currency)
+    ["USD", "KGS", "KRW", "AED"].includes(listing.original_currency)
   ) {
     priceText = money(listing.original_price_minor, listing.original_currency);
     if (listing.original_currency !== currency && price !== null)
@@ -123,7 +123,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
       response.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src blob: https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net https://cs.copart.com; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
+        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src blob: https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net https://www.dubicars.com https://cs.copart.com; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
