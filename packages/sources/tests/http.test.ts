@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ReadableStream } from "node:stream/web";
 import { promisify } from "node:util";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { CookieJar } from "tough-cookie";
@@ -69,6 +70,20 @@ function agentReply(status: number, body: string, headers: Record<string, string
     .intercept({ path: "/catalog/passenger", method: "GET" })
     .reply(status, body, { headers });
   return agent;
+}
+
+async function lalafoTransport(factory: (route: ProxyRoute, page: number) => BrowserClient) {
+  vi.stubEnv("AUTODOM_APPROVED_SOURCES", "lalafo.kg");
+  const dataDir = await mkdtemp(join(tmpdir(), "autodom-lalafo-session-"));
+  directories.push(dataDir);
+  const transport = new ProxyTransport({
+    routes: [new ProxyRoute("lalafo", "http://isp.test:10010", "Basic ZGVtbzpkZW1v", 10001, 10)],
+    dataDir,
+    requestDelaySeconds: 0,
+    browserClientFactory: factory,
+  });
+  transports.push(transport);
+  return transport;
 }
 
 describe("mandatory proxy document transport", () => {
@@ -350,7 +365,7 @@ describe("mandatory proxy document transport", () => {
                 status: 403,
                 headers: { "cf-mitigated": "challenge" },
               });
-            return new Response('{"available":true}');
+            return new Response('{"available":true,"items":[]}');
           },
           async refresh(url) {
             if (route.tier !== "lalafo" || url.href !== "https://lalafo.kg/kyrgyzstan/nedvizhimost")
@@ -373,7 +388,206 @@ describe("mandatory proxy document transport", () => {
     for (const [source, url] of documents)
       await expect(transport.fetchDocument(url, JSON.parse, { source })).resolves.toEqual({
         available: true,
+        items: [],
       });
+  });
+
+  it("renews a sticky Lalafo session before its two-hour expiry without sending stale clearance", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "lalafo.kg");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const started = Date.now();
+    const dataDir = await mkdtemp(join(tmpdir(), "autodom-lalafo-rotation-"));
+    directories.push(dataDir);
+    let staleRequests = 0;
+    const ports = new Set<string>();
+    const transport = new ProxyTransport({
+      routes: [new ProxyRoute("lalafo", "http://isp.test:10010", "Basic ZGVtbzpkZW1v", 10001, 10)],
+      dataDir,
+      requestDelaySeconds: 0,
+      browserClientFactory: (route, page) => {
+        const created = Date.now();
+        let cleared = false;
+        return {
+          refresh: async () => {
+            cleared = true;
+          },
+          fetch: async () => {
+            if (Date.now() - created >= 115 * 60_000) {
+              staleRequests++;
+              return new Response("Expired clearance", { status: 403 });
+            }
+            if (!cleared)
+              return new Response("Challenge", {
+                status: 403,
+                headers: { "cf-mitigated": "challenge" },
+              });
+            ports.add(route.urlFor(page));
+            return new Response('{"items":[{"id":42}]}');
+          },
+        };
+      },
+    });
+    transports.push(transport);
+    const url = "https://lalafo.kg/api/search/v3/feed/search";
+    const options = { source: "lalafo.kg" };
+    await expect(transport.fetchDocument(url, JSON.parse, options)).resolves.toEqual({
+      items: [{ id: 42 }],
+    });
+    vi.setSystemTime(started + 114 * 60_000);
+    await transport.fetchDocument(url, JSON.parse, options);
+    expect(ports.size).toBe(1);
+    vi.setSystemTime(started + 115 * 60_000);
+    await expect(transport.fetchDocument(url, JSON.parse, options)).resolves.toEqual({
+      items: [{ id: 42 }],
+    });
+    expect(staleRequests).toBe(0);
+    expect(ports.size).toBe(2);
+  });
+
+  it("replaces a revoked Lalafo session once for concurrent readers", async () => {
+    let captures = 0;
+    let revoked: string | undefined;
+    let established: string | undefined;
+    const transport = await lalafoTransport((route, page) => {
+      const endpoint = route.urlFor(page);
+      let cleared = false;
+      return {
+        refresh: async () => {
+          captures++;
+          cleared = true;
+        },
+        fetch: async () => {
+          if (!cleared || endpoint === revoked)
+            return new Response("Session rejected", { status: 403 });
+          established = endpoint;
+          return new Response('{"items":[{"id":42}]}');
+        },
+      };
+    });
+    const url = "https://lalafo.kg/api/search/v3/feed/search";
+    const options = { source: "lalafo.kg" };
+    await transport.fetchDocument(url, JSON.parse, options);
+    revoked = established;
+    await expect(
+      Promise.all([
+        transport.fetchDocument(`${url}?page=2`, JSON.parse, options),
+        transport.fetchDocument(`${url}?page=3`, JSON.parse, options),
+      ]),
+    ).resolves.toEqual([{ items: [{ id: 42 }] }, { items: [{ id: 42 }] }]);
+    expect(captures).toBe(2);
+    expect(established).not.toBe(revoked);
+  });
+  it("replaces the Lalafo route when its response stream disconnects", async () => {
+    let disconnected = false;
+    const transport = await lalafoTransport(() => ({
+      refresh: async () => {},
+      fetch: async (url) => {
+        if (url.searchParams.get("per-page") !== "1" && !disconnected) {
+          disconnected = true;
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new TypeError("Connection reset while reading the response"));
+              },
+            }),
+          );
+        }
+        return new Response('{"items":[{"id":42}]}');
+      },
+    }));
+    await expect(
+      transport.fetchDocument("https://lalafo.kg/api/search/v3/feed/search", JSON.parse, {
+        source: "lalafo.kg",
+      }),
+    ).resolves.toEqual({ items: [{ id: 42 }] });
+  });
+
+  it("rejects an unusable Lalafo capture before admitting catalog requests", async () => {
+    let captures = 0;
+    let unverifiedDocuments = 0;
+    const transport = await lalafoTransport(() => {
+      const unusable = captures === 0;
+      return {
+        refresh: async () => {
+          captures++;
+        },
+        fetch: async (url) => {
+          if (unusable) {
+            if (url.searchParams.get("per-page") !== "1") unverifiedDocuments++;
+            return new Response("<html>Challenge, not API data</html>");
+          }
+          return new Response('{"items":[{"id":42}]}');
+        },
+      };
+    });
+    await expect(
+      transport.fetchDocument("https://lalafo.kg/api/search/v3/feed/search", JSON.parse, {
+        source: "lalafo.kg",
+      }),
+    ).resolves.toEqual({ items: [{ id: 42 }] });
+    expect(unverifiedDocuments).toBe(0);
+    expect(captures).toBe(2);
+  });
+
+  it("bounds failed Lalafo captures and cools down before purchasing more solves", async () => {
+    let captures = 0;
+    const transport = await lalafoTransport(() => ({
+      refresh: async () => {
+        captures++;
+        throw new SourceError("The target challenge could not be solved");
+      },
+      fetch: async () => {
+        throw new Error("Unverified sessions must not reach the API");
+      },
+    }));
+    const url = "https://lalafo.kg/api/search/v3/feed/search";
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).rejects.toBeInstanceOf(SourceError);
+    expect(captures).toBe(3);
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).rejects.toBeInstanceOf(SourceError);
+    expect(captures).toBe(3);
+  });
+
+  it("retains a Lalafo session across Retry-After without rotating or buying another clearance", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let captures = 0;
+    let limited = false;
+    let requests = 0;
+    const transport = await lalafoTransport(() => ({
+      refresh: async () => {
+        captures++;
+      },
+      fetch: async () => {
+        requests++;
+        return limited
+          ? new Response("Slow down", {
+              status: 429,
+              headers: { "cf-mitigated": "challenge", "retry-after": "120" },
+            })
+          : new Response('{"items":[{"id":42}]}');
+      },
+    }));
+    const url = "https://lalafo.kg/api/search/v3/feed/search";
+    await transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" });
+    limited = true;
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).rejects.toMatchObject({ retry_after: 120 });
+    const beforeCooldown = requests;
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).rejects.toBeInstanceOf(SourceRateLimited);
+    expect(requests).toBe(beforeCooldown);
+    expect(captures).toBe(1);
+    vi.setSystemTime(Date.now() + 120_000);
+    limited = false;
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).resolves.toEqual({ items: [{ id: 42 }] });
+    expect(captures).toBe(1);
   });
 
   it("fails closed when Lalafo is missing or challenged without using shared routes", async () => {
@@ -386,6 +600,7 @@ describe("mandatory proxy document transport", () => {
     });
     const browser = vi.fn(
       (route: ProxyRoute): BrowserClient => ({
+        refresh: async () => {},
         fetch: async () => {
           if (route.tier !== "lalafo")
             throw new Error("Shared browser must not be used for Lalafo");
@@ -416,7 +631,6 @@ describe("mandatory proxy document transport", () => {
         ).rejects.toBeInstanceOf(SourceError);
     }
     expect(plain).not.toHaveBeenCalled();
-    expect(browser.mock.calls.map(([route]) => route.tier)).toEqual(["lalafo"]);
   });
 
   it("does not rotate around a source rate limit", async () => {

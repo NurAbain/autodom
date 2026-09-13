@@ -36,6 +36,30 @@ const ORIGINS: Readonly<Record<string, string>> = {
 };
 // The solver establishes an origin-wide session here; vehicle data stays in category 1502.
 const LALAFO_CLEARANCE_URL = "https://lalafo.kg/kyrgyzstan/nedvizhimost";
+const LALAFO_SESSION_TTL_MS = 120 * 60_000;
+const LALAFO_SESSION_MARGIN_MS = 5 * 60_000;
+const LALAFO_SESSION_PROBE: DocumentRequest<unknown> = {
+  url: "https://lalafo.kg/api/search/v3/feed/search",
+  options: {
+    source: "lalafo.kg",
+    params: { category_id: 1502, page: 1, "per-page": 1 },
+    headers: { Device: "pc", Language: "ru_RU", "Country-Id": "12" },
+  },
+  parse: (text) => {
+    const data: unknown = JSON.parse(text);
+    if (!data || typeof data !== "object" || !("items" in data) || !Array.isArray(data.items))
+      throw new SourceError("Lalafo session verification returned a non-API response");
+    return data;
+  },
+};
+
+interface LalafoSession {
+  readonly client: BrowserClient;
+  readonly page: number;
+  readonly expiresAt: number;
+}
+
+class LalafoSessionRejected extends SourceError {}
 
 export interface ProxyTransportOptions {
   routes: readonly ProxyRoute[];
@@ -45,7 +69,12 @@ export interface ProxyTransportOptions {
   signal?: AbortSignal;
   onRequest?: (outcome: RequestOutcome) => void;
   dispatcherFactory?: (route: ProxyRoute, page: number, index: number) => Dispatcher;
-  browserClientFactory?: (route: ProxyRoute, page: number, index: number) => BrowserClient;
+  browserClientFactory?: (
+    route: ProxyRoute,
+    page: number,
+    index: number,
+    affinity?: string,
+  ) => BrowserClient;
 }
 
 export function retryAfterSeconds(value: string | null, now = Date.now() / 1000): number {
@@ -137,6 +166,11 @@ export class ProxyTransport implements DocumentTransport {
   readonly #abort = new AbortController();
   readonly #limit: LimitFunction;
   #riskBypass: RiskBypass | undefined;
+  #lalafoSession: LalafoSession | undefined;
+  #lalafoRefresh: { promise: Promise<LalafoSession>; abort: AbortController } | undefined;
+  readonly #lalafoUnavailable = new Map<number, number>();
+  #lalafoRetryAt = 0;
+  #lalafoRateLimitUntil = 0;
 
   constructor(options: ProxyTransportOptions) {
     if (!options.routes.length)
@@ -168,6 +202,9 @@ export class ProxyTransport implements DocumentTransport {
 
   async close(): Promise<void> {
     this.#abort.abort();
+    this.#lalafoRefresh?.abort.abort();
+    this.#lalafoSession = undefined;
+    this.#lalafoUnavailable.clear();
     await Promise.all([...this.#dispatchers.values()].map((dispatcher) => dispatcher.close()));
     this.#dispatchers.clear();
     this.#browserClients.clear();
@@ -324,7 +361,7 @@ export class ProxyTransport implements DocumentTransport {
     }
   }
 
-  private browserPage(route: ProxyRoute, key: string, rotate: boolean): number | undefined {
+  private browserPage(route: ProxyRoute, key: string): number | undefined {
     const count = Math.max(1, route.port_count);
     const unavailable = this.#browserUnavailable.get(key);
     const now = Date.now();
@@ -333,12 +370,183 @@ export class ProxyTransport implements DocumentTransport {
       const next = (page % count) + 1;
       if ((unavailable?.get(page) ?? 0) <= now) {
         unavailable?.delete(page);
-        this.#browserNextPage.set(key, rotate ? next : page);
+        this.#browserNextPage.set(key, next);
         return page;
       }
       page = next;
     }
     return undefined;
+  }
+
+  private async requestLalafo<T>(
+    client: BrowserClient,
+    request: DocumentRequest<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    const start = Math.max(Date.now(), this.#nextRequest.get("lalafo.kg") ?? 0);
+    this.#nextRequest.set("lalafo.kg", start + (this.#options.requestDelaySeconds ?? 2) * 1000);
+    if (start > Date.now()) await delay(start - Date.now(), undefined, { signal });
+    signal.throwIfAborted();
+    if (this.#lalafoRateLimitUntil > Date.now())
+      throw new SourceRateLimited(Math.ceil((this.#lalafoRateLimitUntil - Date.now()) / 1000));
+    const { options } = request;
+    const url = requestUrl(request.url, options);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), 40_000).unref();
+    const requestSignal = AbortSignal.any([signal, deadline.signal]);
+    try {
+      let response: Response | ImpitResponse;
+      try {
+        response = await client.fetch(url, {
+          method: options.method ?? "GET",
+          headers: {
+            ...options.headers,
+            ...(options.payload !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          ...(options.payload !== undefined ? { body: JSON.stringify(options.payload) } : {}),
+          redirect: "manual",
+          signal: requestSignal,
+        });
+      } catch {
+        signal.throwIfAborted();
+        throw new LalafoSessionRejected("Lalafo ISP connection failed or timed out");
+      }
+      if (response.status !== 200 || response.headers.get("cf-mitigated") === "challenge") {
+        await response.body?.cancel();
+        if (response.status === 429) {
+          const seconds = retryAfterSeconds(response.headers.get("retry-after"));
+          this.#lalafoRateLimitUntil = Date.now() + seconds * 1000;
+          throw new SourceRateLimited(seconds);
+        }
+        if (
+          [401, 403, 419].includes(response.status) ||
+          response.headers.get("cf-mitigated") === "challenge"
+        )
+          throw new LalafoSessionRejected("Lalafo rejected the ISP clearance session");
+        throw new SourceError(`lalafo.kg returned HTTP ${response.status}`);
+      }
+      let body: string;
+      try {
+        body = await readBody(response);
+      } catch (error) {
+        signal.throwIfAborted();
+        if (error instanceof SourceError) throw error;
+        throw new LalafoSessionRejected("Lalafo ISP response was interrupted");
+      }
+      requestSignal.throwIfAborted();
+      const result = request.parse(body);
+      this.#options.onRequest?.({ source: "lalafo.kg", tier: "lalafo", outcome: "success" });
+      return result;
+    } catch (error) {
+      signal.throwIfAborted();
+      this.#options.onRequest?.({
+        source: "lalafo.kg",
+        tier: "lalafo",
+        outcome: error instanceof SourceRateLimited ? "rate_limited" : "error",
+      });
+      if (deadline.signal.aborted) throw new LalafoSessionRejected("Lalafo ISP response timed out");
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async captureLalafoSession(signal: AbortSignal): Promise<LalafoSession> {
+    const route = this.#routes["lalafo.kg"]?.[0];
+    if (!route) throw new SourceError("Lalafo requires its dedicated ISP route");
+    const index = this.#options.routes.indexOf(route);
+    const count = Math.max(1, route.port_count);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      signal.throwIfAborted();
+      const affinity = randomUUID().slice(0, 8);
+      const first = Number.parseInt(affinity, 16) % count;
+      let page: number | undefined;
+      for (let offset = 0; offset < count; offset++) {
+        const candidate = ((first + offset) % count) + 1;
+        if (
+          (count === 1 || candidate !== this.#lalafoSession?.page) &&
+          (this.#lalafoUnavailable.get(candidate) ?? 0) <= Date.now()
+        ) {
+          page = candidate;
+          break;
+        }
+      }
+      if (page === undefined) break;
+      const client =
+        this.#options.browserClientFactory?.(route, page, index, affinity) ??
+        new CloudflareBrowser(
+          route,
+          page,
+          { solve: (url, proxy, signal) => this.solver(route).solve(url, proxy, signal) },
+          affinity,
+        );
+      try {
+        if (!client.refresh) throw new RiskBypassError("Lalafo requires a clearance solver");
+        await client.refresh(new URL(LALAFO_CLEARANCE_URL), client.generation ?? 0, signal);
+        await this.requestLalafo(client, LALAFO_SESSION_PROBE, signal);
+        signal.throwIfAborted();
+        const session = { client, page, expiresAt: Date.now() + LALAFO_SESSION_TTL_MS };
+        this.#lalafoSession = session;
+        this.#lalafoRetryAt = 0;
+        return session;
+      } catch (error) {
+        signal.throwIfAborted();
+        if (error instanceof RiskBypassError || error instanceof SourceRateLimited) throw error;
+        this.#lalafoUnavailable.set(page, Date.now() + REFRESH_COOLDOWN_MS);
+      }
+    }
+    throw new SourceError(
+      "Lalafo could not establish a verified session within three ISP attempts",
+    );
+  }
+
+  private async lalafoSession(signal: AbortSignal): Promise<LalafoSession> {
+    signal.throwIfAborted();
+    if (this.#lalafoRateLimitUntil > Date.now())
+      throw new SourceRateLimited(Math.ceil((this.#lalafoRateLimitUntil - Date.now()) / 1000));
+    const session = this.#lalafoSession;
+    if (session && session.expiresAt > Date.now() + LALAFO_SESSION_MARGIN_MS) return session;
+    let pending = this.#lalafoRefresh;
+    if (!pending) {
+      if (Date.now() < this.#lalafoRetryAt)
+        throw new SourceError("Lalafo session capture is cooling down");
+      const abort = new AbortController();
+      const promise = this.captureLalafoSession(abort.signal)
+        .catch((error: unknown) => {
+          this.#lalafoRetryAt = Date.now() + REFRESH_COOLDOWN_MS;
+          throw error;
+        })
+        .finally(() => {
+          this.#lalafoRefresh = undefined;
+        });
+      pending = { promise, abort };
+      this.#lalafoRefresh = pending;
+    }
+    const cancel = () => pending.abort.abort(signal.reason);
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      return await pending.promise;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
+  }
+
+  private async fetchLalafo<T>(request: DocumentRequest<T>, signal: AbortSignal): Promise<T> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const session = await this.lalafoSession(signal);
+      try {
+        return await this.requestLalafo(session.client, request, signal);
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof LalafoSessionRejected)) throw error;
+        if (this.#lalafoSession === session) {
+          this.#lalafoSession = undefined;
+          this.#lalafoUnavailable.set(session.page, Date.now() + REFRESH_COOLDOWN_MS);
+        }
+        if (attempt !== 0) throw error;
+      }
+    }
+    throw new SourceError("Lalafo ISP session remained unavailable");
   }
 
   private async fetchThroughRoutes<T>(
@@ -356,7 +564,8 @@ export class ProxyTransport implements DocumentTransport {
       throw new SourceError(
         "Source requires its configured proxy route; direct access is disabled",
       );
-    const browserRequest = options.source === "bid.cars" || options.source === "lalafo.kg";
+    if (options.source === "lalafo.kg") return this.fetchLalafo(request, signal);
+    const browserRequest = options.source === "bid.cars";
     const preferred = browserRequest ? (this.#preferredBrowserRoute.get(options.source) ?? 0) : 0;
     let alternatePorts: Set<number> | undefined;
     // At most one alternate port per tier, only after an unresolved managed challenge.
@@ -366,9 +575,7 @@ export class ProxyTransport implements DocumentTransport {
       const route = routes[index];
       if (!route) throw new SourceError("Configured proxy route is missing");
       const key = `${options.source}:${index}`;
-      const page = browserRequest
-        ? this.browserPage(route, key, options.source === "bid.cars")
-        : (options.page ?? 1);
+      const page = browserRequest ? this.browserPage(route, key) : (options.page ?? 1);
       if (page === undefined) {
         failures.push(`${route.tier}: proxy sessions are cooling down`);
         continue;
@@ -453,11 +660,7 @@ export class ProxyTransport implements DocumentTransport {
             clearTimeout(timer);
           }
           // Solving has its own bounded deadline; never retain a completed page's 40s timer.
-          await browser?.refresh?.(
-            options.source === "lalafo.kg" ? new URL(LALAFO_CLEARANCE_URL) : url,
-            generation,
-            signal,
-          );
+          await browser?.refresh?.(url, generation, signal);
         }
       } catch (error) {
         signal.throwIfAborted();

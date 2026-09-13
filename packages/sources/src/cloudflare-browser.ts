@@ -44,7 +44,7 @@ function publicIPv4(address: string): boolean {
   );
 }
 
-async function pinProxy(route: ProxyRoute, page: number): Promise<URL> {
+async function pinProxy(route: ProxyRoute, page: number, affinity?: string): Promise<URL> {
   try {
     const proxy = new URL(route.urlFor(page));
     const credentials = Buffer.from(route.authorization.slice(6), "base64").toString("latin1");
@@ -61,7 +61,10 @@ async function pinProxy(route: ProxyRoute, page: number): Promise<URL> {
     ].sort();
     if (!addresses.length) throw new Error();
     // This pins a gateway, not necessarily the provider's downstream exit IP.
-    const selection = createHash("sha256").update(proxy.href).digest().readUInt32BE(0);
+    const selection = createHash("sha256")
+      .update(affinity ?? proxy.href)
+      .digest()
+      .readUInt32BE(0);
     const address = addresses[selection % addresses.length];
     if (!address) throw new Error();
     proxy.hostname = address;
@@ -114,16 +117,23 @@ export class CloudflareBrowser implements BrowserClient {
   readonly #route: ProxyRoute;
   readonly #page: number;
   readonly #solver: Pick<RiskBypass, "solve"> | undefined;
+  readonly #affinity: string | undefined;
   #proxy: Promise<URL> | undefined;
   #session: { client: Impit; userAgent?: string } | undefined;
   #generation = 0;
   #lastSubmission = -Infinity;
   #refresh: { promise: Promise<void>; abort: AbortController } | undefined;
 
-  constructor(route: ProxyRoute, page: number, solver?: Pick<RiskBypass, "solve">) {
+  constructor(
+    route: ProxyRoute,
+    page: number,
+    solver?: Pick<RiskBypass, "solve">,
+    affinity?: string,
+  ) {
     this.#route = route;
     this.#page = page;
     this.#solver = solver;
+    this.#affinity = affinity;
   }
 
   get generation(): number {
@@ -174,7 +184,7 @@ export class CloudflareBrowser implements BrowserClient {
   }
 
   private proxy(signal: AbortSignal): Promise<URL> {
-    this.#proxy ??= pinProxy(this.#route, this.#page).catch((error: unknown) => {
+    this.#proxy ??= pinProxy(this.#route, this.#page, this.#affinity).catch((error: unknown) => {
       this.#proxy = undefined;
       throw error;
     });
