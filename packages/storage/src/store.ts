@@ -141,7 +141,7 @@ export function listingRecord(input: Listing, observation: number, firstSeen = o
   if (!Number.isFinite(observation) || !Number.isFinite(firstSeen))
     throw new Error("Invalid observation timestamp");
   const data = makeListing({ ...input, observed_at: observation });
-  if (!["KG", "KR", "US"].includes(data.market))
+  if (data.market === "ALL" || !Object.hasOwn(MARKETS, data.market))
     throw new Error("A listing must identify its actual market");
   return {
     id: data.id,
@@ -317,6 +317,7 @@ export class Store {
         "0004_remove_advertising_consent.sql",
         "0005_owner_vehicles.sql",
         "0006_payments.sql",
+        "0007_uae_market.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
@@ -353,7 +354,7 @@ export class Store {
     return this.transaction(async () => {
       let emitted = 0;
       for (const item of input) {
-        if (!["KG", "KR", "US"].includes(item.market))
+        if (item.market === "ALL" || !Object.hasOwn(MARKETS, item.market))
           throw new Error("A listing must identify its actual market");
         const observation = observedAt ?? item.observed_at ?? ingestion;
         const [previous] = await this.database

@@ -5,6 +5,7 @@ import {
   type SourcePage,
 } from "@autodom/core";
 import { fetchPage as bidcars } from "./bidcars.js";
+import { fetchPage as dubicars } from "./dubicars.js";
 import { fetchPage as encar } from "./encar.js";
 import { fetchPage as lalafo } from "./lalafo.js";
 import { fetchPage as mashina } from "./mashina.js";
@@ -16,6 +17,7 @@ const fetchers: Readonly<Record<string, (options: FetchPageOptions) => Promise<S
   "encar.com": encar,
   "truecar.com": truecar,
   "bid.cars": bidcars,
+  "dubicars.com": dubicars,
 };
 
 export async function fetchSourcePage(

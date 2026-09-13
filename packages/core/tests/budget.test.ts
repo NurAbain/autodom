@@ -31,6 +31,8 @@ describe("budget input", () => {
     expect(money(123456, "USD")).toBe("1 234,56 $");
     expect(money(123456, "KGS")).toBe("1 234,56 сом");
     expect(money(123456, "KRW")).toBe("123 456 KRW");
+    expect(money(123456, "AED")).toBe("1 234,56 AED");
+    expect(money(1, "AED")).toBe("0,01 AED");
     expect(() => money(Number.MAX_SAFE_INTEGER + 1, "USD")).toThrow();
   });
 });

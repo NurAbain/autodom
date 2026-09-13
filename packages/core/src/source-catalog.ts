@@ -1,4 +1,11 @@
-export type SourceGroup = "local" | "neighboring" | "korea" | "usa" | "property" | "history";
+export type SourceGroup =
+  | "local"
+  | "neighboring"
+  | "korea"
+  | "usa"
+  | "uae"
+  | "property"
+  | "history";
 
 export interface SourceEvidence {
   url: string;
@@ -320,6 +327,86 @@ export const SOURCES: readonly SourceSpec[] = [
         checked_on: "2026-09-11",
         finding:
           "Прочитан: §15(2) не даёт прав/лицензий на материалы и базы; §§1,4 отделяют сервис сайта от договоров покупки/доставки. Поставщик в Польше, рынок поддержанного адаптера — США.",
+      },
+    ],
+  },
+  {
+    id: "dubicars.com",
+    name: "DubiCars · Дубай",
+    market: "AE",
+    group: "uae",
+    hosts: ["www.dubicars.com"],
+    currencies: ["AED"],
+    priority: "P1",
+    listing_type: "classifieds",
+    adapter: "implemented",
+    fields: {
+      available: [
+        "source_id",
+        "url",
+        "title",
+        "price",
+        "currency",
+        "year",
+        "mileage",
+        "city",
+        "availability",
+        "photos",
+      ],
+      requested: ["body_type", "transmission", "published_at", "vin"],
+      notes:
+        "Публичный каталог подержанных авто Дубая, не весь рынок ОАЭ. Цена предложения в AED, не месячный платёж и не прежняя зачёркнутая цена. Сохранение в филсах, пересчёт USD/KGS по НБКР. Фото и пробег — сведения объявления, не проверенная история. Полная стоимость ввоза и возможность экспорта не подтверждены.",
+    },
+    access: {
+      method: "public_pages",
+      technical_status: "previously_verified",
+      permission_status: "agreement_required",
+      approval_owner: APPROVAL_OWNER,
+      terms_url: null,
+      restrictions: [
+        "Robots.txt запрещает индексирующим роботам query cr и служебные API/AJAX; доступность страницы не отменяет необходимости согласовать автоматический сбор.",
+        "Только через существующий ProxyTransport и явный AUTODOM_APPROVED_SOURCES; без входа, покупки, решения CAPTCHA и прямого fallback.",
+        "Пагинация ограничена доступными страницами сайта; число результатов и порядок с продвижением не гарантируют полный обход или первенство.",
+        "Ограничения UAE-only / Export-only, если указаны, не означают подтверждённую возможность ввоза в Кыргызстан.",
+        "Фото может быть недоступно в браузере из-за Cloudflare 403; сохранённая ссылка не гарантирует встраивание. Обход защиты не применяется.",
+      ],
+      blockers: [
+        NO_AGREEMENT,
+        "Подтвердить действующие условия сбора/повторного показа, фото и квоты. Разрешение владельца на production-включение не является лицензией площадки.",
+      ],
+    },
+    cost: UNKNOWN_COST,
+    refresh: RUNTIME_REFRESH,
+    evidence: [
+      {
+        url: "https://www.dubicars.com/dubai/used?cr=AED&ul=AE",
+        checked_on: "2026-09-13",
+        finding:
+          "Доступна публичная HTML-страница с JSON-LD Car/Offer и карточками; явные параметры AED/AE исключают зависимость валюты от IP. Технический доступ не подтверждает право повторного показа.",
+      },
+      {
+        url: "https://www.nbkr.kg/XML/weekly.xml",
+        checked_on: "2026-09-13",
+        finding:
+          "Официальная котировка AED от 12.09.2026: Nominal=1, ValidFor=7, Value=23,8108 KGS. Это курс валюты, не стоимость доставки или таможни.",
+      },
+      {
+        url: "https://trello.com/c/8tT4C32L",
+        checked_on: "2026-09-13",
+        finding:
+          "После приёмки реализации владелец 13.09.2026 явно поручил включить DubiCars в production. Это операторское разрешение, не подтверждение лицензии или полного охвата ОАЭ.",
+      },
+      {
+        url: "https://www.dubicars.com/robots.txt",
+        checked_on: "2026-09-13",
+        finding:
+          "Прочитан robots.txt: Disallow для query cr, /api, /ajax и ряда служебных путей. Операторское разрешение включения не отменяет ограничений источника и не является лицензией на данные.",
+      },
+      {
+        url: "https://www.dubicars.com/images/e56f40/650x380/alba-cars/a0de0c98-d6be-4aaa-abfc-12613eb4ca18.jpeg",
+        checked_on: "2026-09-13",
+        finding:
+          "HTTP-клиент получил настоящий JPEG; браузерная загрузка в Mini App получила 403 cf-mitigated: challenge и CORP same-origin. Интерфейс честно показал недоступность фото.",
       },
     ],
   },
@@ -696,6 +783,15 @@ export const COVERAGE: readonly { group: SourceGroup; name: string; gaps: readon
       "TrueCar и Bid.Cars подготовлены, но по решению владельца не включаются без согласования.",
       "Прямых договоров/подключений Copart и IAA нет. Доступ к закрытым американским базам не подтверждён.",
       "Географически/модельно ограниченный поиск и аукционные лоты не означают охват всего рынка США.",
+    ],
+  },
+  {
+    group: "uae",
+    name: "ОАЭ",
+    gaps: [
+      "DubiCars: подержанные автомобили Дубая; источник выключен до явного включения. Другие эмираты и прямые аукционные источники не подключены.",
+      "Неполная доступная пагинация, неизвестные история и расходы не являются нулевыми. Экспорт и полная стоимость ввоза не подтверждены.",
+      "VIN-фотоархивы ОАЭ — отдельный запрос пользователя, не источник объявлений для покупки.",
     ],
   },
   {

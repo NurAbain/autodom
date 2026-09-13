@@ -33,7 +33,7 @@ export function parseBudget(text: string): [number, number] {
 }
 
 export function money(minor: number, currency: string): string {
-  if (!["USD", "KGS", "KRW"].includes(currency)) throw new Error("Unsupported currency");
+  if (!["USD", "KGS", "KRW", "AED"].includes(currency)) throw new Error("Unsupported currency");
   if (!Number.isSafeInteger(minor)) throw new Error("Money must be a safe integer");
   const divisor = currency === "KRW" ? 1n : 100n;
   const integer = BigInt(minor);
@@ -45,6 +45,6 @@ export function money(minor: number, currency: string): string {
   }
   let rendered = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/gu, " ");
   if (fractional !== 0n) rendered += `,${fractional.toString().padStart(2, "0")}`;
-  const suffix = currency === "USD" ? "$" : currency === "KGS" ? "сом" : "KRW";
+  const suffix = currency === "USD" ? "$" : currency === "KGS" ? "сом" : currency;
   return `${rendered} ${suffix}`;
 }

@@ -31,6 +31,7 @@ const ORIGINS: Readonly<Record<string, string>> = {
   "encar.com": "https://api.encar.com",
   "truecar.com": "https://www.truecar.com",
   "bid.cars": "https://bid.cars",
+  "dubicars.com": "https://www.dubicars.com",
   "nbkr.kg": "https://www.nbkr.kg",
 };
 // The solver establishes an origin-wide session here; vehicle data stays in category 1502.
@@ -60,7 +61,7 @@ function nbkrArchiveAllowed(url: URL): boolean {
     query.size !== 9 ||
     query.get("item") !== "1562" ||
     query.get("lang") !== "RUS" ||
-    !["15", "25"].includes(query.get("valuta_id") ?? "")
+    !["15", "25", "103"].includes(query.get("valuta_id") ?? "")
   )
     return false;
   const begin = `${query.get("beg_year")}-${query.get("beg_month")}-${query.get("beg_day")}`;

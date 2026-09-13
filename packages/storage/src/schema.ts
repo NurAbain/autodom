@@ -101,7 +101,7 @@ export const profiles = pgTable(
       "profiles_budget",
       sql`${table.budget_min_minor} >= 0 AND ${table.budget_max_minor} >= ${table.budget_min_minor} AND ${table.budget_max_minor} > 0`,
     ),
-    check("profiles_market", sql`${table.market} IN ('KG','KR','US','ALL')`),
+    check("profiles_market", sql`${table.market} IN ('KG','KR','US','AE','ALL')`),
     check("profiles_budget_scope", sql`${table.budget_scope} IN ('car','total')`),
     check(
       "profiles_quiet_hours",
