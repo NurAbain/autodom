@@ -170,7 +170,7 @@ export function encarListingFacts(listing: EncarListing): [string, string][] {
     facts.push(["Повторное размещение по данным Encar", listing.re_registered ? "Да" : "Нет"]);
   facts.push([
     "Фотографии объявления",
-    `${listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)).length} · просмотр в MiniApp или у источника`,
+    String(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)).length),
   ]);
   return facts;
 }
