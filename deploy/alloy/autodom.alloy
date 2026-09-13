@@ -59,7 +59,7 @@ loki.process "autodom" {
   }
   stage.template {
     source   = "safe_event"
-    template = `{{ if has .event (list "Autodom service ready" "Autodom VIN API ready" "VIN API command failed" "VIN API shutdown failed" "Autodom bot command failed" "Autodom bot configuration failed" "Autodom bot Store shutdown failed" "Autodom worker command failed" "Autodom Redis connection unavailable" "Collection shutdown failed" "Collection queue error" "Source collection job failed" "Collection worker error" "Collection queue metrics failed" "Telegram polling lease lost" "Telegram API request failed" "Telegram update could not be handled" "Mini App request failed" "Autodom monitoring smoke") }}{{ .event }}{{ else }}Autodom unclassified event (details omitted){{ end }}`
+    template = `{{ if has .event (list "Autodom service ready" "Autodom VIN API ready." "VIN API command failed. Check private service configuration and connectivity; use --help for requirements." "VIN API shutdown failed." "Autodom bot command failed" "Autodom bot configuration failed" "Autodom bot Store shutdown failed" "Autodom worker command failed" "Autodom Redis connection unavailable" "Collection shutdown failed" "Collection queue error" "Source collection job failed" "Collection worker error" "Collection queue metrics failed" "Telegram polling lease lost" "Telegram API request failed" "Telegram update could not be handled" "Mini App request failed") }}{{ .event }}{{ else }}Autodom unclassified event (details omitted){{ end }}`
   }
   stage.template {
     source   = "safe_source"

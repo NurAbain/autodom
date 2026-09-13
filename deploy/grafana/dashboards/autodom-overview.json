@@ -515,7 +515,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "autodom_queue_collection_success{application=\"autodom\",role=~\"$role\"}",
+          "expr": "autodom_queue_collection_success{application=\"autodom\",role=~\"$role\",job=\"autodom-worker\"}",
           "legendFormat": "{{role}} {{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -590,7 +590,7 @@
     {
       "id": 7,
       "title": "Возраст heartbeat и monitor",
-      "description": "Heartbeat monitor означает начало итерации, а не доставку уведомления. Timestamp 0 отображается как большой возраст, не как успех.",
+      "description": "Heartbeat monitor означает начало итерации, а не доставку уведомления. Timestamp 0 — наблюдений ещё нет; возраст не вычисляется. No data не означает исправность.",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -605,7 +605,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - autodom_role_heartbeat_timestamp_seconds{application=\"autodom\",role=~\"$role\"}",
+          "expr": "time() - (autodom_role_heartbeat_timestamp_seconds{application=\"autodom\",role=~\"$role\"} > 0)",
           "legendFormat": "{{role}} maintenance",
           "datasource": {
             "type": "prometheus",
@@ -616,7 +616,7 @@
         },
         {
           "refId": "B",
-          "expr": "time() - autodom_monitor_timestamp_seconds{application=\"autodom\",role=~\"$role\"}",
+          "expr": "time() - (autodom_monitor_timestamp_seconds{application=\"autodom\",role=~\"$role\",job=\"autodom-bot\"} > 0)",
           "legendFormat": "{{role}} monitor",
           "datasource": {
             "type": "prometheus",
@@ -703,7 +703,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - autodom_state_collection_timestamp_seconds{application=\"autodom\",role=~\"$role\"}",
+          "expr": "time() - (autodom_state_collection_timestamp_seconds{application=\"autodom\",role=~\"$role\"} > 0)",
           "legendFormat": "{{role}} metadata",
           "datasource": {
             "type": "prometheus",
@@ -714,7 +714,7 @@
         },
         {
           "refId": "B",
-          "expr": "time() - autodom_queue_collection_timestamp_seconds{application=\"autodom\",role=~\"$role\"}",
+          "expr": "time() - (autodom_queue_collection_timestamp_seconds{application=\"autodom\",role=~\"$role\",job=\"autodom-worker\"} > 0)",
           "legendFormat": "{{role}} BullMQ",
           "datasource": {
             "type": "prometheus",

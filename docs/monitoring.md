@@ -172,3 +172,39 @@ node deploy/provision-grafana.mjs
 Dashboard: импортировать предыдущий JSON с тем же UID, не очищать Grafana volume. Alloy: восстановить прежний bind-файл и reload только Alloy, сохранив positions. Prometheus: вернуть предыдущий проверенный image/Compose/pin и пересоздать только его с тем же TSDB volume. Если откатывается VIN code без `/metrics`, сначала убрать VIN scrape и связанные новые правила, иначе missing-target alert ожидаем.
 
 Приложения возвращаются к совместимым предыдущим **фактическим** SHA отдельно; не откатывать parser на версию до исправления DubiCars `pnr` или ротации Lalafo. Не менять выбранное владельцем отключение Encar VIN. SQL-миграций мониторинг не добавляет; восстановление production DB для отката не требуется.
+
+## Выпуск 14.09.2026 по Бишкеку / 13.09.2026 UTC
+
+Карточка: [подробный мониторинг Autodom](https://trello.com/c/I0ZwRv0T). Рабочий dashboard: [Autodom • эксплуатация](https://grafana.skup.kg/d/autodom-overview). В JSON 38 панелей данных и 7 заголовков разделов; 49 datasource-запросов.
+
+### Зафиксированные версии
+
+| Ресурс | Git pin / ветка | Фактический image |
+|---|---|---|
+| bot + Mini App | `792273484afa21e6f2597acaceb2ea000b161738`, `feat/detailed-monitoring-20260914` | `autodom-bot:c46a842637a54183cb0c7aafa16bf7839fe1e787` |
+| parser | тот же pin / ветка, независимый ресурс | `autodom-worker:c46a842637a54183cb0c7aafa16bf7839fe1e787` |
+| VIN API | тот же pin / ветка, независимый ресурс | `autodom-vin:c46a842637a54183cb0c7aafa16bf7839fe1e787` |
+| общий monitoring | `18ef72283de759eb8a6ae862be3a317e24ee344c`, `feat/autodom-detailed-monitoring-20260914` в Domcom | `autodom-monitoring:55f070c4fbca17e5478a580f8e11ba00b3521284` |
+
+`7922734` исправляет только Compose labels и документацию относительно `c46a842`; SHA-256 исполняемых bot/worker/VIN bundles внутри production совпали с локальными проверенными сборками. `18ef72283` уточняет Alloy allowlist и dashboard относительно `55f070c4f`; встроенные в Prometheus scrape/rules не менялись. Поэтому разные Git pins и image tags здесь намеренны, а не доказательство неподтверждённого checkout.
+
+Coolify deployments завершены: VIN `5hgynvicyiyoxq2fwxm6ug2w` и parser `3y73narz21d9baxyrmy79eon` — 21:03:25 UTC; bot `2fsnbaj6yykbufxzqm5alauo` — 21:04:14 UTC. Первые две попытки остановились на build из-за map-формы labels; старые healthy-контейнеры продолжали работать. List-форма прошла тот же production deployment path.
+
+### Реальные проверки
+
+- TypeScript и четыре сборки успешны; **870 тестов в 46 файлах**, включая изолированный PostgreSQL. Lint завершён с exit 0, но с 226 предупреждениями и 12 информационными замечаниями: это не clean lint.
+- Реальные Prometheus 2.47 / Alloy 1.16.1: полный config и правила валидны, граничные rule fixtures прошли. В production три Autodom targets `up=1`, все **17 rules `health=ok`**.
+- Сохранены все 31 не-Autodom scrape jobs, TSDB volume, ID/start time остальных пяти monitoring-контейнеров. Пересоздан только Prometheus; Alloy применил reload. Grafana обновлена через API, без рестарта.
+- Реальные `/health`, `/ready`, `/miniapp` вернули 200; публичный `/metrics` — 404, Mini App API без подписи — 401. Private VIN `/metrics` — 200; POST без Bearer — 401, некорректный VIN с Bearer — 400. Провайдеры ради smoke не вызывались, лимит остался 10.
+- Queue snapshot worker свежий и успешный; bot не опрашивает BullMQ. В браузере исправлена ложная «ошибка очереди» для bot: соответствующие панели выбирают только worker. Нулевые timestamps исключены из расчёта возраста, а не превращены в десятки лет или успешный ноль.
+- Проверены все 49 запросов и настоящий dashboard в Chromium, включая последние логи. Пустые error/provider series при отсутствии событий остаются `No data`, не объявляются успешными проверками.
+- Реальный Docker → Alloy → изолированный Loki и отдельный replay окончательного allowlist: VIN, token, user ID, URL, raw exceptions и неизвестные поля удалены; статические VIN ready/shutdown события сохранены. Production Loki получил очищенные строки всех трёх ролей. Ранее собранное generic startup-событие VIN не переписывалось задним числом.
+- Настройки источников, Korea-first, отключение Encar VIN, архивы `copart,bidcars,carway`, proxy/session settings и бизнес-env сохранены. Миграций БД нет; платные запросы, VIN-поиски и сообщения пользователям ради мониторинга не выполнялись.
+
+Общий Alertmanager сохранил существующий receiver `telegram_and_trello` и маршруты severity. Проверены rules/evaluation и конфигурация маршрутизации; отдельная искусственная проверка доставки Telegram/Trello **не выполнялась**. На срезе 21:10 UTC dashboard показывал реальные ошибки последних попыток Bid.Cars и DubiCars. Это не скрывается и не означает отказ самого сервиса мониторинга.
+
+### Материалы для совместимого отката
+
+На сервере `192.168.0.2`: `/data/autodom-detailed-monitoring-20260914/before/` (0700, файлы 0600) содержит прежний операторский Compose, Alloy и закрытые снимки pins/env. Рядом `release-proof.json` — несекретные идентификаторы и результаты. Не копировать закрытые снимки в Git/Trello.
+
+Предыдущие фактические pins: bot `35d5454d8b9192cf75f3f862b5379f40a845ea8f`, parser `5f8d32e770421ed96ff85709e133b26a278c5338`, VIN `f2b19500de96daf6d8c0a98bed149d32b715e328`. Предыдущий monitoring pin/image — `62084a5a47829e2f7718fd4867c14263235b90d3` / `autodom-monitoring:62084a5a47829e2f7718fd4867c14263235b90d3`. При его возврате восстановить также `AUTODOM_MONITORING_IMAGE`, а не только Git pin. Сначала сверить новые параллельные релизы: эти значения — точка до данного выпуска, не разрешение затирать более новый код.
