@@ -87,6 +87,15 @@ describe("DubiCars Dubai native asking prices", () => {
     expect(result.listings[0]!.condition).toContain("2026-09-13 18:18:00");
   });
 
+  it("does not let an unverified analytics flag hide a corroborated cash price", () => {
+    const raw = document(($) => {
+      const item = vehicle($);
+      item.row.pnr = true;
+      item.save();
+    });
+    expect(parsePage(raw).listings[0]!.original_price_minor).toBe(2999900);
+  });
+
   it("preserves uppercase image extensions without allowing another host", () => {
     const photo =
       "https://www.dubicars.com/images/3a2219/650x380/private-sellers/75421c1d-de68-4158-b3db-705bced98fe1.JPG";
