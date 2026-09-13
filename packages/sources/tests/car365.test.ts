@@ -112,7 +112,7 @@ describe("Car365 anonymous HTTP workflow", () => {
           entered = true;
           return {
             body: '<script nonce="">const _CSRF_TOKEN = "session-token";</script>',
-            headers: new Headers(),
+            status: 200,
           };
         }
         const headers = new Headers(options?.headers);
@@ -130,7 +130,7 @@ describe("Car365 anonymous HTTP workflow", () => {
         ) {
           throw new SourceError("Anonymous lookup protocol rejected");
         }
-        return { body: "", headers: new Headers() };
+        return { body: "", status: 200 };
       },
     };
     await expect(sources.checkCar365(VIN, session)).resolves.toBeNull();
@@ -149,7 +149,7 @@ describe("Car365 anonymous HTTP workflow", () => {
     const session: VinSession = {
       async request(path) {
         if (path === LOOKUP_PATH) submitted = true;
-        return { body, headers: new Headers() };
+        return { body, status: 200 };
       },
     };
     await expect(sources.checkCar365(VIN, session)).rejects.toThrow(SourceError);

@@ -1,21 +1,45 @@
 import type { PaymentOrder } from "@autodom/core/payments";
 import {
+  encarHistoryDiscoveryUrl,
+  encarListingUrl,
+  isEncarPhotoUrl,
   normalizeVin,
   VIN_PROVIDERS,
   VIN_SOURCE_URLS,
   type VinCheckResult,
   vinGoogleSearchUrl,
 } from "@autodom/core/vin";
+import {
+  groupVinArchiveLots,
+  isVinArchivePhotoUrl,
+  VIN_ARCHIVE_AUCTION_NAMES,
+  VIN_ARCHIVE_COVERAGE_NOTICE,
+  VIN_ARCHIVE_PHOTO_MAX_BYTES,
+  VIN_ARCHIVE_PROVIDER_NAMES,
+  VIN_ARCHIVE_SOURCE_URLS,
+  type VinArchivePhotoRequest,
+  type VinArchiveResult,
+} from "@autodom/core/vin-archive";
 import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE } from "../src/korean-report-example.js";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
 import { PAYMENT_PRIVACY_NOTICE, paymentOrderStatus } from "../src/payment-text.js";
 import {
+  confirmedEncarListings,
+  encarHistorySummary,
+  encarListingFacts,
+  VIN_ARCHIVE_CARWAY_NOTICE,
+  VIN_ARCHIVE_DISCLOSURE,
+  VIN_ARCHIVE_LABEL,
+  VIN_ARCHIVE_STATUS_TEXT,
   VIN_CAUTION,
   VIN_DISCLOSURE,
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
   VIN_SOURCE_NAMES,
+  vinArchiveLotText,
+  vinArchiveSourceUrl,
+  vinArchiveTime,
   vinSourceText,
 } from "../src/vin-text.js";
 
@@ -58,13 +82,21 @@ function navigate(view: View, carId?: string): void {
   void load();
 }
 
-async function request<T>(path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+  readResponse?: (response: Response) => Promise<T>,
+): Promise<T> {
   if (!telegram?.initData) {
     throw new Error(
       "Откройте Автодом из личного чата в Telegram. Здесь нужен защищённый доступ, а не профиль покупателя.",
     );
   }
   const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", onAbort, { once: true });
   const started = generation;
   pending.add(controller);
   const timeout = window.setTimeout(() => controller.abort(), 90_000);
@@ -101,11 +133,12 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
       }
       throw new Error(message);
     }
-    const result = (await response.json()) as T;
-    if (started !== generation) throw new Error("Navigation interrupted");
+    const result = readResponse ? await readResponse(response) : ((await response.json()) as T);
+    if (started !== generation || controller.signal.aborted) throw new Error("Request interrupted");
     return result;
   } finally {
     window.clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
     pending.delete(controller);
   }
 }
@@ -508,20 +541,46 @@ function showDialogue(view: "buy" | "sell"): void {
   void send(view === "buy" ? "/buy" : "/sell");
 }
 
-function gallery(car: MiniAppCar): HTMLElement {
+function gallery(
+  title: string,
+  photoUrls: readonly string[],
+  archive?: { request: Omit<VinArchivePhotoRequest, "photo_url">; signal: AbortSignal },
+): HTMLElement {
   const section = element("section", "gallery");
-  section.setAttribute("aria-label", "Фотографии автомобиля");
-  const photos = car.photoUrls.map(safeUrl).filter((url): url is string => url !== null);
+  section.setAttribute("aria-label", `Фотографии: ${title}`);
+  const photos = photoUrls.map(safeUrl).filter((url): url is string => url !== null);
   if (!photos.length) {
     section.append(element("p", "photo-empty", "Фотографии не предоставлены источником."));
     return section;
   }
   let selected = 0;
+  let photoController: AbortController | undefined;
+  let blobUrl: string | undefined;
+  let visible = !archive;
+  let observer: IntersectionObserver | undefined;
+  const releasePhoto = (): void => {
+    photoController?.abort();
+    photoController = undefined;
+    if (blobUrl) URL.revokeObjectURL(blobUrl);
+    blobUrl = undefined;
+  };
+  archive?.signal.addEventListener(
+    "abort",
+    () => {
+      observer?.disconnect();
+      releasePhoto();
+    },
+    { once: true },
+  );
+  const failed = archive ? new Set<number>() : undefined;
+  const photoLink = archive ? sourceLink(null, "Открыть оригинал фото") : undefined;
+  const photoNotice = archive ? element("p", "notice") : undefined;
+  if (photoNotice) photoNotice.hidden = true;
   const frame = element("div", "photo-frame");
   const counter = element("span", "photo-counter");
   counter.setAttribute("aria-live", "polite");
   const previous = button(
-    "Предыдущее",
+    archive ? "←" : "Предыдущее",
     () => {
       selected -= 1;
       renderPhoto();
@@ -529,41 +588,124 @@ function gallery(car: MiniAppCar): HTMLElement {
     "button button-quiet",
   );
   const next = button(
-    "Следующее",
+    archive ? "→" : "Следующее",
     () => {
       selected += 1;
       renderPhoto();
     },
     "button button-quiet",
   );
+  if (archive) {
+    previous.setAttribute("aria-label", "Предыдущее фото");
+    next.setAttribute("aria-label", "Следующее фото");
+  }
   function renderPhoto(): void {
-    const image = element("img");
-    image.alt = `${car.title} — фото ${selected + 1}`;
-    image.referrerPolicy = "no-referrer";
-    image.decoding = "async";
-    image.src = photos[selected]!;
-    image.addEventListener(
-      "error",
-      () => {
-        if (frame.contains(image))
-          frame.replaceChildren(
-            element("p", "photo-empty", "Источник не смог загрузить это фото."),
-          );
-      },
-      { once: true },
-    );
-    frame.replaceChildren(image);
-    counter.textContent = `${selected + 1} / ${photos.length}`;
+    releasePhoto();
+    if (archive?.signal.aborted) return;
+    const index = selected;
+    const imageUrl = photos[index];
+    if (imageUrl === undefined) throw new RangeError("Photo index is out of bounds");
+    if (failed?.has(index)) {
+      frame.replaceChildren(element("p", "photo-empty", "Это фото источника недоступно."));
+    } else {
+      const image = element("img");
+      image.alt = `${title} — фото ${selected + 1}`;
+      image.referrerPolicy = "no-referrer";
+      image.decoding = "async";
+      image.loading = "lazy";
+      if (!archive) image.src = imageUrl;
+      image.addEventListener(
+        "error",
+        () => {
+          failed?.add(index);
+          if (photoNotice) {
+            photoNotice.hidden = false;
+            photoNotice.textContent =
+              "Часть фотографий сейчас недоступна. Лот и события сохранены. Повторите поиск архивных фото.";
+          }
+          if (frame.contains(image)) {
+            frame.replaceChildren(
+              element("p", "photo-empty", "Источник не смог загрузить это фото."),
+            );
+            if (archive)
+              counter.textContent = `Фото ${index + 1} недоступно · ${photos.length} ссылок`;
+          }
+        },
+        { once: true },
+      );
+      frame.replaceChildren(image);
+      if (archive && visible) {
+        const controller = new AbortController();
+        photoController = controller;
+        void request<Blob>(
+          "/miniapp/api/vin/archive-photo",
+          { ...archive.request, photo_url: imageUrl },
+          controller.signal,
+          async (response) => {
+            const type = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
+            if (!["image/jpeg", "image/png", "image/webp"].includes(type))
+              throw new Error("Источник не вернул фото.");
+            const reader = response.body?.getReader();
+            if (!reader) throw new Error("Источник не вернул фото.");
+            const chunks: Uint8Array<ArrayBuffer>[] = [];
+            let size = 0;
+            try {
+              for (;;) {
+                const chunk = await reader.read();
+                if (chunk.done) break;
+                size += chunk.value.byteLength;
+                if (size > VIN_ARCHIVE_PHOTO_MAX_BYTES) throw new Error("Фото слишком большое.");
+                chunks.push(chunk.value);
+              }
+            } finally {
+              await reader.cancel().catch(() => undefined);
+              reader.releaseLock();
+            }
+            if (!size) throw new Error("Источник не вернул фото.");
+            return new Blob(chunks, { type });
+          },
+        )
+          .then((blob) => {
+            if (controller.signal.aborted || archive.signal.aborted || !frame.contains(image))
+              return;
+            blobUrl = URL.createObjectURL(blob);
+            image.src = blobUrl;
+          })
+          .catch(() => {
+            if (!controller.signal.aborted && !archive.signal.aborted && frame.contains(image))
+              image.dispatchEvent(new Event("error"));
+          });
+      }
+    }
+    counter.textContent = archive
+      ? `${failed?.has(selected) ? "Фото недоступно" : `Ссылка ${selected + 1}`} · ${photos.length} ссылок`
+      : `${selected + 1} / ${photos.length}`;
+    if (photoLink) photoLink.href = imageUrl;
     previous.disabled = selected === 0;
     next.disabled = selected === photos.length - 1;
   }
   section.append(frame);
-  if (photos.length > 1) {
+  if (photos.length > 1 || archive) {
     const controls = element("div", "gallery-controls");
     controls.append(previous, counter, next);
     section.append(controls);
   }
+  if (photoNotice && photoLink) section.append(photoNotice, photoLink);
   renderPhoto();
+  if (archive && !archive.signal.aborted) {
+    if (typeof IntersectionObserver === "undefined") {
+      visible = true;
+      queueMicrotask(renderPhoto);
+    } else {
+      observer = new IntersectionObserver((entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer?.disconnect();
+        visible = true;
+        renderPhoto();
+      });
+      observer.observe(section);
+    }
+  }
   return section;
 }
 
@@ -576,7 +718,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element(
       "p",
       "muted",
-      "Проверим наличие отчёта CarHistory и экспортную запись Car365. Полную историю бесплатно не получаем.",
+      "Проверим наличие отчёта CarHistory, экспортную запись Car365 и найденные объявления Encar с подтверждённым VIN. Полную историю бесплатно не получаем.",
     ),
   );
   if (car) {
@@ -628,18 +770,211 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   const results = element("div", "vin-results");
   results.setAttribute("role", "status");
   results.setAttribute("aria-live", "polite");
+  let archiveRevision = 0;
+  let archiveController: AbortController | undefined;
+  const archiveResults = element("div", "vin-results");
+  archiveResults.setAttribute("role", "status");
+  archiveResults.setAttribute("aria-live", "polite");
+  const archiveButton = button(
+    VIN_ARCHIVE_LABEL,
+    () => void lookupArchive(),
+    "button button-quiet",
+  );
+  archiveButton.disabled = !normalizeVin(input.value);
   input.addEventListener("input", () => {
     const url = vinGoogleSearchUrl(input.value);
     search.hidden = !url;
     if (url) search.href = url;
     else search.removeAttribute("href");
     results.replaceChildren();
+    archiveRevision += 1;
+    archiveController?.abort();
+    archiveController = undefined;
+    archiveResults.replaceChildren();
+    archiveButton.disabled = !normalizeVin(input.value);
+    archiveButton.textContent = VIN_ARCHIVE_LABEL;
   });
   form.append(label, input, submit, search, element("p", "footnote", VIN_GOOGLE_SEARCH_NOTICE));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!submit.disabled) void lookup();
   });
+  async function lookupArchive(): Promise<void> {
+    const vin = normalizeVin(input.value);
+    if (!vin || archiveButton.disabled || started !== generation) return;
+    archiveController?.abort();
+    const controller = new AbortController();
+    archiveController = controller;
+    pending.add(controller);
+    controller.signal.addEventListener("abort", () => pending.delete(controller), { once: true });
+    const revision = ++archiveRevision;
+    archiveButton.disabled = true;
+    archiveButton.textContent = "Ищем архивные фото…";
+    archiveResults.replaceChildren(element("p", "", `Поиск архивных записей и фото: ${vin}`));
+    try {
+      const result = await request<VinArchiveResult>(
+        "/miniapp/api/vin/archive-photos",
+        { vin },
+        controller.signal,
+      );
+      if (
+        started !== generation ||
+        revision !== archiveRevision ||
+        normalizeVin(input.value) !== vin
+      )
+        return;
+      if (result.vin !== vin)
+        throw new Error("Источник вернул результат для другого VIN. Этот результат не показан.");
+      const sections: HTMLElement[] = [
+        element("p", "vin", `VIN ${result.vin}`),
+        element("p", "footnote", `Ответ получен: ${vinArchiveTime(result.checked_at)}`),
+      ];
+      for (const source of result.sources) {
+        const section = element("section", "vin-source");
+        section.dataset.status = source.status;
+        section.append(
+          element("h3", "", VIN_ARCHIVE_PROVIDER_NAMES[source.provider]),
+          element("p", "badge", VIN_ARCHIVE_STATUS_TEXT[source.status]),
+          element("p", "footnote", `Данные получены: ${vinArchiveTime(source.checked_at)}`),
+          sourceLink(
+            vinArchiveSourceUrl(source.source_url, source.provider) ??
+              VIN_ARCHIVE_SOURCE_URLS[source.provider],
+            `Источник: ${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}`,
+          ),
+        );
+        if (source.provider === "carway")
+          section.append(element("p", "notice", VIN_ARCHIVE_CARWAY_NOTICE));
+        if (source.partial)
+          section.append(
+            element("p", "notice", "Поиск или получение фотографий выполнены не полностью."),
+          );
+        sections.push(section);
+      }
+      for (const group of groupVinArchiveLots(result)) {
+        const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
+        const lotSection = element("section", "vin-source");
+        lotSection.append(element("h3", "", title));
+        for (const { provider, lot } of group.sources) {
+          lotSection.append(
+            element("p", "vin-observation", vinArchiveLotText(lot, provider)),
+            sourceLink(
+              vinArchiveSourceUrl(lot.source_url, provider, lot, vin) ??
+                VIN_ARCHIVE_SOURCE_URLS[provider],
+              `Открыть лот ${VIN_ARCHIVE_AUCTION_NAMES[lot.auction]} на ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}`,
+            ),
+          );
+          if (
+            lot.photos.some(
+              (photo) => !isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
+            )
+          )
+            lotSection.append(
+              element(
+                "p",
+                "notice",
+                `${VIN_ARCHIVE_PROVIDER_NAMES[provider]}: часть ссылок на фотографии недоступна.`,
+              ),
+            );
+        }
+        const galleries = group.sources
+          .map(({ provider, lot }) => ({
+            provider,
+            photoUrls: [
+              ...new Set(
+                lot.photos.filter((photo) =>
+                  isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
+                ),
+              ),
+            ],
+            lot,
+          }))
+          .filter(
+            (candidate, index, all) =>
+              candidate.photoUrls.length > 0 &&
+              !all
+                .slice(0, index)
+                .some(
+                  (previous) =>
+                    previous.photoUrls.length === candidate.photoUrls.length &&
+                    candidate.photoUrls.every((photo) => previous.photoUrls.includes(photo)),
+                ),
+          );
+        if (galleries.length) {
+          const galleryHost = element("div");
+          const controls = element("div", "button-row");
+          controls.setAttribute("aria-label", "Источник фотографий");
+          const choices: HTMLButtonElement[] = [];
+          let galleryController: AbortController | undefined;
+          controller.signal.addEventListener("abort", () => galleryController?.abort(), {
+            once: true,
+          });
+          const showGallery = (index: number): void => {
+            galleryController?.abort();
+            galleryController = new AbortController();
+            if (controller.signal.aborted) galleryController.abort();
+            const selected = galleries[index]!;
+            galleryHost.replaceChildren(
+              element(
+                "p",
+                "footnote",
+                `Фотографии: ${VIN_ARCHIVE_PROVIDER_NAMES[selected.provider]}`,
+              ),
+              gallery(title, selected.photoUrls, {
+                request: {
+                  vin,
+                  provider: selected.provider,
+                  auction: selected.lot.auction,
+                  lot_id: selected.lot.lot_id,
+                },
+                signal: galleryController.signal,
+              }),
+            );
+            choices.forEach((choice, choiceIndex) => {
+              choice.setAttribute("aria-pressed", String(choiceIndex === index));
+            });
+          };
+          if (galleries.length > 1) {
+            galleries.forEach((candidate, index) => {
+              const choice = button(
+                `Фото ${VIN_ARCHIVE_PROVIDER_NAMES[candidate.provider]}`,
+                () => showGallery(index),
+                "button button-quiet",
+              );
+              choices.push(choice);
+              controls.append(choice);
+            });
+            lotSection.append(controls);
+          }
+          lotSection.append(galleryHost);
+          showGallery(
+            Math.max(
+              0,
+              galleries.findIndex(
+                (candidate) => candidate.provider === group.photo_source.provider,
+              ),
+            ),
+          );
+        }
+        sections.push(lotSection);
+      }
+      archiveResults.replaceChildren(...sections);
+    } catch (error) {
+      if (
+        started !== generation ||
+        revision !== archiveRevision ||
+        normalizeVin(input.value) !== vin
+      )
+        return;
+      archiveResults.replaceChildren(
+        element("p", "notice", `${errorText(error)} ${VIN_ARCHIVE_STATUS_TEXT.unavailable}`),
+      );
+    } finally {
+      if (started === generation && revision === archiveRevision) {
+        archiveButton.disabled = !normalizeVin(input.value);
+        archiveButton.textContent = VIN_ARCHIVE_LABEL;
+      }
+    }
+  }
   async function lookup(): Promise<void> {
     const vin = normalizeVin(input.value);
     if (!vin) {
@@ -685,7 +1020,13 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             "badge",
             provider === "carhistory" && observation.status === "available"
               ? "Отчёт доступен у провайдера"
-              : statuses[observation.status],
+              : provider === "encar" && observation.status === "available"
+                ? confirmedEncarListings(result).length
+                  ? result.encar?.data?.partial
+                    ? "Объявления найдены · частичный результат"
+                    : "Подтверждённые объявления найдены"
+                  : statuses.unavailable
+                : statuses[observation.status],
           ),
         );
         if (provider === "car365" && observation.status === "available") {
@@ -730,6 +1071,45 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
                 : `Проверено: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(observation.checked_at * 1000))} · Бишкек`,
             ),
           );
+        } else if (provider === "encar" && observation.status === "available") {
+          section.append(element("p", "vin-observation", encarHistorySummary(result)));
+          section.append(
+            sourceLink(encarHistoryDiscoveryUrl(result.vin), "Поиск кандидатов: Carcheck"),
+          );
+          for (const listing of confirmedEncarListings(result)) {
+            const advertisement = element("article", "encar-listing");
+            advertisement.append(
+              element("h4", "", `Объявление Encar №${listing.id}`),
+              element("p", "footnote", `Подтверждённый VIN: ${listing.vin}`),
+            );
+            const facts = element("dl", "facts");
+            for (const [label, value] of encarListingFacts(listing)) {
+              const fact = element("div", "fact");
+              fact.append(element("dt", "", label), element("dd", "", value));
+              facts.append(fact);
+            }
+            advertisement.append(
+              facts,
+              gallery(
+                `Encar №${listing.id} · ${listing.model ?? listing.vin}`,
+                listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)),
+              ),
+              sourceLink(
+                encarListingUrl(listing.id),
+                "Открыть официальное объявление и фотографии",
+              ),
+            );
+            section.append(advertisement);
+          }
+          section.append(
+            element(
+              "p",
+              "footnote",
+              observation.checked_at === null
+                ? "Время проверки неизвестно."
+                : `Проверено: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(observation.checked_at * 1000))} · Бишкек`,
+            ),
+          );
         } else {
           section.append(element("p", "vin-observation", vinSourceText(provider, result)));
         }
@@ -755,7 +1135,17 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       }
     }
   }
-  panel.append(form, results, element("p", "footnote", VIN_CAUTION), disclosure);
+  panel.append(
+    form,
+    results,
+    element("p", "footnote", VIN_CAUTION),
+    disclosure,
+    element("h2", "", VIN_ARCHIVE_LABEL),
+    element("p", "footnote", VIN_ARCHIVE_DISCLOSURE),
+    archiveButton,
+    archiveResults,
+    element("p", "footnote", VIN_ARCHIVE_COVERAGE_NOTICE),
+  );
   return panel;
 }
 
@@ -767,7 +1157,7 @@ function showCar(car: MiniAppCar): void {
     element("h1", "", car.title),
     element("p", "price", car.price),
   );
-  main.append(heading, gallery(car));
+  main.append(heading, gallery(car.title, car.photoUrls));
   const facts = element("dl", "facts");
   for (const [label, value] of [
     ["Год", car.year === null ? "Не указан" : String(car.year)],

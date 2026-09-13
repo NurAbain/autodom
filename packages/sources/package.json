@@ -8,6 +8,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./vin-archive": {
+      "types": "./src/vin-archive.ts",
+      "default": "./src/vin-archive.ts"
+    },
     "./vin": {
       "types": "./src/vin.ts",
       "default": "./src/vin.ts"

@@ -1,4 +1,4 @@
-export const VIN_PROVIDERS = ["carhistory", "car365", "nhtsa_vpic", "autodev"] as const;
+export const VIN_PROVIDERS = ["carhistory", "car365", "encar", "nhtsa_vpic", "autodev"] as const;
 export type VinProvider = (typeof VIN_PROVIDERS)[number];
 export type VinSourceStatus = "available" | "not_found" | "unavailable" | "disabled";
 
@@ -6,6 +6,7 @@ export type VinSourceStatus = "available" | "not_found" | "unavailable" | "disab
 export const VIN_SOURCE_URLS: Readonly<Record<VinProvider, string>> = {
   carhistory: "https://www.carhistory.or.kr/search/carhistory/search.car",
   car365: "https://www.car365.go.kr/ccpt/carlife/scrcar/schdcarXportView.do",
+  encar: "https://fem.encar.com/",
   nhtsa_vpic: "https://vpic.nhtsa.dot.gov/api/",
   autodev: "https://docs.auto.dev/v2/products/vin-decode",
 };
@@ -52,11 +53,41 @@ export interface AutoDevRecord {
   ambiguous: boolean;
 }
 
+export const ENCAR_HISTORY_MAX_LISTINGS = 5;
+export const ENCAR_HISTORY_MAX_PHOTOS = 32;
+export const ENCAR_DISCOVERY_ORIGIN = "https://carcheck.by";
+
+/** An Encar advertisement confirmed by its full VIN, not a completed transaction. */
+export interface EncarListing {
+  id: string;
+  vin: string;
+  source_url: string;
+  model: string | null;
+  mileage_km: number | null;
+  advertisement_status: "ADVERTISE" | "SOLD" | null;
+  /** Source-local timestamps without an inferred timezone or sale date. */
+  created_at: string | null;
+  first_advertised_at: string | null;
+  modified_at: string | null;
+  re_registered: boolean | null;
+  photo_urls: string[];
+}
+
+export interface EncarHistory {
+  vin: string;
+  discovery_url: string;
+  listings: EncarListing[];
+  /** Some discovered candidates could not be verified, or the lookup limit was reached. */
+  partial: boolean;
+}
+
 export interface VinCheckResult {
   vin: string;
   checked_at: number;
   carhistory: VinObservation;
   car365: VinObservation & { data: Car365Record | null };
+  /** Omitted when not configured or absent in an older API. */
+  encar?: (VinObservation & { data: EncarHistory | null }) | undefined;
   /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
   nhtsa_vpic?: (VinObservation & { data: NhtsaVpicRecord | null }) | undefined;
   /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
@@ -74,6 +105,23 @@ export function normalizeVin(value: string): string | null {
 export function vinGoogleSearchUrl(value: string): string | null {
   const vin = normalizeVin(value);
   return vin ? `https://www.google.com/search?q=%22${vin}%22` : null;
+}
+
+export function encarHistoryDiscoveryUrl(value: string): string | null {
+  const vin = normalizeVin(value);
+  return vin ? `${ENCAR_DISCOVERY_ORIGIN}/auto/${vin}` : null;
+}
+
+export function encarListingUrl(id: string): string | null {
+  return /^[1-9]\d{0,9}$/u.test(id) ? `https://fem.encar.com/cars/detail/${id}` : null;
+}
+
+const ENCAR_PHOTO_URL =
+  /^https:\/\/ci\.encar\.com\/carpicture\/carpicture\d{2}\/pic\d{4}\/([1-9]\d{0,9})_\d{3}\.jpg$/u;
+
+/** Only source gallery paths for this confirmed canonical advertisement are publishable. */
+export function isEncarPhotoUrl(value: string, id: string): boolean {
+  return ENCAR_PHOTO_URL.exec(value)?.[1] === id;
 }
 
 // These are on-demand VIN providers, not catalog collectors in APPROVED_SOURCES.

@@ -75,6 +75,72 @@ describe("VIN lookup source independence", () => {
       await service.close();
     }
   });
+
+  it("keeps confirmed history when another old Encar card hides its VIN", async () => {
+    const archiveVin = "WBA51AG03NCK98884";
+    const source = new MockAgent();
+    source.disableNetConnect();
+    source
+      .get("https://carcheck.by")
+      .intercept({ path: `/auto/${archiveVin}` })
+      .reply(
+        200,
+        `<h1 class="auto-vin-title"><span>${archiveVin}</span>
+        <button class="auto-save-button" data-save-vin="${archiveVin}"
+          data-save-lot="39720103" data-save-auction="12"></button></h1>
+        <details class="vehicle-sales-history"><table class="vehicle-sales-table"><tbody>
+          <tr><td class="history-auction">Encar</td><td>—</td>
+            <td><a href="https://carcheck.by/auto/${archiveVin}/39711062">39711062</a></td>
+            <td>—</td><td>21,990 км</td></tr>
+        </tbody></table></details>`,
+      );
+    for (const [id, vin] of [
+      [39720103, archiveVin],
+      [39711062, null],
+    ] as const) {
+      source
+        .get("https://fem.encar.com")
+        .intercept({ path: `/cars/detail/${id}` })
+        .reply(
+          200,
+          `<div>이 차량은 판매되었거나 삭제된 차량입니다.</div>
+          <script>__PRELOADED_STATE__ = ${JSON.stringify({
+            cars: {
+              base: {
+                vehicleId: id,
+                queryCarId: id,
+                vin,
+                manage: {
+                  dummy: false,
+                  dummyVehicleId: null,
+                  reRegistered: false,
+                  registDateTime: "2025-05-26T09:23:30",
+                  firstAdvertisedDateTime: "2025-05-27T09:20:12",
+                  modifyDateTime: "2025-05-31T19:21:55",
+                },
+                advertisement: { status: "SOLD" },
+                category: { manufacturerEnglishName: "BMW", modelGroupEnglishName: "5-Series" },
+                spec: { mileage: 21986 },
+                photos: [{ path: `/carpicture02/pic3972/${id}_001.jpg` }],
+              },
+            },
+          })};</script>`,
+        );
+    }
+    const service = new VinCheckService({
+      providers: ["encar"],
+      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
+      requestDelaySeconds: 0,
+      dispatcherFactory: () => source,
+    });
+    try {
+      const result = await service.check(archiveVin);
+      expect(result.encar?.data?.listings.map((listing) => listing.id)).toEqual(["39720103"]);
+      expect(result.encar?.data?.partial).toBe(true);
+    } finally {
+      await service.close();
+    }
+  });
 });
 
 describe("Korean-first VIN lookup", () => {
@@ -220,6 +286,49 @@ describe("Korean-first VIN lookup", () => {
       expect(directRequests).toEqual([]);
       expect(result).not.toHaveProperty("nhtsa_vpic");
       expect(result).not.toHaveProperty("autodev");
+    },
+  );
+
+  it.each(["not_found", "unavailable"] as const)(
+    "decodes only after a genuine Encar archive miss, not a failed lookup: %s",
+    async (outcome) => {
+      const source = new MockAgent();
+      source.disableNetConnect();
+      source
+        .get("https://carcheck.by")
+        .intercept({ path: `/auto/${VIN}` })
+        .reply(
+          outcome === "not_found" ? 301 : 200,
+          outcome === "not_found" ? "" : "<h1>Maintenance</h1>",
+          { headers: { location: `https://carcheck.by/vin/${VIN}` } },
+        );
+      let decoderRequests = 0;
+      direct
+        .get("https://vpic.nhtsa.dot.gov")
+        .intercept({ path: `/api/vehicles/DecodeVinValues/${VIN}?format=json` })
+        .reply(() => {
+          decoderRequests++;
+          return {
+            statusCode: 200,
+            data: JSON.stringify({
+              Count: 1,
+              Results: [{ VIN, ErrorCode: "0", Make: "HYUNDAI", ModelYear: "1999" }],
+            }),
+            responseOptions: { headers: { "content-type": "application/json" } },
+          };
+        });
+      const service = new VinCheckService({
+        providers: ["encar", "nhtsa_vpic"],
+        routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
+        requestDelaySeconds: 0,
+        dispatcherFactory: () => source,
+      });
+      services.push(service);
+      const result = await service.check(VIN);
+      expect(result.encar?.status).toBe(outcome);
+      expect(decoderRequests).toBe(outcome === "not_found" ? 1 : 0);
+      if (outcome === "not_found") expect(result.nhtsa_vpic?.status).toBe("available");
+      else expect(result).not.toHaveProperty("nhtsa_vpic");
     },
   );
 

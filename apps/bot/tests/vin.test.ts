@@ -1,4 +1,4 @@
-import type { VinCheckResult } from "@autodom/core/vin";
+import type { EncarListing, VinCheckResult } from "@autodom/core/vin";
 import { describe, expect, it } from "vitest";
 import { vinResultText, vinSourceText } from "../src/vin-text.js";
 
@@ -199,5 +199,53 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(section).toMatch(/Декодер.*характеристики/);
     expect(section).not.toMatch(/государственная запись|экспорте/);
     expect(section).toMatch(/не подтверждает отсутствие ДТП/);
+  });
+
+  it("keeps only full-VIN Encar matches and generates canonical links instead of trusting supplied URLs", () => {
+    const listing: EncarListing = {
+      id: "39720103",
+      vin: result.vin,
+      source_url: "https://attacker.invalid/ad",
+      model: "BMW",
+      mileage_km: 0,
+      advertisement_status: "SOLD",
+      created_at: "2024-05-02T11:12:13",
+      first_advertised_at: null,
+      modified_at: null,
+      re_registered: false,
+      photo_urls: ["https://attacker.invalid/photo.jpg"],
+    };
+    const history = {
+      ...result,
+      encar: {
+        status: "available",
+        source_url: "https://attacker.invalid",
+        checked_at: result.checked_at,
+        data: {
+          vin: result.vin,
+          discovery_url: "https://attacker.invalid/search",
+          partial: true,
+          listings: [
+            listing,
+            { ...listing, id: "39711062", vin: "WBA51AG03NCK98884", model: "OTHER VIN" },
+            { ...listing, id: "40122438", vin: "", model: "UNKNOWN VIN" },
+            { ...listing, id: "../malicious", model: "INVALID ID" },
+          ],
+        },
+      },
+    } satisfies VinCheckResult;
+    const text = vinResultText(history);
+    expect(text).toContain("https://fem.encar.com/cars/detail/39720103");
+    expect(text).toContain("2024-05-02T11:12:13");
+    expect(text).not.toMatch(
+      /39711062|40122438|OTHER VIN|UNKNOWN VIN|INVALID ID|attacker\.invalid/,
+    );
+    for (const status of ["disabled", "unavailable", "not_found"] as const) {
+      expect(
+        vinSourceText("encar", { ...history, encar: { ...history.encar, status } }),
+      ).not.toContain("39720103");
+    }
+    history.encar.data.vin = "WBA51AG03NCK98884";
+    expect(vinSourceText("encar", history)).not.toContain("39720103");
   });
 });

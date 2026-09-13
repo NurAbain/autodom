@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeListing, makeProfile, money } from "@autodom/core";
 import type { VinCheckResult, VinLookup } from "@autodom/core/vin";
+import type {
+  VinArchiveLookup,
+  VinArchivePhotoLookup,
+  VinArchivePhotoRequest,
+  VinArchiveResult,
+} from "@autodom/core/vin-archive";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMiniAppServer } from "../src/miniapp-server.js";
 
@@ -60,6 +66,48 @@ const vinResult: VinCheckResult = {
   },
 };
 const checkVin = vi.fn<VinLookup>(async () => vinResult);
+const archiveResult: VinArchiveResult = {
+  vin: vinResult.vin,
+  checked_at: vinResult.checked_at,
+  coverage: "indexed_lots_only",
+  sources: [
+    {
+      provider: "copart",
+      status: "no_photos",
+      source_url: "https://www.copart.com/",
+      checked_at: vinResult.checked_at,
+      partial: true,
+      lots: [
+        {
+          auction: "copart",
+          lot_id: "12345678",
+          source_url: "https://www.copart.com/lot/12345678",
+          events: [
+            { status: "sold", auction_at: null, auction_date: null, final_bid_usd_minor: null },
+          ],
+          photos: [],
+          photos_complete: false,
+        },
+      ],
+    },
+  ],
+};
+const checkVinArchive = vi.fn<VinArchiveLookup>(async () => archiveResult);
+const photoRequest: VinArchivePhotoRequest = {
+  vin: "1FTFW1ED9NFB06106",
+  provider: "bidcars",
+  auction: "iaai",
+  lot_id: "45397077",
+  photo_url: "https://mercury.bid.cars/0-45397077/2022-Ford-F-150-1FTFW1ED9NFB06106-1.jpg",
+};
+const photoBytes = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=",
+  "base64",
+);
+const getVinArchivePhoto = vi.fn<VinArchivePhotoLookup>(async () => ({
+  bytes: photoBytes,
+  content_type: "image/png",
+}));
 
 function authorization(userId = 42): string {
   const params = new URLSearchParams({
@@ -92,6 +140,8 @@ beforeAll(async () => {
     port: 0,
     assetsDirectory: directory,
     checkVin,
+    checkVinArchive,
+    getVinArchivePhoto,
     ready: async () => {
       if (readinessError) throw readinessError;
       return databaseReady;
@@ -285,6 +335,8 @@ it("returns a retryable service error without disclosing internal storage failur
 });
 
 it("checks VIN without a buyer profile and preserves partial provider failures", async () => {
+  checkVinArchive.mockClear();
+  getVinArchivePhoto.mockClear();
   const response = await fetch(`${base}/miniapp/api/vin`, {
     method: "POST",
     headers: {
@@ -297,53 +349,76 @@ it("checks VIN without a buyer profile and preserves partial provider failures",
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual(vinResult);
   expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(checkVinArchive).not.toHaveBeenCalled();
+  expect(getVinArchivePhoto).not.toHaveBeenCalled();
 });
 
-it("never sends unauthorized, ambiguous or invalid VIN requests to the API", async () => {
+it("keeps a confirmed archive lot without photos accessible independently of buyer profiles and normal decoding", async () => {
   checkVin.mockClear();
-  const valid = JSON.stringify({ vin: vinResult.vin });
-  for (const [headers, body, expected] of [
-    [{}, valid, 401],
-    [{ Authorization: authorization(), Origin: "https://other.example" }, valid, 403],
-    [{ Authorization: authorization(), "Sec-Fetch-Site": "cross-site" }, valid, 403],
-    [
-      { Authorization: authorization() },
-      '{"vin":"KMHDU41DBAU123456","vin":"JTDBR32E720000001"}',
-      400,
-    ],
-    [
-      { Authorization: authorization() },
-      '{"vin":"KMHDU41DBAU123456","v\\u0069n":"JTDBR32E720000001"}',
-      400,
-    ],
-    [{ Authorization: authorization() }, '{"vin":42}', 400],
-    [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU12345I"}', 400],
-    [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU123456","extra":true}', 400],
-    [{ Authorization: authorization() }, `{"vin":"${"A".repeat(2048)}"}`, 413],
-    [{ Authorization: authorization(), "Content-Type": "text/plain" }, valid, 415],
-  ] as const) {
-    const response = await fetch(`${base}/miniapp/api/vin`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body,
-    });
-    expect(response.status).toBe(expected);
-  }
-  const headers = { Authorization: authorization(), "Content-Type": "application/json" };
-  const method = await fetch(`${base}/miniapp/api/vin`, { headers });
-  expect(method.status).toBe(405);
-  expect(method.headers.get("allow")).toBe("POST");
-  expect(
-    (
-      await fetch(`${base}/miniapp/api/vin?vin=${vinResult.vin}`, {
-        method: "POST",
-        headers,
-        body: valid,
-      })
-    ).status,
-  ).toBe(400);
+  const response = await fetch(`${base}/miniapp/api/vin/archive-photos`, {
+    method: "POST",
+    headers: {
+      Authorization: authorization(44),
+      Origin: PUBLIC_ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ vin: vinResult.vin }),
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual(archiveResult);
   expect(checkVin).not.toHaveBeenCalled();
 });
+
+it.each(["/miniapp/api/vin", "/miniapp/api/vin/archive-photos"])(
+  "never sends unauthorized, ambiguous or invalid requests to %s",
+  async (path) => {
+    checkVin.mockClear();
+    checkVinArchive.mockClear();
+    const valid = JSON.stringify({ vin: vinResult.vin });
+    for (const [headers, body, expected] of [
+      [{}, valid, 401],
+      [{ Authorization: authorization(), Origin: "https://other.example" }, valid, 403],
+      [{ Authorization: authorization(), "Sec-Fetch-Site": "cross-site" }, valid, 403],
+      [
+        { Authorization: authorization() },
+        '{"vin":"KMHDU41DBAU123456","vin":"JTDBR32E720000001"}',
+        400,
+      ],
+      [
+        { Authorization: authorization() },
+        '{"vin":"KMHDU41DBAU123456","v\\u0069n":"JTDBR32E720000001"}',
+        400,
+      ],
+      [{ Authorization: authorization() }, '{"vin":42}', 400],
+      [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU12345I"}', 400],
+      [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU123456","extra":true}', 400],
+      [{ Authorization: authorization() }, `{"vin":"${"A".repeat(2048)}"}`, 413],
+      [{ Authorization: authorization(), "Content-Type": "text/plain" }, valid, 415],
+    ] as const) {
+      const response = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...headers },
+        body,
+      });
+      expect(response.status).toBe(expected);
+    }
+    const headers = { Authorization: authorization(), "Content-Type": "application/json" };
+    const method = await fetch(`${base}${path}`, { headers });
+    expect(method.status).toBe(405);
+    expect(method.headers.get("allow")).toBe("POST");
+    expect(
+      (
+        await fetch(`${base}${path}?vin=${vinResult.vin}`, {
+          method: "POST",
+          headers,
+          body: valid,
+        })
+      ).status,
+    ).toBe(400);
+    expect(checkVin).not.toHaveBeenCalled();
+    expect(checkVinArchive).not.toHaveBeenCalled();
+  },
+);
 
 it("reports an unconfigured VIN service without fabricating observations", async () => {
   const disabled = await startMiniAppServer({
@@ -365,6 +440,28 @@ it("reports an unconfigured VIN service without fabricating observations", async
     });
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ code: "vin_not_enabled" });
+    const archiveResponse = await fetch(
+      `http://127.0.0.1:${address.port}/miniapp/api/vin/archive-photos`,
+      {
+        method: "POST",
+        headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+        body: JSON.stringify({ vin: vinResult.vin }),
+      },
+    );
+    expect(archiveResponse.status).toBe(200);
+    const archive = (await archiveResponse.json()) as VinArchiveResult;
+    for (const source of archive.sources)
+      expect(source).toMatchObject({ status: "disabled", checked_at: null, lots: [] });
+    const photoResponse = await fetch(
+      `http://127.0.0.1:${address.port}/miniapp/api/vin/archive-photo`,
+      {
+        method: "POST",
+        headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+        body: JSON.stringify(photoRequest),
+      },
+    );
+    expect(photoResponse.status).toBe(503);
+    expect(await photoResponse.json()).toMatchObject({ code: "vin_archive_photo_unavailable" });
   } finally {
     await new Promise<void>((resolve, reject) => {
       disabled.close((error) => (error ? reject(error) : resolve()));
@@ -393,6 +490,20 @@ it("keeps car access and readiness independent of VIN API transport failure", as
     ).status,
   ).toBe(200);
   expect((await fetch(`${base}/ready`)).status).toBe(200);
+});
+
+it("does not turn archive transport failure into an empty successful history", async () => {
+  checkVinArchive.mockRejectedValueOnce(new Error("private-archive-token"));
+  const response = await fetch(`${base}/miniapp/api/vin/archive-photos`, {
+    method: "POST",
+    headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+    body: JSON.stringify({ vin: vinResult.vin }),
+  });
+  expect(response.status).toBe(503);
+  const body = await response.json();
+  expect(body).toMatchObject({ code: "vin_archive_unavailable" });
+  expect(body).not.toHaveProperty("sources");
+  expect(JSON.stringify(body)).not.toContain("private-archive-token");
 });
 
 it("reports refused dialogue admission as retryable without confusing an empty successful reply", async () => {
@@ -431,10 +542,100 @@ it("reports refused dialogue admission as retryable without confusing an empty s
   }
 });
 
-it("cancels the remote lookup when the authenticated client disconnects", async () => {
+it.each(["/miniapp/api/vin", "/miniapp/api/vin/archive-photos"])(
+  "cancels %s when the authenticated client disconnects",
+  async (path) => {
+    const entered = Promise.withResolvers<void>();
+    const aborted = Promise.withResolvers<void>();
+    const lookup = path.endsWith("archive-photos") ? checkVinArchive : checkVin;
+    lookup.mockImplementationOnce(async (_vin, signal) => {
+      if (!signal) throw new Error("Missing cancellation signal");
+      signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+      entered.resolve();
+      await aborted.promise;
+      throw signal.reason;
+    });
+    const controller = new AbortController();
+    const response = fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+      body: JSON.stringify({ vin: vinResult.vin }),
+      signal: controller.signal,
+    });
+    const rejection = expect(response).rejects.toMatchObject({ name: "AbortError" });
+    await entered.promise;
+    controller.abort();
+    await rejection;
+    await aborted.promise;
+  },
+);
+
+it("serves private archive photo bytes without a profile and never exposes a CDN redirect", async () => {
+  const response = await fetch(`${base}/miniapp/api/vin/archive-photo`, {
+    method: "POST",
+    headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+    body: JSON.stringify(photoRequest),
+  });
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("image/png");
+  expect(response.headers.get("content-length")).toBe(String(photoBytes.length));
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(response.headers.get("location")).toBeNull();
+  expect(Buffer.from(await response.arrayBuffer())).toEqual(photoBytes);
+});
+
+it("rejects unauthorized, duplicate-key, foreign and extended photo requests before fetching", async () => {
+  getVinArchivePhoto.mockClear();
+  const valid = JSON.stringify(photoRequest);
+  for (const [headers, body, status] of [
+    [{}, valid, 401],
+    [{ Authorization: authorization(), Origin: "https://other.example" }, valid, 403],
+    [
+      { Authorization: authorization() },
+      valid.replace('{"vin":', '{"v\\u0069n":"1FTFW1ED9NFB06106","vin":'),
+      400,
+    ],
+    [{ Authorization: authorization() }, JSON.stringify({ ...photoRequest, extra: "field" }), 400],
+    [
+      { Authorization: authorization() },
+      JSON.stringify({ ...photoRequest, photo_url: "https://attacker.invalid/photo.jpg" }),
+      400,
+    ],
+    [
+      { Authorization: authorization() },
+      JSON.stringify({ ...photoRequest, lot_id: "45397078" }),
+      400,
+    ],
+  ] as const) {
+    const response = await fetch(`${base}/miniapp/api/vin/archive-photo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body,
+    });
+    expect(response.status).toBe(status);
+  }
+  expect(getVinArchivePhoto).not.toHaveBeenCalled();
+});
+
+it("keeps photo delivery failures sanitized and asks for a fresh archive lookup", async () => {
+  getVinArchivePhoto.mockRejectedValueOnce(new Error("proxy-password-private"));
+  const response = await fetch(`${base}/miniapp/api/vin/archive-photo`, {
+    method: "POST",
+    headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+    body: JSON.stringify(photoRequest),
+  });
+  expect(response.status).toBe(503);
+  const body = await response.json();
+  expect(body).toMatchObject({ code: "vin_archive_photo_unavailable" });
+  expect(JSON.stringify(body)).not.toContain("proxy-password-private");
+  expect(body).not.toHaveProperty("photo_url");
+});
+
+it("aborts photo upstream work when the authenticated viewer disconnects", async () => {
   const entered = Promise.withResolvers<void>();
   const aborted = Promise.withResolvers<void>();
-  checkVin.mockImplementationOnce(async (_vin, signal) => {
+  getVinArchivePhoto.mockImplementationOnce(async (_request, signal) => {
     if (!signal) throw new Error("Missing cancellation signal");
     signal.addEventListener("abort", () => aborted.resolve(), { once: true });
     entered.resolve();
@@ -442,10 +643,10 @@ it("cancels the remote lookup when the authenticated client disconnects", async 
     throw signal.reason;
   });
   const controller = new AbortController();
-  const response = fetch(`${base}/miniapp/api/vin`, {
+  const response = fetch(`${base}/miniapp/api/vin/archive-photo`, {
     method: "POST",
     headers: { Authorization: authorization(44), "Content-Type": "application/json" },
-    body: JSON.stringify({ vin: vinResult.vin }),
+    body: JSON.stringify(photoRequest),
     signal: controller.signal,
   });
   const rejection = expect(response).rejects.toMatchObject({ name: "AbortError" });

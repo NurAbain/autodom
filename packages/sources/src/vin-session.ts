@@ -1,22 +1,29 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { type ProxyRoute, SourceError, SourceRateLimited, VIN_SOURCE_URLS } from "@autodom/core";
+import {
+  ENCAR_DISCOVERY_ORIGIN,
+  type ProxyRoute,
+  SourceError,
+  SourceRateLimited,
+  VIN_SOURCE_URLS,
+} from "@autodom/core";
 import pLimit from "p-limit";
 import { type Dispatcher, fetch, getSetCookies, Headers, ProxyAgent, type Response } from "undici";
 import { readBody, retryAfterSeconds } from "./http-response.js";
 
-type KoreanVinProvider = "carhistory" | "car365";
+type KoreanVinProvider = "carhistory" | "car365" | "encar";
 
-const REQUEST_PATHS: Readonly<Record<KoreanVinProvider, Readonly<Record<string, "GET" | "POST">>>> =
-  {
-    carhistory: {
-      "/search/carhistory/search.car": "GET",
-      "/search/carhistory/initSearch.car": "POST",
-    },
-    car365: {
-      "/ccpt/carlife/scrcar/schdcarXportView.do": "GET",
-      "/ccpt/carlife/scrcar/selectSchdcarXportList.do": "POST",
-    },
-  };
+const REQUEST_PATHS: Readonly<
+  Record<Exclude<KoreanVinProvider, "encar">, Readonly<Record<string, "GET" | "POST">>>
+> = {
+  carhistory: {
+    "/search/carhistory/search.car": "GET",
+    "/search/carhistory/initSearch.car": "POST",
+  },
+  car365: {
+    "/ccpt/carlife/scrcar/schdcarXportView.do": "GET",
+    "/ccpt/carlife/scrcar/selectSchdcarXportList.do": "POST",
+  },
+};
 
 export interface VinSession {
   request(
@@ -26,7 +33,7 @@ export interface VinSession {
       form?: Readonly<Record<string, string>>;
       headers?: Readonly<Record<string, string>>;
     },
-  ): Promise<{ body: string }>;
+  ): Promise<{ body: string; status: number }>;
 }
 
 export interface VinTransportOptions {
@@ -39,13 +46,14 @@ export interface VinTransportOptions {
 }
 
 interface SessionCookie {
+  origin: string;
   name: string;
   value: string;
   path: string;
   expires: number;
 }
 
-class VinRequestError extends SourceError {}
+export class VinRequestError extends SourceError {}
 
 export class VinTransport {
   readonly #options: VinTransportOptions;
@@ -171,13 +179,19 @@ export class VinTransport {
       request: async (path, options = {}) => {
         const url = new URL(path, origin);
         const method = options.method ?? "GET";
+        const allowedPath =
+          provider === "encar"
+            ? method === "GET" &&
+              ((url.origin === origin && /^\/cars\/detail\/[1-9]\d{0,9}$/u.test(url.pathname)) ||
+                (url.origin === ENCAR_DISCOVERY_ORIGIN &&
+                  /^\/auto\/[A-HJ-NPR-Z0-9]{17}$/u.test(url.pathname)))
+            : url.origin === origin && REQUEST_PATHS[provider][url.pathname] === method;
         if (
-          url.origin !== origin ||
+          !allowedPath ||
           url.username ||
           url.password ||
           url.hash ||
           url.search ||
-          REQUEST_PATHS[provider][url.pathname] !== method ||
           (options.form && method !== "POST")
         )
           throw new SourceError("VIN request is outside the approved free lookup paths");
@@ -195,6 +209,7 @@ export class VinTransport {
         const matching = [...cookies.values()]
           .filter(
             (cookie) =>
+              cookie.origin === url.origin &&
               cookie.expires > now &&
               (url.pathname === cookie.path ||
                 url.pathname.startsWith(
@@ -219,6 +234,18 @@ export class VinTransport {
             throw new VinRequestError(`${provider}: proxy request failed`);
           }
         });
+        if (
+          provider === "encar" &&
+          ((url.origin === ENCAR_DISCOVERY_ORIGIN &&
+            response.status === 301 &&
+            response.headers.get("location") ===
+              `${ENCAR_DISCOVERY_ORIGIN}/vin/${url.pathname.slice("/auto/".length)}`) ||
+            (url.origin === origin && response.status === 404))
+        ) {
+          // A declared missing archive or removed official page; never follow the report redirect.
+          await response.body?.cancel();
+          return { body: "", status: response.status };
+        }
         if (response.status !== 200) {
           await response.body?.cancel();
           if (response.status === 429) {
@@ -244,13 +271,19 @@ export class VinTransport {
               : cookie.expires !== undefined
                 ? Number(new Date(cookie.expires))
                 : Number.POSITIVE_INFINITY;
-          const key = `${cookie.name};${cookiePath}`;
+          const key = `${url.origin};${cookie.name};${cookiePath}`;
           if (expires <= Date.now()) cookies.delete(key);
           else
-            cookies.set(key, { name: cookie.name, value: cookie.value, path: cookiePath, expires });
+            cookies.set(key, {
+              origin: url.origin,
+              name: cookie.name,
+              value: cookie.value,
+              path: cookiePath,
+              expires,
+            });
         }
         try {
-          return { body: await readBody(response) };
+          return { body: await readBody(response), status: response.status };
         } catch (error) {
           signal.throwIfAborted();
           if (error instanceof SourceError) throw error;

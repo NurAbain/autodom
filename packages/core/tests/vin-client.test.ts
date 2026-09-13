@@ -122,6 +122,60 @@ describe("remote VIN API consumer", () => {
     });
   });
 
+  it("accepts a partial archive but rejects evidence belonging to another VIN or advertisement", async () => {
+    const listing = {
+      id: "39720103",
+      vin: VIN,
+      source_url: "https://fem.encar.com/cars/detail/39720103",
+      model: null,
+      mileage_km: null,
+      advertisement_status: "SOLD",
+      created_at: "2025-05-26T09:23:30",
+      first_advertised_at: null,
+      modified_at: null,
+      re_registered: null,
+      photo_urls: ["https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg"],
+    };
+    const history = {
+      vin: VIN,
+      discovery_url: `https://carcheck.by/auto/${VIN}`,
+      listings: [listing],
+      partial: true,
+    };
+    const observation = {
+      status: "available",
+      source_url: VIN_SOURCE_URLS.encar,
+      checked_at: result.checked_at,
+      data: history,
+    };
+    const valid = await upstream({ ...result, encar: observation });
+    await expect(valid(VIN)).resolves.toMatchObject({
+      car365: { status: "unavailable" },
+      encar: { status: "available", data: { partial: true } },
+    });
+
+    for (const data of [
+      { ...history, listings: [{ ...listing, vin: "KMFXKN7BPXU258801" }] },
+      {
+        ...history,
+        listings: [{ ...listing, source_url: "https://fem.encar.com/cars/detail/39711062" }],
+      },
+      {
+        ...history,
+        listings: [
+          {
+            ...listing,
+            photo_urls: ["https://ci.encar.com/carpicture/carpicture02/pic3971/39711062_001.jpg"],
+          },
+        ],
+      },
+      { ...history, discovery_url: "https://carcheck.by/auto/KMFXKN7BPXU258801" },
+    ]) {
+      const invalid = await upstream({ ...result, encar: { ...observation, data } });
+      await expect(invalid(VIN)).rejects.toThrow();
+    }
+  });
+
   it.each([
     { ...result, vin: "KMFXKN7BPXU258801" },
     { ...result, carhistory: { ...result.carhistory, source_url: "https://attacker.invalid/" } },

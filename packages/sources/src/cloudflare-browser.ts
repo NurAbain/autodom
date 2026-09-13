@@ -113,14 +113,14 @@ function nativeClient(proxy: URL, jar: CookieJar, userAgent?: string): Impit {
 export class CloudflareBrowser implements BrowserClient {
   readonly #route: ProxyRoute;
   readonly #page: number;
-  readonly #solver: Pick<RiskBypass, "solve">;
+  readonly #solver: Pick<RiskBypass, "solve"> | undefined;
   #proxy: Promise<URL> | undefined;
   #session: { client: Impit; userAgent?: string } | undefined;
   #generation = 0;
   #lastSubmission = -Infinity;
   #refresh: { promise: Promise<void>; abort: AbortController } | undefined;
 
-  constructor(route: ProxyRoute, page: number, solver: Pick<RiskBypass, "solve">) {
+  constructor(route: ProxyRoute, page: number, solver?: Pick<RiskBypass, "solve">) {
     this.#route = route;
     this.#page = page;
     this.#solver = solver;
@@ -182,6 +182,7 @@ export class CloudflareBrowser implements BrowserClient {
   }
 
   private async solve(url: URL, signal: AbortSignal): Promise<void> {
+    if (!this.#solver) throw new RiskBypassError("Bid.Cars clearance submissions are disabled");
     const proxy = await this.proxy(signal);
     signal.throwIfAborted();
     this.#lastSubmission = performance.now();

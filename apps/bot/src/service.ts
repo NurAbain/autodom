@@ -1,6 +1,7 @@
 import type { Server } from "node:http";
 import type { BotSettings } from "@autodom/core";
 import type { VinLookup } from "@autodom/core/vin";
+import type { VinArchiveLookup, VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import { maintain } from "@autodom/runtime/maintenance";
 import { Metrics } from "@autodom/runtime/metrics";
 import { runtimeStatus } from "@autodom/runtime/status";
@@ -105,6 +106,8 @@ export interface BotServiceContext {
   assetsDirectory?: string;
   signal?: AbortSignal;
   checkVin?: VinLookup;
+  checkVinArchive?: VinArchiveLookup;
+  getVinArchivePhoto?: VinArchivePhotoLookup;
   conversation?: Conversation;
   payments?: PaymentService;
 }
@@ -244,6 +247,8 @@ export async function runBotService(
         ...(context.payments ? { payments: context.payments } : {}),
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
+        ...(context.checkVinArchive ? { checkVinArchive: context.checkVinArchive } : {}),
+        ...(context.getVinArchivePhoto ? { getVinArchivePhoto: context.getVinArchivePhoto } : {}),
         ...(context.conversation
           ? {
               dialogue: (userId: number, text: string) =>

@@ -71,6 +71,11 @@ p { line-height: 1.6; }
 .vin-source h3 { font-size: 17px; margin-bottom: 10px; }
 .vin-source[data-status="unavailable"] .badge { background: color-mix(in srgb, #b66b11 16%, var(--panel)); }
 .vin-observation { white-space: pre-wrap; margin-bottom: 8px; }
+.encar-listing { min-width: 0; margin: 20px 0; padding-top: 20px; border-top: 1px solid var(--line); }
+.encar-listing h4 { margin: 0 0 10px; font-size: 16px; overflow-wrap: anywhere; }
+.encar-listing .photo-frame { min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.encar-listing .photo-frame img { min-width: 0; max-width: 100%; }
+.encar-listing .gallery { margin-bottom: 14px; }
 .details { white-space: pre-wrap; line-height: 1.7; font-size: 15px; overflow-wrap: anywhere; }
 .details pre { white-space: pre-wrap; }
 .details blockquote { margin: 12px 0; padding-left: 16px; border-left: 3px solid var(--line); }
@@ -90,6 +95,9 @@ p { line-height: 1.6; }
   #app { padding-left: max(14px, env(safe-area-inset-left), var(--tg-content-safe-area-inset-left, 0px)); padding-right: max(14px, env(safe-area-inset-right), var(--tg-content-safe-area-inset-right, 0px)); }
   .panel { padding: 18px; }
   .gallery-controls .button { padding: 10px; font-size: 12px; }
+  .encar-listing .facts { grid-template-columns: minmax(0, 1fr); }
+  .vin-source .gallery-controls { flex-wrap: wrap; }
+  .vin-source .photo-counter { order: -1; flex-basis: 100%; text-align: center; white-space: normal; }
 }
 
 .back-link { display: inline-block; border: 0; padding: 10px 0; margin: 0 0 20px; min-height: 44px; background: transparent; color: var(--muted); text-align: left; cursor: pointer; }

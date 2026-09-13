@@ -1,0 +1,293 @@
+{
+  "returnCode": 1,
+  "returnCodeDesc": "Success",
+  "data": {
+    "query": {
+      "filter": {
+        "MISC": ["ps_vin_number:2HKRM4H74CH603903"]
+      },
+      "page": 0,
+      "size": 20,
+      "watchListOnly": false,
+      "freeFormSearch": false,
+      "hideImages": false,
+      "defaultSort": false,
+      "reloadWatchListData": false,
+      "vanityKeyword": false,
+      "specificRowProvided": false
+    },
+    "results": {
+      "totalElements": 0,
+      "content": [],
+      "facetFields": [
+        {
+          "quickPickCode": "FETI",
+          "facetCounts": [],
+          "sequenceNumber": 10,
+          "includeTag": "",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Featured Items"
+        },
+        {
+          "quickPickCode": "WHSL",
+          "facetCounts": [],
+          "sequenceNumber": 15,
+          "includeTag": "",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Wholesale Vehicles"
+        },
+        {
+          "quickPickCode": "NLTS",
+          "facetCounts": [],
+          "sequenceNumber": 20,
+          "includeTag": "",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Newly Added Lots"
+        },
+        {
+          "quickPickCode": "TITL",
+          "facetCounts": [],
+          "sequenceNumber": 40,
+          "includeTag": "{!tag=TITL}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Title Type"
+        },
+        {
+          "quickPickCode": "ODM",
+          "facetCounts": [],
+          "sequenceNumber": 80,
+          "includeTag": "{!tag=ODM} ",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Mileage"
+        },
+        {
+          "quickPickCode": "YEAR",
+          "facetCounts": [],
+          "sequenceNumber": 100,
+          "includeTag": "{!tag=YEAR}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Year"
+        },
+        {
+          "quickPickCode": "PRID",
+          "facetCounts": [],
+          "sequenceNumber": 120,
+          "includeTag": "{!tag=PRID}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Damage"
+        },
+        {
+          "quickPickCode": "VEHT",
+          "facetCounts": [],
+          "sequenceNumber": 140,
+          "includeTag": "{!tag=VEHT}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Vehicle Type"
+        },
+        {
+          "quickPickCode": "MAKE",
+          "facetCounts": [],
+          "sequenceNumber": 160,
+          "includeTag": "{!tag=MAKE}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Make"
+        },
+        {
+          "quickPickCode": "MODL",
+          "facetCounts": [],
+          "sequenceNumber": 180,
+          "includeTag": "{!tag=MODL}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Model"
+        },
+        {
+          "quickPickCode": "TRIM",
+          "facetCounts": [],
+          "sequenceNumber": 190,
+          "includeTag": "{!tag=TRIM}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Trim"
+        },
+        {
+          "quickPickCode": "MODG",
+          "facetCounts": [],
+          "sequenceNumber": 200,
+          "includeTag": "{!tag=MODLG}",
+          "quickPickCategoryUri": "",
+          "hideFacet": true,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Model Group"
+        },
+        {
+          "quickPickCode": "ENGN",
+          "facetCounts": [],
+          "sequenceNumber": 220,
+          "includeTag": "{!tag=ENGN}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Engine Type"
+        },
+        {
+          "quickPickCode": "TMTP",
+          "facetCounts": [],
+          "sequenceNumber": 240,
+          "includeTag": "{!tag=TMTP}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Transmission"
+        },
+        {
+          "quickPickCode": "FUEL",
+          "facetCounts": [],
+          "sequenceNumber": 260,
+          "includeTag": "{!tag=FUEL}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Fuel Type"
+        },
+        {
+          "quickPickCode": "DRIV",
+          "facetCounts": [],
+          "sequenceNumber": 280,
+          "includeTag": "{!tag=DRIV}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Drive Train"
+        },
+        {
+          "quickPickCode": "CYLN",
+          "facetCounts": [],
+          "sequenceNumber": 300,
+          "includeTag": "{!tag=CYLN}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Cylinder"
+        },
+        {
+          "quickPickCode": "SLOC",
+          "facetCounts": [],
+          "sequenceNumber": 320,
+          "includeTag": "{!tag=SLOC}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Auction Name"
+        },
+        {
+          "quickPickCode": "LOC",
+          "facetCounts": [],
+          "sequenceNumber": 340,
+          "includeTag": "{!tag=LOC} ",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Location"
+        },
+        {
+          "quickPickCode": "BODY",
+          "facetCounts": [],
+          "sequenceNumber": 360,
+          "includeTag": "{!tag=BODY}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Body Style"
+        },
+        {
+          "quickPickCode": "SDAT",
+          "facetCounts": [],
+          "sequenceNumber": 380,
+          "includeTag": "{!tag=SDAT}",
+          "quickPickCategoryUri": "",
+          "hideFacet": false,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Sale Date"
+        },
+        {
+          "quickPickCode": "SRCE",
+          "facetCounts": [],
+          "sequenceNumber": 400,
+          "includeTag": "{!tag=SRCE}",
+          "quickPickCategoryUri": "",
+          "hideFacet": true,
+          "min": null,
+          "max": null,
+          "statsField": false,
+          "displayName": "Source"
+        }
+      ],
+      "spellCheckList": null,
+      "suggestions": null,
+      "realTime": false
+    }
+  }
+}

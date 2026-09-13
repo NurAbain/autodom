@@ -1,20 +1,50 @@
 import { randomBytes } from "node:crypto";
 import { money } from "@autodom/core";
-import { normalizeVin, type VinLookup, vinGoogleSearchUrl } from "@autodom/core/vin";
+import {
+  ENCAR_HISTORY_MAX_LISTINGS,
+  ENCAR_HISTORY_MAX_PHOTOS,
+  encarListingUrl,
+  isEncarPhotoUrl,
+  normalizeVin,
+  type VinCheckResult,
+  type VinLookup,
+  vinGoogleSearchUrl,
+} from "@autodom/core/vin";
+import {
+  disabledVinArchiveResult,
+  groupVinArchiveLots,
+  isVinArchivePhotoUrl,
+  VIN_ARCHIVE_AUCTION_NAMES,
+  VIN_ARCHIVE_COVERAGE_NOTICE,
+  VIN_ARCHIVE_PHOTO_MAX_BYTES,
+  VIN_ARCHIVE_PROVIDER_NAMES,
+  VIN_ARCHIVE_SOURCE_URLS,
+  type VinArchiveLookup,
+  type VinArchivePhotoLookup,
+  type VinArchiveResult,
+} from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
-import { Bot, GrammyError, InlineKeyboard } from "grammy";
+import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
 import { paymentOrderStatus } from "./payment-text.js";
 import type { PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
+  confirmedEncarListings,
+  VIN_ARCHIVE_CARWAY_NOTICE,
+  VIN_ARCHIVE_DISCLOSURE,
+  VIN_ARCHIVE_LABEL,
+  VIN_ARCHIVE_STATUS_TEXT,
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
   VIN_HELP,
   VIN_NOT_ENABLED,
   VIN_REPORT_EXAMPLE_LABEL,
+  vinArchiveLotText,
+  vinArchiveSourceUrl,
+  vinArchiveTime,
   vinResultText,
 } from "./vin-text.js";
 
@@ -43,6 +73,17 @@ function captionLength(html: string): number {
       (_entity, hex: string | undefined, decimal: string | undefined) =>
         (hex ? Number.parseInt(hex, 16) : Number(decimal)) > 0xffff ? "xx" : "x",
     ).length;
+}
+
+function isRejectedPhoto(error: unknown): boolean {
+  if (!(error instanceof GrammyError) || error.error_code !== 400) return false;
+  const description =
+    /^Bad Request: failed to send message #\d+ with the error message "([^"]+)"$/.exec(
+      error.description,
+    )?.[1] ?? error.description;
+  return /^(?:Bad Request: )?(?:failed to get HTTP URL content|wrong (?:type of the web page content|file identifier\/HTTP URL specified|remote file (?:id|identifier) specified)|PHOTO_INVALID_DIMENSIONS|PHOTO_CONTENT_TYPE_INVALID|IMAGE_PROCESS_FAILED|WEBPAGE_CURL_FAILED|WEBPAGE_MEDIA_EMPTY|photo (?:is too big|must be non-empty)|file is too big)$/i.test(
+    description,
+  );
 }
 
 export async function sendReplies(
@@ -92,20 +133,7 @@ export async function sendReplies(
       } catch (error) {
         // Only explicit media rejection permits fallback. Authorization, rate limits,
         // malformed HTML, and uncertain network delivery must propagate to monitoring.
-        const description =
-          error instanceof GrammyError
-            ? (/^Bad Request: failed to send message #\d+ with the error message "([^"]+)"$/.exec(
-                error.description,
-              )?.[1] ?? error.description)
-            : "";
-        if (
-          !(error instanceof GrammyError) ||
-          error.error_code !== 400 ||
-          !/^(?:Bad Request: )?(?:failed to get HTTP URL content|wrong (?:type of the web page content|file identifier\/HTTP URL specified|remote file (?:id|identifier) specified)|PHOTO_INVALID_DIMENSIONS|PHOTO_CONTENT_TYPE_INVALID|IMAGE_PROCESS_FAILED|WEBPAGE_CURL_FAILED|WEBPAGE_MEDIA_EMPTY|photo (?:is too big|must be non-empty)|file is too big)$/i.test(
-            description,
-          )
-        )
-          throw error;
+        if (!isRejectedPhoto(error)) throw error;
         photoRejected = true;
       }
     }
@@ -155,17 +183,21 @@ export async function sendReplies(
 
 export type AutodomBot = Bot & { clearVinInput(userId: number): void };
 
+export interface TelegramBotOptions {
+  apiRoot?: string;
+  miniAppUrl?: string;
+  checkVin?: VinLookup;
+  checkVinArchive?: VinArchiveLookup;
+  getVinArchivePhoto?: VinArchivePhotoLookup;
+  conversation?: Conversation;
+  photoRecognizer?: PhotoRecognizer;
+  payments?: PaymentService;
+}
+
 export function createTelegramBot(
   store: Store,
   token: string,
-  options: {
-    apiRoot?: string;
-    miniAppUrl?: string;
-    checkVin?: VinLookup;
-    conversation?: Conversation;
-    photoRecognizer?: PhotoRecognizer;
-    payments?: PaymentService;
-  } = {},
+  options: TelegramBotOptions = {},
 ): AutodomBot {
   const bot = new Bot(token, {
     client: { timeoutSeconds: 40, ...(options.apiRoot ? { apiRoot: options.apiRoot } : {}) },
@@ -219,16 +251,26 @@ export function createTelegramBot(
     const searchUrl = vinGoogleSearchUrl(vin);
     if (!searchUrl) return;
     let text = VIN_NOT_ENABLED;
+    let result: VinCheckResult | undefined;
     if (options.checkVin) {
       try {
-        text = vinResultText(await options.checkVin(vin));
+        const checked = await options.checkVin(vin);
+        if (checked.vin !== vin) throw new Error("VIN result does not match the request");
+        text = vinResultText(checked);
+        result = checked;
       } catch {
         text =
           "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
       }
     }
-    const replies = packReplies(escapeHtml(`${text}\n\n${VIN_GOOGLE_SEARCH_NOTICE}`), []);
-    const keyboard = new InlineKeyboard().url(VIN_GOOGLE_SEARCH_LABEL, searchUrl);
+    const replies = packReplies(
+      escapeHtml(`${text}\n\n${VIN_GOOGLE_SEARCH_NOTICE}\n\n${VIN_ARCHIVE_DISCLOSURE}`),
+      [],
+    );
+    const keyboard = new InlineKeyboard()
+      .url(VIN_GOOGLE_SEARCH_LABEL, searchUrl)
+      .row()
+      .text(VIN_ARCHIVE_LABEL, `vinarchive:${vin}`);
     if (options.miniAppUrl) {
       keyboard
         .row()
@@ -241,8 +283,230 @@ export function createTelegramBot(
         ...(index === replies.length - 1 ? { reply_markup: keyboard } : {}),
       });
     }
+    if (!result) return;
+    const sentListings = new Set<string>();
+    for (const listing of confirmedEncarListings(result).slice(0, ENCAR_HISTORY_MAX_LISTINGS)) {
+      if (sentListings.has(listing.id)) continue;
+      sentListings.add(listing.id);
+      const photos: string[] = [];
+      for (const url of listing.photo_urls) {
+        if (isEncarPhotoUrl(url, listing.id) && !photos.includes(url)) photos.push(url);
+        if (photos.length === ENCAR_HISTORY_MAX_PHOTOS) break;
+      }
+      for (let offset = 0; offset < photos.length; offset += 10) {
+        await sendReplies(bot, chatId, [
+          {
+            text: escapeHtml(
+              `Фотографии объявления Encar №${listing.id} · VIN ${vin}\n` +
+                `Фото ${offset + 1}–${Math.min(offset + 10, photos.length)} из ${photos.length}.\n` +
+                `Архивные фотографии не подтверждают текущее состояние автомобиля.\n` +
+                `Источник: ${encarListingUrl(listing.id)}`,
+            ),
+            photos: photos.slice(offset, offset + 10),
+            buttons: [],
+          },
+        ]);
+      }
+    }
   }
-  bot.use(sequentialize((context) => (context.from ? `autodom:user:${context.from.id}` : [])));
+  async function checkVinArchive(chatId: number, vin: string): Promise<void> {
+    let result: VinArchiveResult;
+    try {
+      result = options.checkVinArchive
+        ? await options.checkVinArchive(vin)
+        : disabledVinArchiveResult(vin);
+      if (result.vin !== vin) throw new Error("Archive VIN mismatch");
+    } catch {
+      await sendReplies(
+        bot,
+        chatId,
+        packReplies(
+          escapeHtml(
+            `VIN ${vin}\n\n${VIN_ARCHIVE_STATUS_TEXT.unavailable}\n\n${VIN_ARCHIVE_COVERAGE_NOTICE}`,
+          ),
+          [],
+        ),
+        options,
+      );
+      return;
+    }
+    await sendReplies(
+      bot,
+      chatId,
+      packReplies(
+        escapeHtml(
+          `VIN ${vin}\n${VIN_ARCHIVE_LABEL}\nОтвет получен: ${vinArchiveTime(result.checked_at)}\n\n${VIN_ARCHIVE_COVERAGE_NOTICE}`,
+        ),
+        [],
+      ),
+      options,
+    );
+    for (const source of result.sources) {
+      const sourceUrl =
+        vinArchiveSourceUrl(source.source_url, source.provider) ??
+        VIN_ARCHIVE_SOURCE_URLS[source.provider];
+      await sendReplies(
+        bot,
+        chatId,
+        packReplies(
+          escapeHtml(
+            [
+              `${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}: ${VIN_ARCHIVE_STATUS_TEXT[source.status]}`,
+              `Данные получены: ${vinArchiveTime(source.checked_at)}.`,
+              ...(source.provider === "carway" ? [VIN_ARCHIVE_CARWAY_NOTICE] : []),
+              ...(source.partial ? ["Поиск или получение фотографий выполнены не полностью."] : []),
+              `Источник: ${sourceUrl}`,
+            ].join("\n"),
+          ),
+          [],
+        ),
+        options,
+      );
+    }
+    let photoSignal: AbortSignal | undefined;
+    for (const group of groupVinArchiveLots(result)) {
+      const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
+      const { provider, lot } = group.photo_source;
+      const lotUrl =
+        vinArchiveSourceUrl(lot.source_url, provider, lot, vin) ??
+        VIN_ARCHIVE_SOURCE_URLS[provider];
+      const photos = [
+        ...new Set(
+          lot.photos.filter((photo) =>
+            isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
+          ),
+        ),
+      ];
+      await sendReplies(
+        bot,
+        chatId,
+        packReplies(
+          escapeHtml(
+            [
+              title,
+              ...group.sources.map((source) =>
+                [
+                  vinArchiveLotText(source.lot, source.provider),
+                  `Источник ${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}: ${vinArchiveSourceUrl(source.lot.source_url, source.provider, source.lot, vin) ?? VIN_ARCHIVE_SOURCE_URLS[source.provider]}`,
+                ].join("\n"),
+              ),
+              `Фотографии: ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}. Другие версии доступны по ссылкам источников выше.`,
+              ...(photos.length < lot.photos.length ? ["Часть ссылок на фото недоступна."] : []),
+            ].join("\n\n"),
+          ),
+          [],
+        ),
+        options,
+      );
+      for (let offset = 0; offset < photos.length; offset += 10) {
+        const batch = photos.slice(offset, offset + 10);
+        const media: InputFile[] = [];
+        let unavailable = false;
+        // Keep at most one album in memory and one provider request in flight.
+        for (const photo_url of batch) {
+          if (!options.getVinArchivePhoto || photoSignal?.aborted) {
+            unavailable = true;
+            break;
+          }
+          try {
+            photoSignal ??= AbortSignal.timeout(40_000);
+            const photo = await options.getVinArchivePhoto(
+              {
+                vin,
+                provider,
+                auction: lot.auction,
+                lot_id: lot.lot_id,
+                photo_url,
+              },
+              photoSignal,
+            );
+            if (!photo.bytes.byteLength || photo.bytes.byteLength > VIN_ARCHIVE_PHOTO_MAX_BYTES)
+              throw new Error("Invalid archive photo size");
+            const extension =
+              photo.content_type === "image/jpeg"
+                ? "jpg"
+                : photo.content_type === "image/png"
+                  ? "png"
+                  : photo.content_type === "image/webp"
+                    ? "webp"
+                    : undefined;
+            if (!extension) throw new Error("Invalid archive photo type");
+            media.push(new InputFile(photo.bytes, `${lot.auction}-${lot.lot_id}.${extension}`));
+          } catch {
+            unavailable = true;
+          }
+        }
+        if (media.length > 1) {
+          try {
+            await bot.api.sendMediaGroup(
+              chatId,
+              media.map((photo) => ({ type: "photo" as const, media: photo })),
+            );
+            media.length = 0;
+          } catch (error) {
+            // A rejected album was not delivered. Send its valid photos separately;
+            // never retry uncertain delivery, authorization failures, or rate limits.
+            if (!isRejectedPhoto(error)) throw error;
+          }
+        }
+        for (const photo of media) {
+          try {
+            await bot.api.sendPhoto(chatId, photo);
+          } catch (error) {
+            if (!isRejectedPhoto(error)) throw error;
+            unavailable = true;
+          }
+        }
+        await sendReplies(
+          bot,
+          chatId,
+          [
+            {
+              text: escapeHtml(
+                [
+                  `${title} · фото ${VIN_ARCHIVE_PROVIDER_NAMES[provider]} · ссылки ${offset + 1}–${offset + batch.length}`,
+                  `Источник: ${lotUrl}`,
+                  ...(unavailable
+                    ? [
+                        "Часть фото недоступна. Повторите поиск архива, чтобы загрузить фотографии заново, или откройте оригиналы по ссылкам ниже.",
+                      ]
+                    : []),
+                  ...batch.map((url, index) => `Фото ${offset + index + 1}: ${url}`),
+                ].join("\n"),
+              ),
+              buttons: [],
+            },
+          ],
+          options,
+        );
+      }
+    }
+  }
+  const serialize = sequentialize<Context>((context) =>
+    context.from ? `autodom:user:${context.from.id}` : [],
+  );
+  // Reserve user order immediately, while acknowledging ahead of earlier slow media.
+  bot.use(async (context, next) => {
+    const callback = context.callbackQuery;
+    if (!callback) return serialize(context, next);
+    const message = callback.message;
+    if (!message || message.date === 0 || message.chat.type !== "private") {
+      await context.answerCallbackQuery({ text: "Откройте бота в личном чате." });
+      return;
+    }
+    if (message.chat.id !== callback.from.id || callback.from.is_bot) {
+      await context.answerCallbackQuery({ text: "Этот поиск принадлежит другому пользователю." });
+      return;
+    }
+    const acknowledged = context.answerCallbackQuery();
+    await Promise.all([
+      acknowledged,
+      serialize(context, async () => {
+        await acknowledged;
+        await next();
+      }),
+    ]);
+  });
   bot.command("orders", async (context) => {
     if (
       context.chat.type !== "private" ||
@@ -389,20 +653,20 @@ export function createTelegramBot(
   });
   bot.on("callback_query", async (context) => {
     const callback = context.callbackQuery;
-    const message = callback.message;
-    if (!message || message.date === 0 || message.chat.type !== "private") {
-      await context.answerCallbackQuery({ text: "Откройте бота в личном чате." });
-      return;
-    }
-    if (message.chat.id !== callback.from.id || callback.from.is_bot) {
-      await context.answerCallbackQuery({ text: "Этот поиск принадлежит другому пользователю." });
-      return;
-    }
-    await context.answerCallbackQuery();
     const userId = callback.from.id;
-    const chatId = message.chat.id;
+    const chatId = userId;
     const data = "data" in callback ? (callback.data ?? "") : "";
     await store.withLock(`autodom:user:${userId}`, async () => {
+      if (data.startsWith("vinarchive:")) {
+        const value = data.slice("vinarchive:".length);
+        const vin = normalizeVin(value);
+        if (!vin || vin !== value) {
+          await context.reply("Некорректный VIN. Отправьте /vin и все 17 символов.");
+          return;
+        }
+        await checkVinArchive(chatId, vin);
+        return;
+      }
       if (data.startsWith("vin-photo:")) {
         const action = /^vin-photo:([a-f0-9]{24}):(yes:([0-4])|edit|cancel)$/u.exec(data);
         const pending = pendingPhotos.get(userId);

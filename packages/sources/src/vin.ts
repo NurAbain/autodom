@@ -9,6 +9,7 @@ import {
 import { checkAutoDev } from "./autodev.js";
 import { checkCar365 } from "./car365.js";
 import { checkCarHistory } from "./carhistory.js";
+import { checkEncarHistory } from "./encar-history.js";
 import { checkNhtsaVpic } from "./nhtsa-vpic.js";
 import { VinTransport, type VinTransportOptions } from "./vin-session.js";
 
@@ -16,6 +17,7 @@ export class VinCheckService {
   readonly #enabled: Record<VinProvider, boolean> = {
     carhistory: false,
     car365: false,
+    encar: false,
     nhtsa_vpic: false,
     autodev: false,
   };
@@ -44,7 +46,7 @@ export class VinCheckService {
         "Auto.dev requires AUTODOM_AUTODEV_API_KEY as a private API credential",
       );
     }
-    if (this.#enabled.carhistory || this.#enabled.car365) {
+    if (this.#enabled.carhistory || this.#enabled.car365 || this.#enabled.encar) {
       this.#transport = new VinTransport(options);
     }
     this.#timeoutMs = options.timeoutMs ?? 40_000;
@@ -114,6 +116,27 @@ export class VinCheckService {
           result.car365.status = "unavailable";
         }
       })(),
+      (async () => {
+        if (!this.#enabled.encar || !transport) return;
+        const observation: NonNullable<VinCheckResult["encar"]> = {
+          status: "unavailable",
+          source_url: VIN_SOURCE_URLS.encar,
+          checked_at: Date.now() / 1000,
+          data: null,
+        };
+        result.encar = observation;
+        try {
+          observation.data = await transport.run(
+            "encar",
+            (session) => checkEncarHistory(vin, session),
+            signal,
+          );
+          observation.status = observation.data ? "available" : "not_found";
+        } catch {
+          signal?.throwIfAborted();
+          observation.status = "unavailable";
+        }
+      })(),
     ]);
     signal?.throwIfAborted();
     // A failed Korean lookup is not absence and must not trigger decoder egress.
@@ -121,7 +144,8 @@ export class VinCheckService {
       !fallbackSignal ||
       this.#signal.aborted ||
       (this.#enabled.carhistory && result.carhistory.status !== "not_found") ||
-      (this.#enabled.car365 && result.car365.status !== "not_found")
+      (this.#enabled.car365 && result.car365.status !== "not_found") ||
+      (this.#enabled.encar && result.encar?.status !== "not_found")
     ) {
       return result;
     }

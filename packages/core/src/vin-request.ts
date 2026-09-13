@@ -1,5 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import { normalizeVin } from "./vin.js";
+import { parseVinArchivePhotoRequest, type VinArchivePhotoRequest } from "./vin-archive.js";
 
 export class VinRequestError extends Error {
   constructor(
@@ -14,7 +15,7 @@ export class VinRequestError extends Error {
 
 const MAX_BODY_BYTES = 1024;
 
-export async function readVinRequest(request: IncomingMessage): Promise<string> {
+async function readVinMembers(request: IncomingMessage): Promise<Record<string, string>> {
   if (request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !== "application/json")
     throw new VinRequestError(415, "unsupported_media_type", "Send VIN as application/json.");
   if (request.headers["content-encoding"] && request.headers["content-encoding"] !== "identity")
@@ -65,21 +66,32 @@ export async function readVinRequest(request: IncomingMessage): Promise<string> 
     request.once("aborted", onAborted);
     if (request.destroyed) onAborted();
   });
-  let value: unknown;
   try {
     const body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-    // Match one complete string member before JSON.parse can erase duplicate keys,
-    // including escaped duplicates. JSON.parse enforces JSON escapes/whitespace.
-    if (!/^\s*\{\s*"(?:[^"\\]|\\.)*"\s*:\s*"(?:[^"\\]|\\.)*"\s*\}\s*$/u.test(body))
+    // Validate flat string members before JSON.parse can erase escaped duplicate keys.
+    if (
+      !/^\s*\{\s*"(?:[^"\\]|\\.)*"\s*:\s*"(?:[^"\\]|\\.)*"(?:\s*,\s*"(?:[^"\\]|\\.)*"\s*:\s*"(?:[^"\\]|\\.)*")*\s*\}\s*$/u.test(
+        body,
+      )
+    )
       throw new Error();
-    value = JSON.parse(body);
+    const keys = new Set<string>();
+    for (const match of body.matchAll(/("(?:[^"\\]|\\.)*")\s*:\s*"(?:[^"\\]|\\.)*"/gu)) {
+      const key = JSON.parse(match[1]!) as string;
+      if (keys.has(key)) throw new Error();
+      keys.add(key);
+    }
+    return JSON.parse(body) as Record<string, string>;
   } catch {
-    throw new VinRequestError(400, "invalid_json", "Expected one JSON string member named vin.");
+    throw new VinRequestError(400, "invalid_json", "Expected distinct JSON string members.");
   }
-  const vin =
-    value && typeof value === "object" && "vin" in value && typeof value.vin === "string"
-      ? normalizeVin(value.vin)
-      : null;
+}
+
+export async function readVinRequest(request: IncomingMessage): Promise<string> {
+  const value = await readVinMembers(request);
+  if (Object.keys(value).length !== 1 || typeof value.vin !== "string")
+    throw new VinRequestError(400, "invalid_json", "Expected one JSON string member named vin.");
+  const vin = normalizeVin(value.vin);
   if (!vin)
     throw new VinRequestError(
       400,
@@ -87,4 +99,15 @@ export async function readVinRequest(request: IncomingMessage): Promise<string> 
       "VIN must contain 17 letters and digits, without I, O or Q.",
     );
   return vin;
+}
+
+export async function readVinArchivePhotoRequest(
+  request: IncomingMessage,
+): Promise<VinArchivePhotoRequest> {
+  const value = await readVinMembers(request);
+  try {
+    return parseVinArchivePhotoRequest(value);
+  } catch {
+    throw new VinRequestError(400, "invalid_photo", "Invalid archive photo identity or URL.");
+  }
 }
