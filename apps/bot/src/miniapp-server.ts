@@ -25,6 +25,7 @@ import {
 import type { Store } from "@autodom/storage";
 import { listingText, type Reply } from "./conversation.js";
 import { RequestError, readFlatJson } from "./http-body.js";
+import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
@@ -102,6 +103,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     ["index.html", "text/html; charset=utf-8"],
     ["app.js", "text/javascript; charset=utf-8"],
     ["app.css", "text/css; charset=utf-8"],
+    [`reports/${KOREAN_REPORT_EXAMPLE_PDF.filename}`, "application/pdf"],
   ] as const) {
     assets.set(name === "index.html" ? "/miniapp/" : `/miniapp/${name}`, {
       body: await readFile(join(directory, name)),
@@ -146,6 +148,11 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         }
         const asset = assets.get(url.pathname);
         if (asset && (request.method === "GET" || request.method === "HEAD")) {
+          if (asset.type === "application/pdf")
+            response.setHeader(
+              "Content-Disposition",
+              `attachment; filename="${KOREAN_REPORT_EXAMPLE_PDF.filename}"`,
+            );
           response.writeHead(200, {
             "Content-Type": asset.type,
             "Content-Length": asset.body.length,

@@ -805,6 +805,63 @@ describe("mandatory proxy document transport", () => {
     expect(parse).not.toHaveBeenCalled();
   });
 
+  it("permits only read-only Mashina taxonomy and detail API paths", async () => {
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    const pool = agent.get("https://api.mashina.kg");
+    const paths = [
+      "/api/mbank-proxy/v1/ads/16/options?category_id=1",
+      "/api/mbank-proxy/v1/ads/toyota-camry/detail",
+    ];
+    for (const path of paths) pool.intercept({ path, method: "GET" }).reply(200, '{"ok":true}');
+    const transport = await transportWith([agent]);
+    for (const path of paths)
+      expect(
+        await transport.fetchDocument(`https://api.mashina.kg${path}`, JSON.parse, {
+          source: "mashina.kg",
+        }),
+      ).toEqual({ ok: true });
+    for (const [path, method] of [
+      ["/api/mbank-proxy/v1/users", "GET"],
+      ["/api/mbank-proxy/v1/ads/16/options", "POST"],
+    ] as const)
+      await expect(
+        transport.fetchDocument(`https://api.mashina.kg${path}`, JSON.parse, {
+          source: "mashina.kg",
+          method,
+        }),
+      ).rejects.toBeInstanceOf(SourceError);
+    agent.assertNoPendingInterceptors();
+  });
+
+  it("shares source Retry-After between ingestion and taxonomy without sending during cooldown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const started = Date.now();
+    const agent = agentReply(429, "", { "retry-after": "120" });
+    agent
+      .get("https://api.mashina.kg")
+      .intercept({ path: "/api/mbank-proxy/v1/ads/16/options" })
+      .reply(200, '["Toyota"]');
+    const transport = await transportWith([agent]);
+    await expect(
+      transport.fetchDocument("https://mashina.kg/catalog/passenger", JSON.parse, {
+        source: "mashina.kg",
+      }),
+    ).rejects.toBeInstanceOf(SourceRateLimited);
+    const options = () =>
+      transport.fetchDocument(
+        "https://api.mashina.kg/api/mbank-proxy/v1/ads/16/options",
+        JSON.parse,
+        { source: "mashina.kg" },
+      );
+    vi.setSystemTime(started + 119_000);
+    await expect(options()).rejects.toBeInstanceOf(SourceRateLimited);
+    expect(agent.pendingInterceptors()).toHaveLength(1);
+    vi.setSystemTime(started + 120_000);
+    expect(await options()).toEqual(["Toyota"]);
+    agent.assertNoPendingInterceptors();
+  });
+
   it("rejects disabled sources and off-origin requests before transport", async () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
     const agent = agentReply(200, "unused");

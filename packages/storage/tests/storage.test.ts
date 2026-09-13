@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type Listing, makeListing, makeProfile, matches } from "@autodom/core";
+import { emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import type { OwnerVehicle } from "@autodom/core/owner-vehicle";
 import type { PaymentEvent, PaymentOfferInput } from "@autodom/core/payments";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
@@ -96,6 +97,13 @@ async function rewriteSnapshot(
     );
     for (const table of ["payment_orders", "payment_events", "payment_refunds"])
       delete (footer.counts as Record<string, number>)[table];
+  }
+  if (Number(records[0]?.schema_version) < 6) {
+    for (const record of records) {
+      const row = record.row as Record<string, unknown> | undefined;
+      if (row && record.table === "profiles") delete row.catalog_filter;
+      if (row && record.table === "listings") delete row.normalized_title;
+    }
   }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
@@ -419,6 +427,111 @@ describe("Finik physical inspection ledger", () => {
 });
 
 describe("PostgreSQL Store", () => {
+  it("keeps catalog OR groups, strict unknowns and boundaries identical before pagination and after restore", async () => {
+    const choice = (value: string) => ({ id: `lookup-${value}`, value, label: value });
+    const filter = {
+      ...emptyCatalogFilter(),
+      vehicles: [
+        { make: choice("Toyota"), model: choice("Camry") },
+        { make: choice("Honda"), model: choice("Fit") },
+      ],
+      options: { gearbox: [choice("Автомат"), choice("Вариатор")] },
+      ranges: { engine_volume: { min: 1.5, max: 2.5 }, mileage: { min: 0, max: 160.9344 } },
+      below_market_percent: 10,
+    };
+    const selected = makeProfile({ ...profile(), monitoring: false, catalog_filter: filter });
+    const facts = { gearbox: "Автомат" };
+    const numbers = { engine_volume: 2.5, mileage: 160.9344, price_range: -10 };
+    const cars = [
+      car({ id: "01-unknown", title: "Toyota Camry" }),
+      car({
+        id: "02-wrong-row",
+        title: "Toyota Fit",
+        catalog_attributes: facts,
+        catalog_numbers: numbers,
+      }),
+      car({
+        id: "03-conflict",
+        title: "Toyota Camry",
+        catalog_attributes: { ...facts, model: "Corolla" },
+        catalog_numbers: numbers,
+      }),
+      car({
+        id: "04-substring",
+        title: "Honda Fitment",
+        catalog_attributes: facts,
+        catalog_numbers: numbers,
+      }),
+      car({
+        id: "05-null-market",
+        catalog_attributes: facts,
+        catalog_numbers: { ...numbers, price_range: null },
+      }),
+      car({ id: "06-good", catalog_attributes: facts, catalog_numbers: numbers }),
+      car({
+        id: "07-good",
+        title: "Honda Fit",
+        catalog_attributes: { gearbox: "Вариатор" },
+        catalog_numbers: numbers,
+      }),
+      car({
+        id: "08-outside",
+        catalog_attributes: facts,
+        catalog_numbers: { ...numbers, engine_volume: 2.5001 },
+      }),
+    ];
+    await db.upsertListings(cars, NOW);
+    const expected = ["06-good", "07-good"];
+    expect(cars.filter((item) => matches(selected, item)).map((item) => item.id)).toEqual(expected);
+    expect((await db.search(selected, 1)).map((item) => item.id)).toEqual(["06-good"]);
+    expect((await db.search(selected, 1, 1)).map((item) => item.id)).toEqual(["07-good"]);
+    expect(await db.countMatches(selected)).toBe(2);
+    const saved = await db.saveProfile(selected);
+    expect((await db.getProfile(selected.user_id))?.catalog_filter).toEqual(filter);
+    const snapshot = join(directory, "catalog.ndjson");
+    await backup(db, snapshot);
+    const restoredUrl = await database();
+    await restore(snapshot, restoredUrl);
+    const restored = await open(restoredUrl);
+    expect(await restored.getProfile(selected.user_id)).toEqual(saved);
+    expect(saved.monitoring).toBe(false);
+    expect((await restored.search(saved)).map((item) => item.id)).toEqual(expected);
+    expect(await restored.countMatches(saved)).toBe(2);
+  });
+  it("admits selected in-transit stock only with active publication evidence", async () => {
+    const choice = { id: "lookup-transit", value: "В пути", label: "В пути" };
+    const selected = makeProfile({
+      ...profile(),
+      catalog_filter: {
+        ...emptyCatalogFilter(),
+        options: { availibility: [choice] },
+      },
+    });
+    const cars = [
+      car({
+        id: "active",
+        availability: "В пути",
+        catalog_attributes: { availibility: "В пути", publication_status: "active" },
+      }),
+      car({
+        id: "inactive",
+        availability: "Неактивно",
+        catalog_attributes: { availibility: "В пути", publication_status: "inactive" },
+      }),
+      car({
+        id: "unknown",
+        availability: "В пути",
+        catalog_attributes: { availibility: "В пути" },
+      }),
+    ];
+    await db.upsertListings(cars, NOW);
+    expect(cars.filter((item) => matches(selected, item)).map((item) => item.id)).toEqual([
+      "active",
+    ]);
+    expect((await db.search(selected)).map((item) => item.id)).toEqual(["active"]);
+    expect(await db.countMatches(selected)).toBe(1);
+    expect(await db.countMatches(profile())).toBe(0);
+  });
   it("serializes concurrent startup migrations without losing either connection", async () => {
     const fresh = await database();
     const [left, right] = await Promise.all([open(fresh), open(fresh)]);

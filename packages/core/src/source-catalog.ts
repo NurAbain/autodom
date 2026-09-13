@@ -86,7 +86,7 @@ export const SOURCES: readonly SourceSpec[] = [
     name: "Mashina.kg",
     market: "KG",
     group: "local",
-    hosts: ["mashina.kg"],
+    hosts: ["mashina.kg", "api.mashina.kg"],
     currencies: ["USD", "KGS"],
     priority: "P0",
     listing_type: "classifieds",
@@ -95,7 +95,7 @@ export const SOURCES: readonly SourceSpec[] = [
       available: [...VEHICLE_FIELDS, "published_at"],
       requested: [],
       notes:
-        "RSC-каталог легковых автомобилей; марка/модель в заголовке, фото — первое доступное. Нет VIN, истории, телефонов и программ обмена. Отсутствующие значения остаются неизвестными.",
+        "RSC-каталог легковых автомобилей с обогащением характеристик из официального API карточки при сборе. Доступные значения фильтров сохраняются без подмены ID; неизвестные исключаются из строгих критериев. Марка/модель/поколение/модификация без отдельных данных ищутся по словам заголовка. Нет VIN, истории и телефонов. Отклонение цены — оценка площадки, может отсутствовать.",
     },
     access: {
       method: "public_pages",

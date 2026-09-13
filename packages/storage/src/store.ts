@@ -25,6 +25,15 @@ import {
   TRANSMISSIONS,
   USE_CASES,
 } from "@autodom/core";
+import {
+  CATALOG_OPTION_LABELS,
+  CATALOG_RANGE_LABELS,
+  CATALOG_VEHICLE_LABELS,
+  type CatalogOptionKey,
+  type CatalogRangeKey,
+  type CatalogVehicleKey,
+  catalogFilterSchema,
+} from "@autodom/core/catalog-filter";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
   and,
@@ -150,6 +159,7 @@ export function listingRecord(input: Listing, observation: number, firstSeen = o
     price_kgs_minor: listingPrice(data, "KGS"),
     availability: normalize(data.availability),
     normalized_text: searchableText(data),
+    normalized_title: ` ${normalize(data.title)} `,
     first_seen: firstSeen,
     last_seen: observation,
     source: data.source,
@@ -318,6 +328,7 @@ export class Store {
         "0005_owner_vehicles.sql",
         "0006_payments.sql",
         "0007_uae_market.sql",
+        "0008_catalog_filters.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
@@ -343,6 +354,28 @@ export class Store {
       for (const migration of migrations) {
         if (migration.version <= applied.rows.length) continue;
         await this.database.execute(sql.raw(migration.statement));
+        if (migration.version === 8) {
+          let after: string | undefined;
+          for (;;) {
+            const rows = await this.database
+              .select({ id: listings.id, data: listings.data })
+              .from(listings)
+              .where(after === undefined ? undefined : gt(listings.id, after))
+              .orderBy(asc(listings.id))
+              .limit(500);
+            if (!rows.length) break;
+            await this.database.execute(sql`UPDATE ${listings} AS target
+              SET normalized_title = incoming.title
+              FROM (VALUES ${sql.join(
+                rows.map(
+                  (row) =>
+                    sql`(${row.id}::text, ${` ${normalize(makeListing(row.data).title)} `}::text)`,
+                ),
+                sql`, `,
+              )}) AS incoming(id, title) WHERE target.id = incoming.id`);
+            after = rows.at(-1)!.id;
+          }
+        }
         await this.database.execute(
           sql`INSERT INTO autodom_migrations(version,checksum) VALUES (${migration.version},${migration.checksum})`,
         );
@@ -568,10 +601,22 @@ export class Store {
     if (!sources.length) return sql`false`;
     const price = p.currency === "USD" ? listings.price_usd_minor : listings.price_kgs_minor;
     const now = nowSeconds();
+    const filter = catalogFilterSchema.parse(p.catalog_filter);
     const clauses: (SQL | undefined)[] = [
       gt(price, 0),
       between(price, p.budget_min_minor, p.budget_max_minor),
-      inArray(listings.availability, ["в наличии", "опубликовано"]),
+      filter.options.availibility?.length
+        ? and(
+            sql`COALESCE(NULLIF(${listings.data}->'catalog_attributes'->>'publication_status', ''), 'active') = 'active'`,
+            or(
+              inArray(listings.availability, ["в наличии", "опубликовано"]),
+              and(
+                sql`${listings.data}->'catalog_attributes'->>'publication_status' = 'active'`,
+                sql`${listings.availability} <> 'неактивно'`,
+              ),
+            ),
+          )
+        : inArray(listings.availability, ["в наличии", "опубликовано"]),
       gte(listings.last_seen, now - FRESH_SECONDS),
       inArray(listings.source, sources),
       or(
@@ -598,6 +643,56 @@ export class Store {
       p.year_min !== null ? gte(listings.vehicle_year, p.year_min) : undefined,
       p.mileage_max_km !== null ? lte(listings.mileage_km, p.mileage_max_km) : undefined,
     ];
+    const attribute = (key: string) => sql`${listings.data}->'catalog_attributes'->>${key}`;
+    const number = (key: string) => sql`CASE
+      WHEN jsonb_typeof(${listings.data}->'catalog_numbers'->${key}) = 'number'
+      THEN (${listings.data}->'catalog_numbers'->>${key})::numeric
+      ELSE NULL END`;
+    if (filter.vehicles.length) {
+      clauses.push(
+        or(
+          ...filter.vehicles.map((vehicle) =>
+            and(
+              ...(Object.keys(CATALOG_VEHICLE_LABELS) as CatalogVehicleKey[]).map((key) => {
+                const choice = vehicle[key];
+                if (!choice) return undefined;
+                const words = normalize(choice.value).split(" ").filter(Boolean);
+                return or(
+                  sql`${attribute(key)} = ${choice.value}`,
+                  and(
+                    sql`COALESCE(${attribute(key)}, '') = ''`,
+                    words.length
+                      ? and(
+                          ...words.map(
+                            (word) => sql`strpos(${listings.normalized_title}, ${` ${word} `}) > 0`,
+                          ),
+                        )
+                      : sql`false`,
+                  ),
+                );
+              }),
+            ),
+          ),
+        ),
+      );
+    }
+    for (const key of Object.keys(CATALOG_OPTION_LABELS) as CatalogOptionKey[]) {
+      const values = filter.options[key];
+      if (values?.length)
+        clauses.push(
+          inArray(
+            attribute(key),
+            values.map((choice) => choice.value),
+          ),
+        );
+    }
+    for (const key of Object.keys(CATALOG_RANGE_LABELS) as CatalogRangeKey[]) {
+      const range = filter.ranges[key];
+      if (range?.min != null) clauses.push(sql`${number(key)} >= ${range.min}`);
+      if (range?.max != null) clauses.push(sql`${number(key)} <= ${range.max}`);
+    }
+    if (filter.below_market_percent !== null)
+      clauses.push(sql`${number("price_range")} <= ${-filter.below_market_percent}`);
     const groups = queryGroups(p.query);
     if (p.query.trim() && !groups.length) return sql`false`;
     if (groups.length)

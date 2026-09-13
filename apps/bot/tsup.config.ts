@@ -15,9 +15,14 @@ export default defineConfig({
   noExternal: [/^@autodom\//],
   async onSuccess() {
     await mkdir("apps/bot/dist/public", { recursive: true });
+    await mkdir("apps/bot/dist/public/reports", { recursive: true });
     await Promise.all([
       copyFile("apps/bot/web/index.html", "apps/bot/dist/public/index.html"),
       copyFile("apps/bot/web/app.css", "apps/bot/dist/public/app.css"),
+      copyFile(
+        "apps/bot/src/public/reports/vin-korea-otchet-kr.pdf",
+        "apps/bot/dist/public/reports/vin-korea-otchet-kr.pdf",
+      ),
     ]);
     await build({
       entry: { app: "apps/bot/web/app.ts" },

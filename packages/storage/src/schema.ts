@@ -1,4 +1,5 @@
 import type { Listing } from "@autodom/core";
+import type { CatalogFilter } from "@autodom/core/catalog-filter";
 import type { OwnerCurrency, OwnerPurpose, PropertyType } from "@autodom/core/owner-vehicle";
 import type { PaymentEvent, PaymentOrder, PaymentRefund } from "@autodom/core/payments";
 import { sql } from "drizzle-orm";
@@ -25,6 +26,7 @@ export const listings = pgTable(
     price_kgs_minor: money("price_kgs_minor"),
     availability: text("availability").notNull(),
     normalized_text: text("normalized_text").notNull(),
+    normalized_title: text("normalized_title").notNull().default(""),
     first_seen: doublePrecision("first_seen").notNull(),
     last_seen: doublePrecision("last_seen").notNull(),
     source: text("source").notNull().default("mashina.kg"),
@@ -94,6 +96,10 @@ export const profiles = pgTable(
     use_case: text("use_case").notNull().default(""),
     allow_import: boolean("allow_import"),
     purchase_by: text("purchase_by").notNull().default(""),
+    catalog_filter: jsonb("catalog_filter")
+      .$type<CatalogFilter>()
+      .notNull()
+      .default(sql`'{"vehicles":[],"options":{},"ranges":{},"below_market_percent":null}'::jsonb`),
   },
   (table) => [
     check("profiles_currency", sql`${table.currency} IN ('USD','KGS')`),
@@ -103,6 +109,7 @@ export const profiles = pgTable(
     ),
     check("profiles_market", sql`${table.market} IN ('KG','KR','US','AE','ALL')`),
     check("profiles_budget_scope", sql`${table.budget_scope} IN ('car','total')`),
+    check("profiles_catalog_filter", sql`jsonb_typeof(${table.catalog_filter}) = 'object'`),
     check(
       "profiles_quiet_hours",
       sql`(${table.quiet_start_minute} IS NULL AND ${table.quiet_end_minute} IS NULL) OR (${table.quiet_start_minute} IS NOT NULL AND ${table.quiet_end_minute} IS NOT NULL AND ${table.quiet_start_minute} BETWEEN 0 AND 1439 AND ${table.quiet_end_minute} BETWEEN 0 AND 1439 AND ${table.quiet_start_minute} != ${table.quiet_end_minute})`,

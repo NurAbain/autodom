@@ -119,7 +119,17 @@ function requestUrl(raw: string, options: DocumentOptions): URL {
   } catch {
     throw new SourceError("Invalid source URL");
   }
-  if (url.origin !== ORIGINS[options.source] || url.username || url.password || url.hash) {
+  const mashinaApi =
+    options.source === "mashina.kg" &&
+    url.origin === "https://api.mashina.kg" &&
+    (options.method ?? "GET") === "GET" &&
+    /^\/api\/mbank-proxy\/v1\/ads\/(?:[1-9]\d*\/options|[a-z0-9_-]+\/detail)$/u.test(url.pathname);
+  if (
+    (!mashinaApi && url.origin !== ORIGINS[options.source]) ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
     throw new SourceError("Source request URL is outside its approved origin");
   }
   for (const [key, value] of Object.entries(options.params ?? {}))
@@ -163,6 +173,7 @@ export class ProxyTransport implements DocumentTransport {
   readonly #browserUnavailable = new Map<string, Map<number, number>>();
   readonly #preferredBrowserRoute = new Map<string, number>();
   readonly #nextRequest = new Map<string, number>();
+  readonly #rateLimitUntil = new Map<string, number>();
   readonly #abort = new AbortController();
   readonly #limit: LimitFunction;
   #riskBypass: RiskBypass | undefined;
@@ -549,6 +560,11 @@ export class ProxyTransport implements DocumentTransport {
     throw new SourceError("Lalafo ISP session remained unavailable");
   }
 
+  private checkCooldown(source: string): void {
+    const remaining = (this.#rateLimitUntil.get(source) ?? 0) - Date.now();
+    if (remaining > 0) throw new SourceRateLimited(Math.ceil(remaining / 1000));
+  }
+
   private async fetchThroughRoutes<T>(
     request: DocumentRequest<T>,
     batchSignal: AbortSignal,
@@ -588,6 +604,7 @@ export class ProxyTransport implements DocumentTransport {
           : undefined;
         for (let attempt = 0; attempt < 2; attempt++) {
           signal.throwIfAborted();
+          this.checkCooldown(options.source);
           const instant = Date.now();
           const start = Math.max(instant, this.#nextRequest.get(options.source) ?? 0);
           const minimumDelay = options.source === "bid.cars" ? DETAIL_DELAY_SECONDS : 0;
@@ -596,6 +613,7 @@ export class ProxyTransport implements DocumentTransport {
             start + Math.max(minimumDelay, this.#options.requestDelaySeconds ?? 2) * 1000,
           );
           if (start > instant) await delay(start - instant, undefined, { signal });
+          this.checkCooldown(options.source);
           reported = false;
           const url = requestUrl(request.url, options);
           const generation = browser?.generation ?? 0;
@@ -641,10 +659,17 @@ export class ProxyTransport implements DocumentTransport {
             } else {
               if (response.status !== 200) {
                 await response.body?.cancel();
-                if (response.status === 429)
-                  throw new SourceRateLimited(
-                    retryAfterSeconds(response.headers.get("retry-after")),
+                if (response.status === 429) {
+                  const seconds = retryAfterSeconds(response.headers.get("retry-after"));
+                  this.#rateLimitUntil.set(
+                    options.source,
+                    Math.max(
+                      this.#rateLimitUntil.get(options.source) ?? 0,
+                      Date.now() + seconds * 1000,
+                    ),
                   );
+                  throw new SourceRateLimited(seconds);
+                }
                 throw new SourceError(`${options.source} returned HTTP ${response.status}`);
               }
               const result = request.parse(await readBody(response));

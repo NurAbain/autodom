@@ -6,7 +6,6 @@ import {
   enabledSources,
   type Listing,
   listingPrice,
-  listingUrlAllowed,
   MARKETS,
   makeProfile,
   money,
@@ -18,9 +17,19 @@ import {
   TRANSMISSIONS,
   USE_CASES,
 } from "@autodom/core";
+import type { CatalogLookup } from "@autodom/core/catalog-filter";
+import { type CatalogFilter, emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import type { Store } from "@autodom/storage";
+import {
+  CATALOG_COVERAGE_NOTE,
+  catalogActionAllowed,
+  catalogSummary,
+  renderCatalog,
+  updateCatalog,
+} from "./catalog-dialogue.js";
 import { listingPhotoUrls } from "./media.js";
 import type { SellerConversation } from "./seller-conversation.js";
+import { vehicleCatalog } from "./vehicle-catalog.js";
 import { VIN_ARCHIVE_DISCLOSURE, VIN_DISCLOSURE } from "./vin-text.js";
 
 export type Button = readonly [string, string];
@@ -32,6 +41,15 @@ export interface Reply {
   listingId?: string;
   richHtml?: string;
   miniAppView?: "vin" | "buy" | "sell" | "report-example" | "orders";
+  input?: { label: string; placeholder: string; mode: "text" | "numeric" | "decimal" };
+  picker?: {
+    title: string;
+    subtitle?: string;
+    page: number;
+    pages: number;
+    selected: number;
+    searchable: boolean;
+  };
 }
 export type ConversationStore = Pick<
   Store,
@@ -116,7 +134,7 @@ export function privacyText(): string {
       .map((source) => escapeHtml(source.name))
       .join(", ")}. ` +
     "Иностранные адаптеры без согласованного доступа не собирают и не показывают объявления. Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; доступность экспорта не подтверждена. Бесплатное ядро не требует платных заказов.\n\n" +
-    "После вашего согласия на хранение сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, моделей и дополнительных предпочтений (город, кузов, год, пробег, коробка, цель, готовность к импорту, планируемая дата покупки), затем профиль и настройки. Это нужно для бесплатного поиска. Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. До кнопки «Согласен на хранение» новый черновик не сохраняется.\n\n" +
+    "После вашего согласия на хранение сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, текстового запроса и выбранных условий: марки, модели, поколения, модификации, регион и город, кузов, топливо, привод, коробка, руль, цвет, состояние, обмен, наличие, диапазоны года, пробега и объёма двигателя, порог «ниже рынка», цель, готовность к импорту и планируемая дата покупки; затем профиль и настройки. Поиск по справочнику временно хранится в черновике. Это нужно для бесплатного поиска. Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. До кнопки «Согласен на хранение» новый черновик не сохраняется.\n\n" +
     "Мониторинг бесплатный. При сохранении явно выбираете «с бесплатным мониторингом» или «без уведомлений». Позже /resume включает, /pause останавливает уведомления.\n\n" +
     `По команде /vin или кнопке «Проверить VIN»: ${VIN_DISCLOSURE} Заявки партнёрам сейчас не подключены. Архив истории чата не ведётся, контакты не собираются; однако текст, который вы сами вводите в поля поиска, сохраняется в этих полях. Не вводите туда контакты. Сообщения чата хранит Telegram. Профиль и уведомления доступны пользователю только в личном чате. Интерфейса доступа операторов к профилям и контактам нет; привилегированные администраторы инфраструктуры технически могут получить доступ к базе и резервным копиям.\n\n` +
     `Архивные фото: ${VIN_ARCHIVE_DISCLOSURE}\n\n` +
@@ -139,12 +157,15 @@ export function profileText(profile: Profile): string {
       )
       .join("–");
   }
+  const catalog = catalogSummary(profile.catalog_filter);
   return (
     `Рынок: <b>${MARKETS[profile.market as keyof typeof MARKETS]}</b>\nБюджет: <b>${budget}</b> · ${BUDGET_SCOPES[profile.budget_scope as keyof typeof BUDGET_SCOPES]}\nАвтомобили: ${profile.query ? escapeHtml(profile.query) : "любые модели"}\n` +
     `Город объявления: ${profile.city ? escapeHtml(profile.city) : "любой"}\nКузов: ${BODY_TYPES[profile.body_type as keyof typeof BODY_TYPES] ?? "любой"}; год от: ${profile.year_min ?? "не задан"}\n` +
     `Пробег до: ${profile.mileage_max_km === null ? "не задан" : `${profile.mileage_max_km} км`}; коробка: ${TRANSMISSIONS[profile.transmission as keyof typeof TRANSMISSIONS] ?? "любая"}\n` +
     `Импорт: ${profile.allow_import === true ? "готов ждать" : profile.allow_import === false ? "исключён" : "не уточнён, разрешён из включённых источников"}\n` +
     `Цель (заметка): ${USE_CASES[profile.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${profile.purchase_by ? escapeHtml(profile.purchase_by) : "не задана"}\n` +
+    (catalog ? `${catalog}\n` : "") +
+    `${CATALOG_COVERAGE_NOTE}\n` +
     `Мониторинг: ${profile.monitoring ? "включён" : "на паузе"}\nТихие часы (Бишкек, UTC+6): ${quiet}. /quiet — настройка.`
   );
 }
@@ -164,9 +185,7 @@ export function menu(profile: Profile): Buttons {
   ];
 }
 export function listingText(listing: Listing, currency: string): string {
-  let title = escapeHtml(listing.title);
-  if (listingUrlAllowed(listing.source, listing.url))
-    title = `<a href="${escapeHtml(listing.url)}">${title}</a>`;
+  const title = escapeHtml(listing.title);
   const price = listingPrice(listing, currency);
   const original = listing.original_price_minor;
   let priceText: string;
@@ -177,7 +196,7 @@ export function listingText(listing: Listing, currency: string): string {
     if (listing.original_currency !== currency)
       priceText +=
         price !== null
-          ? ` (≈ ${escapeHtml(money(price, currency))} по НБКР)`
+          ? ` (≈ ${escapeHtml(money(price, currency))})`
           : " (свежий пересчёт в валюту бюджета недоступен)";
   } else priceText = price !== null ? escapeHtml(money(price, currency)) : "цена не указана";
   const parts = [
@@ -191,7 +210,7 @@ export function listingText(listing: Listing, currency: string): string {
       : "время наблюдения неизвестно";
   let text =
     `<b>${title}</b>\n${priceText} · ${listing.city ? escapeHtml(listing.city) : "город не указан"} · ${escapeHtml(MARKETS[listing.market as keyof typeof MARKETS] ?? listing.market)}\n${escapeHtml(parts.join(" · "))}\n` +
-    `Статус на сайте: ${escapeHtml(listing.availability) || "не указан"}. Источник: ${escapeHtml(listing.source)}.\nПоследнее наблюдение: ${observed}. Цену и наличие подтвердите у продавца.`;
+    `${escapeHtml(listing.availability) || "Наличие не указано"} · обновлено ${observed}.\nЦену и наличие подтвердите у продавца.`;
   if (listing.market !== "KG") {
     text += "\nДоставка, таможня, оформление и ремонт не включены. Экспорт не подтверждён.";
     if (!listing.condition) text += "\nИстория ДТП и документов неизвестна.";
@@ -200,7 +219,7 @@ export function listingText(listing: Listing, currency: string): string {
       text += `\nДаты курсов НБКР: ${escapeHtml(listing.fx_date)}.`;
   }
   if (listing.condition)
-    text += `\n\n<b>Состояние по данным источника</b>\n${escapeHtml(listing.condition)}`;
+    text += `\n\n<b>Заявленное состояние</b>\n${escapeHtml(listing.condition)}`;
   if (typeof listing.description === "string" && listing.description)
     text += `\n\n<b>Описание объявления</b>\n${escapeHtml(listing.description)}`;
   if (listing.vin) text += `\nVIN / номер кузова: ${escapeHtml(listing.vin)}.`;
@@ -208,7 +227,7 @@ export function listingText(listing: Listing, currency: string): string {
     ["Документ продажи", listing.sale_document],
     ["Основное повреждение", listing.primary_damage],
     ["Дополнительное повреждение", listing.secondary_damage],
-    ["Запуск / движение по данным источника", listing.start_code],
+    ["Заявленные запуск / движение", listing.start_code],
   ] as const) {
     if (value) text += `\n${label}: ${escapeHtml(value)}.`;
   }
@@ -344,7 +363,7 @@ export class Conversation {
   private readonly deletions = new Map<number, [string, Draft]>();
   constructor(
     private readonly store: ConversationStore,
-    private readonly options: { seller?: SellerConversation } = {},
+    private readonly options: { seller?: SellerConversation; catalog?: CatalogLookup } = {},
   ) {}
 
   private setGoal(userId: number, goal: "home" | "buy" | "sell" | "vin"): void {
@@ -373,7 +392,13 @@ export class Conversation {
     );
   }
   private async begin(userId: number, profile: Profile | null): Promise<Reply[]> {
-    const data: Draft = { consent: true, budget_scope: "car", ...OPTIONAL_DEFAULTS };
+    const data: Draft = {
+      consent: true,
+      budget_scope: "car",
+      query: "",
+      catalog_filter: emptyCatalogFilter(),
+      ...OPTIONAL_DEFAULTS,
+    };
     if (profile) {
       await this.store.setMonitoring(userId, false);
       for (const field of Object.keys(OPTIONAL_DEFAULTS) as (keyof typeof OPTIONAL_DEFAULTS)[])
@@ -385,6 +410,7 @@ export class Conversation {
         maximum: profile.budget_max_minor,
         query: profile.query,
         budget_scope: profile.budget_scope,
+        catalog_filter: structuredClone(profile.catalog_filter),
       });
     }
     const markets = enabledMarkets();
@@ -411,6 +437,7 @@ export class Conversation {
       use_case: (data.use_case ?? "") as Profile["use_case"],
       allow_import: (data.allow_import ?? null) as boolean | null,
       purchase_by: (data.purchase_by ?? "") as string,
+      catalog_filter: (data.catalog_filter as CatalogFilter | undefined) ?? emptyCatalogFilter(),
     });
   }
   private async prompt(
@@ -420,13 +447,31 @@ export class Conversation {
     error = "",
   ): Promise<Reply[]> {
     const data: Draft = { ...original, nonce: randomBytes(12).toString("base64url") };
-    await this.store.setDraft(userId, state, data);
     const choice = (label: string, value: string): Button => [
       label,
       `draft:${data.nonce}:${state}:${value}`,
     ];
+    if (state.startsWith("cat_")) {
+      const reply = await renderCatalog(
+        state,
+        data,
+        choice,
+        this.options.catalog ?? vehicleCatalog,
+      );
+      await this.store.setDraft(userId, state, data);
+      if (error) reply.text = escapeHtml(error) + "\n\n" + reply.text;
+      const replies = packReplies(reply.text, [], reply.buttons);
+      if (replies.length)
+        Object.assign(replies[replies.length - 1]!, {
+          ...(reply.input ? { input: reply.input } : {}),
+          ...(reply.picker ? { picker: reply.picker } : {}),
+        });
+      return replies;
+    }
+    await this.store.setDraft(userId, state, data);
     let text: string;
     let buttons: Buttons;
+    let input: Reply["input"];
     if (state === "review") {
       const candidate = this.draftProfile(userId, data, await this.store.getProfile(userId));
       text =
@@ -446,12 +491,18 @@ export class Conversation {
         ]
           .filter(Boolean)
           .join(" · ") +
+        `\nЦель (заметка): ${USE_CASES[candidate.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${candidate.purchase_by ? escapeHtml(candidate.purchase_by) : "не задана"}.` +
+        "\n" +
+        catalogSummary(candidate.catalog_filter) +
+        "\n\n" +
+        CATALOG_COVERAGE_NOTE +
         "\nМожно сохранить сейчас или уточнить фильтры. Бюджет сравнивается с ценой объявления, не со всеми расходами покупки. Неизвестные данные не проходят выбранный фильтр. /profile — подробные условия после сохранения.\n\n" +
         "Выберите, присылать ли новые совпадения и снижение цены. Оба варианта бесплатны. /cancel — отменить изменения.";
       buttons = [
         [choice("Сохранить + бесплатный мониторинг", "save.monitor")],
         [choice("Сохранить без уведомлений", "save.silent")],
         [choice("Бюджет", "edit.budget"), choice("Марки и модели", "edit.query")],
+        [choice("Все фильтры автомобиля", "catalog")],
         [choice("Уточнить фильтры", "refine")],
         [["Отмена", "/cancel"]],
       ];
@@ -466,7 +517,12 @@ export class Conversation {
           ...buttons,
           fields.slice(index, index + 2).map(([field, label]) => choice(label, `edit.${field}`)),
         ];
-      buttons = [...buttons, [choice("Назад к сохранению", "back")], [["Отмена", "/cancel"]]];
+      buttons = [
+        [choice("Все фильтры автомобиля · справочник", "catalog")],
+        ...buttons,
+        [choice("Назад к сохранению", "back")],
+        [["Отмена", "/cancel"]],
+      ];
     } else {
       const prompts: Record<string, string> = {
         market:
@@ -474,7 +530,7 @@ export class Conversation {
         currency: "В какой валюте задать бюджет? Значение бюджета уточняется перед сохранением.",
         budget: `Какой бюджет в ${data.pending_currency ?? data.currency ?? "USD"}? Например: 15000, 15к или 10000–15000. Без обозначения валюты.`,
         query:
-          "Какие автомобили рассматриваете? Например: Toyota Camry, Honda Accord. Запятая разделяет альтернативы; внутри варианта все слова обязательны. Если не определились — «Пока не знаю».",
+          "Выберите автомобиль из справочника кнопками: марка → модель → поколение → модификация. Или намеренно задайте текстовый запрос: Toyota Camry, Honda Accord. Запятая разделяет альтернативы; внутри варианта все слова обязательны. Текстовый запрос вместе со справочником ограничивает поиск дополнительно.",
         budget_scope:
           "Что входит в бюджет? Цена автомобиля — сравнение с ценой объявления. Под ключ — иностранные объявления исключены, пока нет полной стоимости ввоза; для местных проверяется только цена машины, дополнительные расходы не рассчитаны.",
         city: "Город объявления (до 80 символов), например Бишкек. Это место автомобиля в источнике, не адрес доставки. При выборе города объявления без известного города исключаются.",
@@ -505,6 +561,45 @@ export class Conversation {
         );
       } else if (state === "currency") choices = { USD: "Доллары США · USD", KGS: "Сомы · KGS" };
       buttons = Object.entries(choices).map(([value, label]) => [choice(label, value)]);
+      if (state === "query") {
+        input = {
+          label: "Текстовый запрос (необязательно)",
+          placeholder: "Toyota Camry, Honda Accord",
+          mode: "text",
+        };
+        buttons = [
+          [choice("Выбрать автомобиль кнопками", "catalog")],
+          [choice("Ввести текстовый запрос", "manual")],
+          ...buttons,
+        ];
+      } else if (state === "budget") {
+        const currency = data.pending_currency ?? data.currency;
+        const presets =
+          currency === "KGS"
+            ? ["500000", "1000000", "1500000", "2000000", "3000000"]
+            : ["5000", "10000", "15000", "20000", "30000"];
+        buttons = presets.map((value) => [
+          choice(`До ${Number(value).toLocaleString("ru-RU")} ${currency}`, `preset.${value}`),
+        ]);
+        input = {
+          label: `Бюджет в ${currency}`,
+          placeholder: "15000 или 10000–15000",
+          mode: "text",
+        };
+      } else if (["city", "year_min", "mileage_max_km", "purchase_by"].includes(state)) {
+        input = {
+          label: FIELD_LABELS[state]!,
+          placeholder:
+            state === "city"
+              ? "Бишкек"
+              : state === "year_min"
+                ? "2015"
+                : state === "mileage_max_km"
+                  ? "100000"
+                  : "2026-12-31",
+          mode: ["year_min", "mileage_max_km"].includes(state) ? "numeric" : "text",
+        };
+      }
       if (state === "query" || Object.hasOwn(OPTIONAL_DEFAULTS, state))
         buttons = [
           ...buttons,
@@ -522,9 +617,21 @@ export class Conversation {
       buttons = [...buttons, [["Отмена", "/cancel"]]];
       text += "\n/cancel — отменить весь ввод. Мониторинг на время изменений приостановлен.";
     }
-    return packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons);
+    const replies = packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons);
+    if (input && replies.length) replies[replies.length - 1]!.input = input;
+    return replies;
   }
   private async advance(userId: number, state: string, data: Draft): Promise<Reply[]> {
+    const filter = data.catalog_filter as CatalogFilter | undefined;
+    if (filter) {
+      if (state === "body_type") delete filter.options.body_type;
+      else if (state === "transmission") delete filter.options.gearbox;
+      else if (state === "city") {
+        delete filter.options.city;
+        delete filter.options.region;
+      } else if (state === "year_min") delete filter.ranges.year;
+      else if (state === "mileage_max_km") delete filter.ranges.mileage;
+    }
     const returnReview = data.return_review;
     delete data.return_review;
     const next: Record<string, string> = {
@@ -574,19 +681,14 @@ export class Conversation {
     const [listing] = await this.store.search(profile, 1, offset);
     if (!listing)
       return packReplies(
-        "Совпадений в свежей собранной части каталога нет. Это не означает, что таких машин нет на всём рынке.\n\n" +
-          profileText(profile) +
-          "\n\n" +
-          FILTER_NOTE +
-          "\n\n" +
-          (await this.catalogNote(profile)) +
-          "\n\nМожно изменить пожелания или включить бесплатный мониторинг.",
+        "<b>Пока нет совпадений</b>\nПопробуйте увеличить бюджет или убрать один из необязательных фильтров. Условия меняются только по вашему выбору.\n\n" +
+          "Можно включить бесплатный мониторинг — сообщим о новых подходящих объявлениях. Проверена свежая часть нашего каталога, не весь рынок.",
         [],
         menu(profile),
       );
     const heading =
       `<b>Автомобиль ${offset + 1} из ${count}</b>\n` +
-      "Свежая собранная часть рынка, не все объявления. Сначала недавно найденные. /status — источники.";
+      "Подходит вашим условиям · недавно найденные сначала.";
     const navigation: Button[] = [];
     if (offset > 0) navigation.push(["Предыдущий", `page:${profile.revision}:${offset - 1}`]);
     if (offset + 1 < count)
@@ -640,12 +742,21 @@ export class Conversation {
       const state = draft[0];
       action = parts[3]!;
       let allowed = Object.keys(CHOICES[state] ?? {});
-      if (state === "review")
-        allowed = ["save.monitor", "save.silent", "refine", "edit.budget", "edit.query"];
+      if (state.startsWith("cat_"))
+        allowed = Object.keys((draft[1].cat_actions as Record<string, unknown> | undefined) ?? {});
+      else if (state === "review")
+        allowed = ["save.monitor", "save.silent", "refine", "edit.budget", "edit.query", "catalog"];
       else if (state === "refine")
-        allowed = ["back", ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`)];
+        allowed = ["back", "catalog", ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`)];
       else if (state === "currency") allowed.push("USD", "KGS");
-      else if (state === "market") {
+      else if (state === "query") allowed.push("catalog", "manual");
+      else if (state === "budget") {
+        const presets =
+          (draft[1].pending_currency ?? draft[1].currency) === "KGS"
+            ? ["500000", "1000000", "1500000", "2000000", "3000000"]
+            : ["5000", "10000", "15000", "20000", "30000"];
+        allowed.push(...presets.map((value) => `preset.${value}`));
+      } else if (state === "market") {
         const markets = enabledMarkets();
         allowed.push(...markets, ...(markets.length > 1 ? ["ALL"] : []));
       }
@@ -679,7 +790,7 @@ export class Conversation {
     if (command === "/start") {
       this.setGoal(userId, "home");
       return packReplies(
-        "<b>Autodom</b>\nЧто хотите сделать?\n\nVIN — бесплатная проверка доступных корейских данных.\nПродать / обменять — ваше авто, недвижимость или первоначальный взнос.\nКупить — поиск по бюджету и моделям.\n\nСохранённый поиск и черновик покупки остаются на месте. /help — команды; /privacy — данные.",
+        "<b>Autodom</b>\nВаш следующий автомобиль — с понятными фактами.\n\nПроверьте VIN, подберите автомобиль или расскажите о своём для продажи и обмена.\n\nПоиск и мониторинг бесплатны. Сохранённые данные остаются на месте.",
         [],
         START_BUTTONS,
       );
@@ -689,7 +800,7 @@ export class Conversation {
       return [
         {
           text: "Введите VIN из 17 символов или отправьте фото VIN в боте. Бесплатно проверим доступные корейские данные; это не полный платный отчёт.",
-          buttons: START_BUTTONS,
+          buttons: [[["Пример полного PDF-отчёта", "vin-report-example"]], ...START_BUTTONS],
           miniAppView: "vin",
         },
       ];
@@ -911,6 +1022,24 @@ export class Conversation {
         "Команда или кнопка не может быть значением поля. Продолжите ввод или /cancel.",
         [],
       );
+    if (state.startsWith("cat_")) {
+      if (action !== null && !catalogActionAllowed(data, action))
+        return packReplies("Эта кнопка не относится к текущему шагу.", [], []);
+      const updated = updateCatalog(state, data, action, text);
+      return this.prompt(userId, updated.state, updated.data, updated.error);
+    }
+    if (action === "catalog")
+      return this.prompt(userId, state === "query" ? "cat_vehicles" : "cat_menu", {
+        ...data,
+        return_review: true,
+      });
+    if (state === "query" && action === "manual")
+      return this.prompt(
+        userId,
+        state,
+        data,
+        "Введите слова для поиска в названии. Этот запрос применяется дополнительно к справочнику; «Пока не знаю» снимает только текстовый запрос.",
+      );
     if (state === "review" || state === "refine") {
       if (action === "save.monitor" || action === "save.silent") {
         const candidate = this.draftProfile(userId, data, profile);
@@ -970,7 +1099,8 @@ export class Conversation {
         : "";
       return this.advance(userId, state, data);
     }
-    const value = action ?? text;
+    const value =
+      state === "budget" && action?.startsWith("preset.") ? action.slice(7) : (action ?? text);
     if ([...value].length > 160)
       return this.prompt(
         userId,

@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { enabledSources, type RequestOutcome, type Settings, SOURCE_IDS } from "@autodom/core";
 import type { Store } from "@autodom/storage";
 import { Counter, collectDefaultMetrics, Gauge, Registry } from "@prometheus-io/client";
@@ -164,10 +164,15 @@ export class Metrics {
   recordRequest(outcome: RequestOutcome): void {
     this.requests.inc({ ...outcome });
   }
-  async serve(port: number, healthy: () => Promise<boolean>): Promise<Server> {
+  async serve(
+    port: number,
+    healthy: () => Promise<boolean>,
+    route?: (request: IncomingMessage, response: ServerResponse) => Promise<boolean>,
+  ): Promise<Server> {
     const health = singleFlight(healthy);
     const server = createServer((request, response) => {
       void (async () => {
+        if (route && (await route(request, response))) return;
         if (request.method !== "GET") {
           response.writeHead(405).end();
           return;

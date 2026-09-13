@@ -1,19 +1,9 @@
 import { Decimal } from "decimal.js";
+import { matchesCatalogFilter } from "./catalog-filter.js";
 import { approvedSources } from "./config.js";
 import { type Listing, listingPrice, MARKETS, type Profile } from "./models.js";
+import { normalize, normalizeCity } from "./normalization.js";
 
-const ALIASES: Readonly<Record<string, string>> = {
-  тойота: "toyota",
-  камри: "camry",
-  хонда: "honda",
-  хендай: "hyundai",
-  хундай: "hyundai",
-  хёндай: "hyundai",
-  киа: "kia",
-  бмв: "bmw",
-  мерседес: "mercedes",
-  лексус: "lexus",
-};
 const BODY_LABELS: Readonly<Record<string, readonly string[]>> = {
   sedan: ["sedan", "седан", "세단"],
   suv: ["suv", "sport utility", "crossover", "внедорожник", "кроссовер", "внедорожник кроссовер"],
@@ -35,11 +25,6 @@ const MILEAGE =
   /^([0-9]+(?:\.[0-9]+)?|[0-9]{1,3}(?:[ ,\u00a0\u202f][0-9]{3})+)\s*(km|км|kilometers?|kilometres?|mi|miles?|миль|мили|миля)$/iu;
 const ExactDecimal = Decimal.clone({ precision: 50 });
 
-export function normalizeCity(text: string): string {
-  // Case-fold expansions relevant to place/vehicle words, unlike locale-sensitive casing.
-  const folded = text.toLowerCase().replace(/ё/gu, "е").replace(/ß/gu, "ss").replace(/ς/gu, "σ");
-  return (folded.match(/[\p{L}\p{N}]+/gu) ?? []).join(" ");
-}
 export function normalizeBodyType(text: string): string {
   const value = normalizeCity(text);
   return Object.entries(BODY_LABELS).find(([, labels]) => labels.includes(value))?.[0] ?? "";
@@ -57,12 +42,6 @@ export function normalizeMileageKm(text: string): number | null {
   const kilometers = /^(?:km|км|kilometers?|kilometres?)$/iu.test(found[2]!);
   const result = (kilometers ? number : number.mul("1.609344")).ceil();
   return result.lte(Number.MAX_SAFE_INTEGER) ? result.toNumber() : null;
-}
-export function normalize(text: string): string {
-  return normalizeCity(text)
-    .split(" ")
-    .map((word) => ALIASES[word] ?? word)
-    .join(" ");
 }
 export function queryGroups(query: string): string[][] {
   return query
@@ -88,6 +67,7 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
   if (
     !["USD", "KGS"].includes(profile.currency) ||
     !Object.hasOwn(MARKETS, profile.market) ||
+    !matchesCatalogFilter(profile.catalog_filter, listing) ||
     !approvedSources().includes(listing.source) ||
     (profile.market !== "ALL" && listing.market !== profile.market) ||
     (listing.market !== "KG" &&
@@ -106,12 +86,17 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
   }
   const price = listingPrice(listing, profile.currency, now);
   const availability = normalize(listing.availability);
+  const publication = listing.catalog_attributes.publication_status;
+  const selectedAvailability = Boolean(profile.catalog_filter.options.availibility?.length);
   if (
     price === null ||
     price <= 0 ||
     price < profile.budget_min_minor ||
     price > profile.budget_max_minor ||
-    (availability !== "в наличии" && availability !== "опубликовано")
+    (selectedAvailability && publication && publication !== "active") ||
+    (availability !== "в наличии" &&
+      availability !== "опубликовано" &&
+      !(selectedAvailability && publication === "active" && availability !== "неактивно"))
   )
     return false;
   const groups = queryGroups(profile.query);

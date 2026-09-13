@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,10 +128,15 @@ function authorization(userId = 42): string {
 beforeAll(async () => {
   vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,lalafo.kg");
   directory = await mkdtemp(join(tmpdir(), "autodom-details-"));
+  await mkdir(join(directory, "reports"));
   await Promise.all([
     writeFile(join(directory, "index.html"), "<!doctype html><title>Details</title>"),
     writeFile(join(directory, "app.js"), ""),
     writeFile(join(directory, "app.css"), ""),
+    copyFile(
+      new URL("../src/public/reports/vin-korea-otchet-kr.pdf", import.meta.url),
+      join(directory, "reports", "vin-korea-otchet-kr.pdf"),
+    ),
   ]);
   server = await startMiniAppServer({
     token: TOKEN,

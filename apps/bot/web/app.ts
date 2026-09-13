@@ -1,11 +1,8 @@
 import type { PaymentOrder } from "@autodom/core/payments";
 import {
-  encarHistoryDiscoveryUrl,
-  encarListingUrl,
   isEncarPhotoUrl,
   normalizeVin,
   VIN_PROVIDERS,
-  VIN_SOURCE_URLS,
   type VinCheckResult,
   vinGoogleSearchUrl,
 } from "@autodom/core/vin";
@@ -15,13 +12,11 @@ import {
   VIN_ARCHIVE_AUCTION_NAMES,
   VIN_ARCHIVE_COVERAGE_NOTICE,
   VIN_ARCHIVE_PHOTO_MAX_BYTES,
-  VIN_ARCHIVE_PROVIDER_NAMES,
-  VIN_ARCHIVE_SOURCE_URLS,
   type VinArchivePhotoRequest,
   type VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import type { Reply } from "../src/conversation.js";
-import { KOREAN_REPORT_EXAMPLE } from "../src/korean-report-example.js";
+import { KOREAN_REPORT_EXAMPLE, KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
 import { PAYMENT_PRIVACY_NOTICE, paymentOrderStatus } from "../src/payment-text.js";
 import {
@@ -38,7 +33,6 @@ import {
   VIN_GOOGLE_SEARCH_NOTICE,
   VIN_SOURCE_NAMES,
   vinArchiveLotText,
-  vinArchiveSourceUrl,
   vinArchiveTime,
   vinSourceText,
 } from "../src/vin-text.js";
@@ -322,6 +316,13 @@ function showHome(): void {
   );
 }
 
+function samplePdfLink(): HTMLAnchorElement {
+  const link = element("a", "button sample-pdf", "Скачать оригинал примера · PDF, 6 страниц");
+  link.href = KOREAN_REPORT_EXAMPLE_PDF.path;
+  link.download = KOREAN_REPORT_EXAMPLE_PDF.filename;
+  return link;
+}
+
 function premiumPanel(): HTMLElement {
   const panel = element("section", "panel premium-panel");
   panel.append(
@@ -330,14 +331,15 @@ function premiumPanel(): HTMLElement {
     element(
       "p",
       "",
-      "Понятный перевод истории автомобиля: страховые события, ремонт и регистрационные сведения — в пределах данных источника.",
+      "Страховые события, известные ремонтные работы, пробег и смена владельцев — собраны в одном документе. Посмотрите, какие сведения доступны и как их читать.",
     ),
     element(
       "p",
       "footnote",
-      "Покупка и выдача нового отчёта не подключены. Finik не используется для цифровых VIN-отчётов в Telegram.",
+      "Это готовый пример, не проверка вашего автомобиля. Заказ нового отчёта пока недоступен.",
     ),
-    button("Посмотреть реальный пример", () => navigate("report-example"), "button button-quiet"),
+    samplePdfLink(),
+    button("Разобрать пример на русском", () => navigate("report-example"), "button button-quiet"),
     element(
       "p",
       "footnote",
@@ -362,6 +364,7 @@ function showExample(): void {
       "footnote",
       `Дата запроса в документе: ${example.queryDate}. Дата документа: ${example.documentDate}.`,
     ),
+    samplePdfLink(),
   );
   const summary = element("section", "panel");
   summary.append(element("h2", "", "Коротко об этом примере"));
@@ -415,7 +418,7 @@ function showDialogue(view: "buy" | "sell"): void {
       "p",
       "muted",
       view === "buy"
-        ? "Выбирайте кнопками или отвечайте текстом. Настройки те же, что в чате."
+        ? "Настройте условия и проверьте подбор перед сохранением. В приложении и чате — один поиск."
         : "Расскажите об авто и цели. Анкета продажи отделена от поиска автомобиля.",
     ),
   );
@@ -423,11 +426,13 @@ function showDialogue(view: "buy" | "sell"): void {
   const status = element("p", "footnote dialogue-status");
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
-  const form = element("form", "dialogue-form panel");
+  status.setAttribute("aria-atomic", "true");
+  const form = element("form", "dialogue-form");
   const label = element("label", "", "Ваш ответ");
   label.htmlFor = "dialogue-input";
   const input = element("input", "text-input");
   input.id = "dialogue-input";
+  input.name = "answer";
   input.type = "text";
   input.placeholder = "Напишите ответ…";
   input.autocomplete = "off";
@@ -436,13 +441,27 @@ function showDialogue(view: "buy" | "sell"): void {
   const submit = element("button", "button", "Отправить");
   submit.type = "submit";
   form.append(label, input, submit);
+  form.hidden = true;
   const cancel = button("Отменить текущий шаг", () => void send("/cancel"), "back-link");
-  main.append(content, status, form, cancel);
+  main.append(content, status, cancel);
   let busy = false;
+  let inputContext = "";
+  const pickerControls: Record<string, true> = {
+    "Предыдущая страница": true,
+    "Следующая страница": true,
+    Готово: true,
+    Назад: true,
+    "Любые / снять ограничение": true,
+    "Сбросить поиск": true,
+    "Отмена всех изменений": true,
+    "Повторить загрузку": true,
+    "Выбрать регион / страну": true,
+  };
 
   function runAction(command: string): void {
     if (busy) return;
-    if (command === "/vin") navigate("vin");
+    if (command === "vin-report-example") samplePdfLink().click();
+    else if (command === "/vin") navigate("vin");
     else if (command === "/start") navigate("home");
     else if (command === "/buy" && view !== "buy") navigate("buy");
     else if ((command === "/sell" || command === "/mycar") && view !== "sell") navigate("sell");
@@ -451,8 +470,37 @@ function showDialogue(view: "buy" | "sell"): void {
 
   function renderReply(reply: Reply): HTMLElement {
     const section = element("section", "panel dialogue-reply");
+    section.tabIndex = -1;
+    if (reply.picker) {
+      section.classList.add("dialogue-picker");
+      const heading = element("header", "picker-heading");
+      if (reply.picker.subtitle)
+        heading.append(element("p", "picker-breadcrumb", reply.picker.subtitle));
+      heading.append(element("h2", "", reply.picker.title));
+      const meta = element("div", "picker-meta");
+      meta.append(
+        element("span", "badge", `Выбрано: ${reply.picker.selected}`),
+        element("span", "footnote", `Страница ${reply.picker.page} из ${reply.picker.pages}`),
+      );
+      heading.append(meta);
+      section.append(heading);
+      section.setAttribute("aria-label", reply.picker.title);
+    }
     const text = element("div", "reply-text");
     text.append(richText(reply.text, null));
+    const repeatedTitle = text.firstChild;
+    if (
+      reply.picker &&
+      repeatedTitle instanceof HTMLElement &&
+      (repeatedTitle.tagName === "B" || repeatedTitle.tagName === "STRONG") &&
+      repeatedTitle.textContent === reply.picker.title
+    ) {
+      repeatedTitle.remove();
+      const firstLine = text.firstChild;
+      const prefix = `\n${reply.picker.subtitle ?? ""}\n`;
+      if (firstLine?.nodeType === Node.TEXT_NODE && firstLine.textContent?.startsWith(prefix))
+        firstLine.textContent = firstLine.textContent.slice(prefix.length);
+    }
     section.append(text);
     if (reply.listingId) {
       section.append(
@@ -468,7 +516,7 @@ function showDialogue(view: "buy" | "sell"): void {
       section.append(
         button(
           target === "report-example"
-            ? "Посмотреть пример отчёта"
+            ? "Разобрать пример на русском"
             : target === "vin"
               ? "Открыть проверку VIN"
               : "Открыть",
@@ -478,28 +526,80 @@ function showDialogue(view: "buy" | "sell"): void {
       );
     }
     const actions = element("div", "dialogue-actions");
+    const options = element("div", "picker-options");
+    if (reply.picker) {
+      options.setAttribute("role", "group");
+      options.setAttribute("aria-label", `Варианты: ${reply.picker.title}`);
+    }
     for (const row of reply.buttons) {
       const group = element("div", "button-row");
       for (const [label, command] of row) {
         const url = safeUrl(command);
-        if (url) {
-          const link = sourceLink(url, label);
-          link.className = "button button-quiet";
-          group.append(link);
+        let control: HTMLButtonElement | HTMLAnchorElement;
+        if (command === "vin-report-example") {
+          control = samplePdfLink();
+        } else if (url) {
+          control = sourceLink(url, label);
+          control.className = "button button-quiet";
         } else {
-          group.append(button(label, () => runAction(command), "button button-quiet"));
+          control = button(label, () => runAction(command), "button button-quiet");
+        }
+        control.dataset.focusLabel = label.replace(/^✓\s*/, "");
+        if (reply.picker && !Object.hasOwn(pickerControls, label)) {
+          control.classList.add("picker-option");
+          control.setAttribute("aria-pressed", String(label.startsWith("✓ ")));
+          options.append(control);
+        } else {
+          if (reply.picker && label === "Готово") {
+            control.classList.remove("button-quiet");
+            control.classList.add("picker-apply");
+          }
+          if (reply.picker && /страница$/.test(label)) group.classList.add("picker-pagination");
+          group.append(control);
         }
       }
-      actions.append(group);
+      if (group.childElementCount) actions.append(group);
     }
+    if (options.childElementCount) section.append(options);
     section.append(actions);
     return section;
   }
 
+  function positionInput(replies: Reply[], sections: HTMLElement[]): void {
+    const index = replies.length - 1;
+    const reply = replies[index];
+    const section = sections[index];
+    if (!reply || !section) {
+      form.remove();
+      return;
+    }
+    const context = reply.input
+      ? JSON.stringify([reply.picker?.title, reply.picker?.subtitle, reply.input])
+      : "";
+    if (!context || context !== inputContext) input.value = "";
+    inputContext = context;
+    const searching = reply.picker?.searchable === true;
+    form.hidden = !reply.input && (view === "buy" || !!reply.picker) && !searching;
+    label.textContent = reply.input?.label ?? (searching ? "Поиск по справочнику" : "Ваш ответ");
+    input.placeholder =
+      reply.input?.placeholder ?? (searching ? "Введите название…" : "Напишите ответ…");
+    input.type = searching ? "search" : "text";
+    input.inputMode = reply.input?.mode ?? "text";
+    input.enterKeyHint = searching ? "search" : "send";
+    input.spellcheck = !reply.picker && input.inputMode === "text";
+    submit.textContent = searching ? "Найти" : reply.input ? "Применить" : "Отправить";
+    form.classList.toggle("dialogue-search", searching);
+    section.insertBefore(form, section.querySelector(".picker-options, .dialogue-actions"));
+  }
+
   async function send(text: string): Promise<void> {
     if (busy || !text.trim()) return;
+    const focused = document.activeElement;
+    const restoreInput = focused === input || focused === submit;
+    const focusLabel = focused instanceof HTMLElement ? focused.dataset.focusLabel : undefined;
     busy = true;
-    status.textContent = "Сохраняем ответ и открываем следующий шаг…";
+    status.textContent = "Открываем следующий шаг…";
+    content.setAttribute("aria-busy", "true");
     content.querySelectorAll<HTMLButtonElement>("button").forEach((node) => {
       node.disabled = true;
     });
@@ -509,22 +609,46 @@ function showDialogue(view: "buy" | "sell"): void {
     try {
       const result = await request<{ replies: Reply[] }>("/miniapp/api/dialogue", { text });
       if (started !== generation) return;
-      content.replaceChildren(...result.replies.map(renderReply));
+      const sections = result.replies.map(renderReply);
+      content.replaceChildren(...sections);
+      positionInput(result.replies, sections);
       if (result.replies.length === 0)
         content.append(
           element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
         );
-      input.value = "";
-      status.textContent = "";
-      content.scrollIntoView({ block: "start", behavior: "smooth" });
+      if (focusLabel === "Сбросить поиск" || focusLabel === "Любые / снять ограничение")
+        input.value = "";
+      const picker = result.replies.at(-1)?.picker;
+      status.textContent = picker
+        ? `${picker.title}. Выбрано: ${picker.selected}. Страница ${picker.page} из ${picker.pages}.`
+        : "Шаг обновлён.";
+      input.disabled = false;
+      if (restoreInput && !form.hidden && form.isConnected) {
+        input.focus({ preventScroll: true });
+      } else if (focusLabel) {
+        const matching = Array.from(
+          content.querySelectorAll<HTMLElement>("[data-focus-label]"),
+        ).find((node) => node.dataset.focusLabel === focusLabel);
+        if (matching instanceof HTMLButtonElement) matching.disabled = false;
+        (matching ?? sections.at(-1))?.focus({ preventScroll: true });
+      }
+      if (!picker || (!focusLabel && !restoreInput)) {
+        content.scrollIntoView({
+          block: "start",
+          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+            ? "auto"
+            : "smooth",
+        });
+      }
     } catch (error) {
       if (started !== generation) return;
-      status.textContent = `${errorText(error)} Если ответ успел сохраниться, продолжите с актуального шага в чате.`;
+      status.textContent = `${errorText(error)} Ваш последний шаг оставлен на экране. Если ответ успел сохраниться, продолжите с актуального шага в чате.`;
       if (!content.childElementCount)
         content.append(button("Открыть шаг заново", () => void send(text), "button button-quiet"));
     } finally {
       if (started === generation) {
         busy = false;
+        content.setAttribute("aria-busy", "false");
         content.querySelectorAll<HTMLButtonElement>("button").forEach((node) => {
           node.disabled = false;
         });
@@ -718,7 +842,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element(
       "p",
       "muted",
-      "Проверим наличие отчёта CarHistory, экспортную запись Car365 и найденные объявления Encar с подтверждённым VIN. Полную историю бесплатно не получаем.",
+      "Проверим наличие полного отчёта, экспортную запись и архив объявлений с подтверждённым VIN. Полную историю бесплатно не получаем.",
     ),
   );
   if (car) {
@@ -833,14 +957,13 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         const section = element("section", "vin-source");
         section.dataset.status = source.status;
         section.append(
-          element("h3", "", VIN_ARCHIVE_PROVIDER_NAMES[source.provider]),
+          element(
+            "h3",
+            "",
+            source.provider === "carway" ? "Архивные записи · ОАЭ" : "Архивные записи · США",
+          ),
           element("p", "badge", VIN_ARCHIVE_STATUS_TEXT[source.status]),
           element("p", "footnote", `Данные получены: ${vinArchiveTime(source.checked_at)}`),
-          sourceLink(
-            vinArchiveSourceUrl(source.source_url, source.provider) ??
-              VIN_ARCHIVE_SOURCE_URLS[source.provider],
-            `Источник: ${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}`,
-          ),
         );
         if (source.provider === "carway")
           section.append(element("p", "notice", VIN_ARCHIVE_CARWAY_NOTICE));
@@ -855,26 +978,13 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         const lotSection = element("section", "vin-source");
         lotSection.append(element("h3", "", title));
         for (const { provider, lot } of group.sources) {
-          lotSection.append(
-            element("p", "vin-observation", vinArchiveLotText(lot, provider)),
-            sourceLink(
-              vinArchiveSourceUrl(lot.source_url, provider, lot, vin) ??
-                VIN_ARCHIVE_SOURCE_URLS[provider],
-              `Открыть лот ${VIN_ARCHIVE_AUCTION_NAMES[lot.auction]} на ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}`,
-            ),
-          );
+          lotSection.append(element("p", "vin-observation", vinArchiveLotText(lot, provider)));
           if (
             lot.photos.some(
               (photo) => !isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
             )
           )
-            lotSection.append(
-              element(
-                "p",
-                "notice",
-                `${VIN_ARCHIVE_PROVIDER_NAMES[provider]}: часть ссылок на фотографии недоступна.`,
-              ),
-            );
+            lotSection.append(element("p", "notice", "Часть ссылок на фотографии недоступна."));
         }
         const galleries = group.sources
           .map(({ provider, lot }) => ({
@@ -917,7 +1027,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               element(
                 "p",
                 "footnote",
-                `Фотографии: ${VIN_ARCHIVE_PROVIDER_NAMES[selected.provider]}`,
+                galleries.length > 1 ? `Набор фотографий ${index + 1}` : "Сохранившиеся фотографии",
               ),
               gallery(title, selected.photoUrls, {
                 request: {
@@ -934,9 +1044,9 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             });
           };
           if (galleries.length > 1) {
-            galleries.forEach((candidate, index) => {
+            galleries.forEach((_, index) => {
               const choice = button(
-                `Фото ${VIN_ARCHIVE_PROVIDER_NAMES[candidate.provider]}`,
+                `Набор фото ${index + 1}`,
                 () => showGallery(index),
                 "button button-quiet",
               );
@@ -1019,7 +1129,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             "p",
             "badge",
             provider === "carhistory" && observation.status === "available"
-              ? "Отчёт доступен у провайдера"
+              ? "Наличие отчёта подтверждено"
               : provider === "encar" && observation.status === "available"
                 ? confirmedEncarListings(result).length
                   ? result.encar?.data?.partial
@@ -1073,13 +1183,10 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
           );
         } else if (provider === "encar" && observation.status === "available") {
           section.append(element("p", "vin-observation", encarHistorySummary(result)));
-          section.append(
-            sourceLink(encarHistoryDiscoveryUrl(result.vin), "Поиск кандидатов: Carcheck"),
-          );
           for (const listing of confirmedEncarListings(result)) {
             const advertisement = element("article", "encar-listing");
             advertisement.append(
-              element("h4", "", `Объявление Encar №${listing.id}`),
+              element("h4", "", `Архивное объявление №${listing.id}`),
               element("p", "footnote", `Подтверждённый VIN: ${listing.vin}`),
             );
             const facts = element("dl", "facts");
@@ -1091,12 +1198,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             advertisement.append(
               facts,
               gallery(
-                `Encar №${listing.id} · ${listing.model ?? listing.vin}`,
+                `Объявление №${listing.id} · ${listing.model ?? listing.vin}`,
                 listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)),
-              ),
-              sourceLink(
-                encarListingUrl(listing.id),
-                "Открыть официальное объявление и фотографии",
               ),
             );
             section.append(advertisement);
@@ -1113,9 +1216,6 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         } else {
           section.append(element("p", "vin-observation", vinSourceText(provider, result)));
         }
-        section.append(
-          sourceLink(VIN_SOURCE_URLS[provider], `Источник: ${VIN_SOURCE_NAMES[provider]}`),
-        );
         results.append(section);
       }
     } catch (error) {
@@ -1153,7 +1253,7 @@ function showCar(car: MiniAppCar): void {
   const main = shell();
   const heading = element("section", "car-heading");
   heading.append(
-    element("p", "eyebrow", `${car.market} · ${car.source}`),
+    element("p", "eyebrow", car.market),
     element("h1", "", car.title),
     element("p", "price", car.price),
   );
@@ -1165,7 +1265,7 @@ function showCar(car: MiniAppCar): void {
     ["Коробка передач", car.transmission || "Не указана"],
     ["Кузов", car.bodyType || "Не указан"],
     ["Город", car.city || "Не указан"],
-    ["Статус у источника", car.availability || "Не указан"],
+    ["Статус объявления", car.availability || "Не указан"],
   ]) {
     const fact = element("div", "fact");
     fact.append(element("dt", "", label), element("dd", "", value));
@@ -1176,10 +1276,8 @@ function showCar(car: MiniAppCar): void {
   const details = element("section", "panel");
   details.append(element("h2", "", "Сведения из объявления"));
   const text = element("div", "details");
-  const url = safeUrl(car.url);
-  text.append(richText(car.detailsHtml, url));
+  text.append(richText(car.detailsHtml, null));
   details.append(text);
-  if (url) details.append(sourceLink(url, "Открыть объявление у источника"));
   main.append(details);
   const observed =
     car.observedAt === null

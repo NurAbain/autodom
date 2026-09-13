@@ -277,22 +277,23 @@ it("notifies a real Mashina native reduction once but never a converted USD disp
   let usd = 34000;
   let kgs = 2973300;
   const captured: DocumentTransport = {
-    async fetchDocument(_url, parse) {
+    async fetchDocument(url, parse) {
+      const item = {
+        id: 10112178,
+        slug: "toyota-camry",
+        category_id: 1,
+        title: "Toyota Camry",
+        status: "active",
+        availability: "В наличии",
+        prices: [
+          { currency: "USD", amount: usd, is_original: false },
+          { currency: "KGS", amount: kgs, is_original: true },
+        ],
+      };
+      if (url.endsWith("/detail")) return parse(JSON.stringify(item));
       return parse(
         `1:${JSON.stringify({
-          items: [
-            {
-              id: 10112178,
-              slug: "toyota-camry",
-              title: "Toyota Camry",
-              status: "active",
-              availability: "В наличии",
-              prices: [
-                { currency: "USD", amount: usd, is_original: false },
-                { currency: "KGS", amount: kgs, is_original: true },
-              ],
-            },
-          ],
+          items: [item],
           total: 1,
           page: 1,
           size: 21,

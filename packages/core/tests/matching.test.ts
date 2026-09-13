@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { matches, normalize, normalizeMileageKm, queryGroups } from "../src/matching.js";
+import { matches, normalizeMileageKm, queryGroups } from "../src/matching.js";
 import { makeListing, makeProfile } from "../src/models.js";
+import { normalize } from "../src/normalization.js";
 
 const profile = makeProfile({
   user_id: 1,

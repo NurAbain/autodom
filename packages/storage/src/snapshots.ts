@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { createReadStream, type ReadStream } from "node:fs";
 import { mkdir, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { MARKETS, makeListing, makeProfile } from "@autodom/core";
+import { MARKETS, makeListing, makeProfile, normalize } from "@autodom/core";
+import { emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
   finikPaymentId,
@@ -29,7 +30,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -83,6 +84,9 @@ export async function insertSnapshotRow(
       throw new Error("Listing identity does not match its snapshot row");
     if (data.market === "ALL" || !Object.hasOwn(MARKETS, data.market))
       throw new Error("Invalid listing market");
+    row.data = data;
+    if (table === "listings" && row.normalized_title !== ` ${normalize(data.title)} `)
+      throw new Error("Listing normalized title does not match snapshot data");
   }
   if (table === "profiles") {
     const p = validateProfile(
@@ -97,6 +101,7 @@ export async function insertSnapshotRow(
       } as Parameters<typeof makeProfile>[0]),
     );
     validateQuietHours(p.quiet_start_minute, p.quiet_end_minute);
+    row.catalog_filter = p.catalog_filter;
   }
   if (table === "owner_vehicles") {
     const card = { ...row };
@@ -270,10 +275,10 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
-          header.schema_version === SCHEMA_VERSION
+          (header.schema_version as number) >= 5
             ? DATA_TABLES
             : header.schema_version === 4
               ? OWNER_DATA_TABLES
@@ -282,7 +287,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
     )
       throw new Error("Unsupported Autodom snapshot format");
     const snapshotTables: readonly DataTable[] =
-      header.schema_version === SCHEMA_VERSION
+      (header.schema_version as number) >= 5
         ? DATA_TABLES
         : header.schema_version === 4
           ? OWNER_DATA_TABLES
@@ -362,6 +367,17 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
             throw new Error("Invalid profiles snapshot columns for schema version 2");
           const { ads_consent: _removed, ...current } = row;
           row = current;
+        }
+        if ((header.schema_version as number) < SCHEMA_VERSION && table === "profiles") {
+          if (Object.hasOwn(row, "catalog_filter"))
+            throw new Error("Unexpected catalog filter in historical snapshot");
+          row = { ...row, catalog_filter: emptyCatalogFilter() };
+        }
+        if ((header.schema_version as number) < SCHEMA_VERSION && table === "listings") {
+          if (Object.hasOwn(row, "normalized_title"))
+            throw new Error("Unexpected normalized title in historical snapshot");
+          const listing = makeListing(row.data as Parameters<typeof makeListing>[0]);
+          row = { ...row, normalized_title: ` ${normalize(listing.title)} ` };
         }
         await insertSnapshotRow(target, table, row);
         counts[table]++;

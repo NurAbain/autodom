@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./catalog-filter": {
+      "types": "./src/catalog-filter.ts",
+      "default": "./src/catalog-filter.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

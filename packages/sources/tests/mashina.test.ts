@@ -4,6 +4,7 @@ import {
   makeProfile,
   matches,
   SourceError,
+  SourceRateLimited,
 } from "@autodom/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fetchPage, parsePage } from "../src/mashina.js";
@@ -41,6 +42,115 @@ const listing = (changes: Record<string, unknown> = {}) =>
 afterEach(() => vi.unstubAllEnvs());
 
 describe("Mashina Flight catalog", () => {
+  it("retains source values rather than option identities and does not invent market assessments", () => {
+    const value = listing({
+      price_range: -10,
+      attributes: [
+        { slug: "gearbox", attribute_options_id: 999, value_text: "Автомат" },
+        { slug: "make", attribute_options_id: 123, value_text: "Toyota" },
+        { slug: "region", value_json: { name: "Чуйская область" } },
+        { slug: "availibility", value_text: "В пути" },
+        { slug: "mileage", value_number: 100, value_json: { value: 100, suffix: "miles" } },
+        { slug: "engine_volume", value_number: 2.5 },
+      ],
+    });
+    expect(value.catalog_attributes).toEqual({
+      gearbox: "Автомат",
+      make: "Toyota",
+      region: "Чуйская область",
+      availibility: "В пути",
+      publication_status: "active",
+    });
+    expect(value.catalog_numbers).toEqual({
+      mileage: 160.9344,
+      engine_volume: 2.5,
+      price_range: -10,
+    });
+    expect(listing({ price_range: null }).catalog_numbers.price_range).toBeNull();
+    expect(listing().catalog_attributes.model).toBeUndefined();
+  });
+
+  it("enriches ingestion with detail facts without losing feed-only engine data", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
+    const transport: DocumentTransport = {
+      async fetchDocument<T>(url: string, parse: (text: string) => T): Promise<T> {
+        return parse(
+          url.endsWith("/detail")
+            ? JSON.stringify(
+                ad({
+                  category_id: 1,
+                  attributes: [
+                    { id: 16, slug: "make", value_text: "Volkswagen" },
+                    { id: 51, slug: "region", value_text: "Чуйская область" },
+                    { id: 1, slug: "year", value_number: 2024 },
+                    { id: 2, slug: "mileage", value_text: "200000 км" },
+                  ],
+                }),
+              )
+            : flight(catalog([ad({ attributes: [{ slug: "engine_volume", value_number: 1.5 }] })])),
+        );
+      },
+      fetchDocuments: vi.fn(),
+    };
+    const result = (await fetchPage({ transport })).listings[0]!;
+    expect(result.catalog_attributes.make).toBe("Volkswagen");
+    expect(result.catalog_attributes.region).toBe("Чуйская область");
+    expect(result.catalog_numbers.engine_volume).toBe(1.5);
+    expect(result.catalog_numbers.price_range).toBeNull();
+    expect(result.catalog_attributes.generation).toBeUndefined();
+    expect(result.year).toBe(2024);
+    expect(result.mileage).toBe("200000 км");
+    expect(result.catalog_numbers.year).toBe(2024);
+    expect(result.catalog_numbers.mileage).toBe(200000);
+    const profile = makeProfile({
+      user_id: 1,
+      chat_id: 1,
+      currency: "USD",
+      budget_min_minor: 0,
+      budget_max_minor: 2_000_000,
+      mileage_max_km: 150000,
+    });
+    expect(matches(profile, result)).toBe(false);
+    expect(matches({ ...profile, mileage_max_km: 200000 }, result)).toBe(true);
+  });
+  it("aborts and drains sibling details before releasing a rate-limited page", async () => {
+    const items = Array.from({ length: 5 }, (_, index) =>
+      ad({ id: index + 1, slug: `car-${index}` }),
+    );
+    const limited = new SourceRateLimited(120);
+    let started = 0;
+    let drained = false;
+    let release!: () => void;
+    const siblingStarted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transport: DocumentTransport = {
+      async fetchDocument(url, parse, options) {
+        if (!url.endsWith("/detail")) return parse(flight(catalog(items)));
+        started++;
+        if (url.includes("/car-0/")) {
+          await siblingStarted;
+          throw limited;
+        }
+        release();
+        return await new Promise<never>((_resolve, reject) => {
+          options.signal!.addEventListener(
+            "abort",
+            () => {
+              drained = true;
+              reject(options.signal!.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+      fetchDocuments: vi.fn(),
+    };
+    await expect(fetchPage({ transport })).rejects.toBe(limited);
+    expect(started).toBe(2);
+    expect(drained).toBe(true);
+  });
+
   it("finds vehicle catalog through nested translations without corrupting seller text", () => {
     const title = 'Lexus LX «Кыргызстан» [570] \\"особый" {seller}';
     const result = parsePage(
@@ -318,8 +428,8 @@ describe("Mashina Flight catalog", () => {
     vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
     let body = flight(catalog([ad()], { page: 3, pages: 3, total: 42 }));
     const transport: DocumentTransport = {
-      async fetchDocument<T>(_url: string, parse: (text: string) => T): Promise<T> {
-        return parse(body);
+      async fetchDocument<T>(url: string, parse: (text: string) => T): Promise<T> {
+        return parse(url.endsWith("/detail") ? JSON.stringify(ad({ category_id: 1 })) : body);
       },
       fetchDocuments: vi.fn(),
     };

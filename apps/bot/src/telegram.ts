@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { money } from "@autodom/core";
 import {
   ENCAR_HISTORY_MAX_LISTINGS,
   ENCAR_HISTORY_MAX_PHOTOS,
-  encarListingUrl,
   isEncarPhotoUrl,
   normalizeVin,
   type VinCheckResult,
@@ -15,10 +15,7 @@ import {
   groupVinArchiveLots,
   isVinArchivePhotoUrl,
   VIN_ARCHIVE_AUCTION_NAMES,
-  VIN_ARCHIVE_COVERAGE_NOTICE,
   VIN_ARCHIVE_PHOTO_MAX_BYTES,
-  VIN_ARCHIVE_PROVIDER_NAMES,
-  VIN_ARCHIVE_SOURCE_URLS,
   type VinArchiveLookup,
   type VinArchivePhotoLookup,
   type VinArchiveResult,
@@ -28,6 +25,7 @@ import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
+import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import { paymentOrderStatus } from "./payment-text.js";
 import type { PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
@@ -43,7 +41,6 @@ import {
   VIN_NOT_ENABLED,
   VIN_REPORT_EXAMPLE_LABEL,
   vinArchiveLotText,
-  vinArchiveSourceUrl,
   vinArchiveTime,
   vinResultText,
 } from "./vin-text.js";
@@ -137,9 +134,7 @@ export async function sendReplies(
         photoRejected = true;
       }
     }
-    const photoNote = photoRejected
-      ? "Фото источника недоступны в Telegram. Проверьте их по ссылке объявления.\n\n"
-      : "";
+    const photoNote = photoRejected ? "Часть фотографий недоступна в Telegram.\n\n" : "";
     if (
       richHtml &&
       (!photoRejected || Buffer.byteLength(richHtml + photoNote, "utf8") + 7 <= 32768)
@@ -247,6 +242,18 @@ export function createTelegramBot(
       options,
     );
   }
+  async function sendReportExample(chatId: number): Promise<void> {
+    await bot.api.sendDocument(
+      chatId,
+      new InputFile(
+        fileURLToPath(
+          new URL(`./public/reports/${KOREAN_REPORT_EXAMPLE_PDF.filename}`, import.meta.url),
+        ),
+        KOREAN_REPORT_EXAMPLE_PDF.filename,
+      ),
+      { caption: KOREAN_REPORT_EXAMPLE_PDF.caption },
+    );
+  }
   async function checkVin(chatId: number, vin: string): Promise<void> {
     const searchUrl = vinGoogleSearchUrl(vin);
     if (!searchUrl) return;
@@ -270,7 +277,9 @@ export function createTelegramBot(
     const keyboard = new InlineKeyboard()
       .url(VIN_GOOGLE_SEARCH_LABEL, searchUrl)
       .row()
-      .text(VIN_ARCHIVE_LABEL, `vinarchive:${vin}`);
+      .text(VIN_ARCHIVE_LABEL, `vinarchive:${vin}`)
+      .row()
+      .text("Пример отчёта · PDF на корейском", "vin-report-example");
     if (options.miniAppUrl) {
       keyboard
         .row()
@@ -297,10 +306,9 @@ export function createTelegramBot(
         await sendReplies(bot, chatId, [
           {
             text: escapeHtml(
-              `Фотографии объявления Encar №${listing.id} · VIN ${vin}\n` +
+              `Архив объявления №${listing.id} · VIN ${vin}\n` +
                 `Фото ${offset + 1}–${Math.min(offset + 10, photos.length)} из ${photos.length}.\n` +
-                `Архивные фотографии не подтверждают текущее состояние автомобиля.\n` +
-                `Источник: ${encarListingUrl(listing.id)}`,
+                "Фотографии не подтверждают текущее состояние автомобиля.",
             ),
             photos: photos.slice(offset, offset + 10),
             buttons: [],
@@ -322,7 +330,7 @@ export function createTelegramBot(
         chatId,
         packReplies(
           escapeHtml(
-            `VIN ${vin}\n\n${VIN_ARCHIVE_STATUS_TEXT.unavailable}\n\n${VIN_ARCHIVE_COVERAGE_NOTICE}`,
+            `VIN ${vin}\n\n${VIN_ARCHIVE_STATUS_TEXT.unavailable}\n\nАрхивы неполные; отсутствие записей не означает отсутствие ДТП.`,
           ),
           [],
         ),
@@ -335,27 +343,23 @@ export function createTelegramBot(
       chatId,
       packReplies(
         escapeHtml(
-          `VIN ${vin}\n${VIN_ARCHIVE_LABEL}\nОтвет получен: ${vinArchiveTime(result.checked_at)}\n\n${VIN_ARCHIVE_COVERAGE_NOTICE}`,
+          `VIN ${vin}\n${VIN_ARCHIVE_LABEL}\nПроверено: ${vinArchiveTime(result.checked_at)}\n\nАрхивы неполные. Фото относятся к прошлому состоянию автомобиля; отсутствие записей не означает отсутствие ДТП.`,
         ),
         [],
       ),
       options,
     );
     for (const source of result.sources) {
-      const sourceUrl =
-        vinArchiveSourceUrl(source.source_url, source.provider) ??
-        VIN_ARCHIVE_SOURCE_URLS[source.provider];
       await sendReplies(
         bot,
         chatId,
         packReplies(
           escapeHtml(
             [
-              `${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}: ${VIN_ARCHIVE_STATUS_TEXT[source.status]}`,
+              `${source.provider === "carway" ? "Архив ОАЭ" : "Архив США"}: ${VIN_ARCHIVE_STATUS_TEXT[source.status]}`,
               `Данные получены: ${vinArchiveTime(source.checked_at)}.`,
               ...(source.provider === "carway" ? [VIN_ARCHIVE_CARWAY_NOTICE] : []),
               ...(source.partial ? ["Поиск или получение фотографий выполнены не полностью."] : []),
-              `Источник: ${sourceUrl}`,
             ].join("\n"),
           ),
           [],
@@ -367,9 +371,6 @@ export function createTelegramBot(
     for (const group of groupVinArchiveLots(result)) {
       const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
       const { provider, lot } = group.photo_source;
-      const lotUrl =
-        vinArchiveSourceUrl(lot.source_url, provider, lot, vin) ??
-        VIN_ARCHIVE_SOURCE_URLS[provider];
       const photos = [
         ...new Set(
           lot.photos.filter((photo) =>
@@ -384,13 +385,8 @@ export function createTelegramBot(
           escapeHtml(
             [
               title,
-              ...group.sources.map((source) =>
-                [
-                  vinArchiveLotText(source.lot, source.provider),
-                  `Источник ${VIN_ARCHIVE_PROVIDER_NAMES[source.provider]}: ${vinArchiveSourceUrl(source.lot.source_url, source.provider, source.lot, vin) ?? VIN_ARCHIVE_SOURCE_URLS[source.provider]}`,
-                ].join("\n"),
-              ),
-              `Фотографии: ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}. Другие версии доступны по ссылкам источников выше.`,
+              ...group.sources.map((source) => vinArchiveLotText(source.lot, source.provider)),
+              `Фотографий в записи: ${photos.length}.`,
               ...(photos.length < lot.photos.length ? ["Часть ссылок на фото недоступна."] : []),
             ].join("\n\n"),
           ),
@@ -464,14 +460,8 @@ export function createTelegramBot(
             {
               text: escapeHtml(
                 [
-                  `${title} · фото ${VIN_ARCHIVE_PROVIDER_NAMES[provider]} · ссылки ${offset + 1}–${offset + batch.length}`,
-                  `Источник: ${lotUrl}`,
-                  ...(unavailable
-                    ? [
-                        "Часть фото недоступна. Повторите поиск архива, чтобы загрузить фотографии заново, или откройте оригиналы по ссылкам ниже.",
-                      ]
-                    : []),
-                  ...batch.map((url, index) => `Фото ${offset + index + 1}: ${url}`),
+                  `${title} · фото ${offset + 1}–${offset + batch.length}`,
+                  ...(unavailable ? ["Часть фото недоступна. Повторите поиск архива позже."] : []),
                 ].join("\n"),
               ),
               buttons: [],
@@ -657,6 +647,10 @@ export function createTelegramBot(
     const chatId = userId;
     const data = "data" in callback ? (callback.data ?? "") : "";
     await store.withLock(`autodom:user:${userId}`, async () => {
+      if (data === "vin-report-example") {
+        await sendReportExample(chatId);
+        return;
+      }
       if (data.startsWith("vinarchive:")) {
         const value = data.slice("vinarchive:".length);
         const vin = normalizeVin(value);

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { catalogFilterSchema, emptyCatalogFilter } from "./catalog-filter.js";
 
 export const MARKETS = {
   KG: "Кыргызстан",
@@ -53,6 +54,8 @@ export const listingSchema = z
     body_type: text,
     city: text,
     availability: text,
+    catalog_attributes: z.record(z.string().max(64), z.string().trim().max(256)).default({}),
+    catalog_numbers: z.record(z.string().max(64), z.number().finite().nullable()).default({}),
     published_at: text,
     photo_url: z.string().nullable().default(null),
     photo_urls: z.array(z.string()).default([]),
@@ -106,6 +109,7 @@ export const profileSchema = z
     mileage_max_km: optionalInteger,
     transmission: text,
     use_case: text,
+    catalog_filter: catalogFilterSchema.default(emptyCatalogFilter),
     allow_import: z.boolean().nullable().default(null),
     purchase_by: text,
   })

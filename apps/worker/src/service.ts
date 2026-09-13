@@ -6,7 +6,9 @@ import { runtimeStatus } from "@autodom/runtime/status";
 import { ProxyTransport } from "@autodom/sources";
 import type { Store } from "@autodom/storage";
 import type { Logger } from "pino";
+import { createCatalogRoute } from "./catalog-http.js";
 import { type CollectionWorkers, startCollectionWorkers } from "./jobs.js";
+import { VehicleCatalog } from "./vehicle-catalog.js";
 
 export async function runWorkerService(
   store: Store,
@@ -48,9 +50,14 @@ export async function runWorkerService(
       logger,
       metrics,
     );
+    const catalogToken = process.env.AUTODOM_CATALOG_API_TOKEN?.trim();
+    const catalogRoute = catalogToken
+      ? createCatalogRoute(new VehicleCatalog(transport), catalogToken)
+      : undefined;
     server = await metrics.serve(
       port,
       async () => !abort.signal.aborted && (await runtimeStatus(store, settings, "worker")).healthy,
+      catalogRoute,
     );
     server.on("error", (error) => abort.abort(error));
     tasks.push(maintain(store, settings, "worker", abort.signal));

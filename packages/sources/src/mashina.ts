@@ -7,16 +7,19 @@ import {
   SourceError,
   type SourcePage,
 } from "@autodom/core";
+import {
+  CATALOG_OPTION_LABELS,
+  CATALOG_RANGE_LABELS,
+  CATALOG_VEHICLE_LABELS,
+} from "@autodom/core/catalog-filter";
 import { Decimal } from "decimal.js";
 
 export const CATALOG_URL = "https://mashina.kg/catalog/passenger";
 const CATALOG_KEYS = ["items", "total", "page", "size", "pages"] as const;
-const ATTRIBUTE_SLUGS: Readonly<Record<string, true>> = {
-  year: true,
-  mileage: true,
-  gearbox: true,
-  body_type: true,
-  city: true,
+const ATTRIBUTE_SLUGS = {
+  ...CATALOG_VEHICLE_LABELS,
+  ...CATALOG_OPTION_LABELS,
+  ...CATALOG_RANGE_LABELS,
 };
 type ObjectValue = Record<string, unknown>;
 
@@ -228,6 +231,56 @@ function parseListing(
     numericYear.lte(2200)
       ? numericYear.toNumber()
       : null;
+  const catalog_attributes: Record<string, string> = { publication_status: item.status };
+  const catalog_numbers: Record<string, number | null> = {};
+  for (const key of [
+    ...Object.keys(CATALOG_VEHICLE_LABELS),
+    ...Object.keys(CATALOG_OPTION_LABELS),
+  ]) {
+    const value = attributeText(attrs.get(key) ?? {});
+    if (value) catalog_attributes[key] = value;
+  }
+  for (const key of Object.keys(CATALOG_RANGE_LABELS)) {
+    const attribute = attrs.get(key) ?? {};
+    const json = isObject(attribute.value_json) ? attribute.value_json : {};
+    const text = attributeText(attribute);
+    const numericText =
+      key === "mileage"
+        ? text.match(
+            /^([0-9]+(?:\.[0-9]+)?)\s*(?:km|км|kilometers?|kilometres?|mi|miles?|миль|мили|миля)$/iu,
+          )?.[1]
+        : text;
+    const value = decimal(attribute.value_number ?? json.value ?? numericText);
+    if (!value?.isFinite() || value.isNegative() || value.gt(Number.MAX_SAFE_INTEGER)) continue;
+    if (key === "mileage") {
+      const suffix =
+        typeof json.suffix === "string"
+          ? json.suffix.trim().toLowerCase()
+          : text
+              .match(/(km|км|kilometers?|kilometres?|mi|miles?|миль|мили|миля)$/iu)?.[0]
+              ?.toLowerCase();
+      if (!suffix) continue;
+      if (/^(mi|miles?|миль|мили|миля)$/iu.test(suffix))
+        catalog_numbers[key] = value.times("1.609344").toNumber();
+      else if (/^(km|км|kilometers?|kilometres?)$/iu.test(suffix))
+        catalog_numbers[key] = value.toNumber();
+    } else if (key === "year") {
+      if (year !== null) catalog_numbers[key] = year;
+    } else {
+      catalog_numbers[key] = value.toNumber();
+    }
+  }
+  const sourceMarket = decimal(item.price_range);
+  catalog_numbers.price_range =
+    sourceMarket?.isFinite() && sourceMarket.abs().lte(Number.MAX_SAFE_INTEGER)
+      ? sourceMarket.toNumber()
+      : null;
+  if (
+    !catalog_attributes.availibility &&
+    typeof item.availability === "string" &&
+    item.availability.trim()
+  )
+    catalog_attributes.availibility = item.availability.trim();
   if (item.availability != null && typeof item.availability !== "string")
     throw new SourceError("Mashina catalog availability schema changed");
   if (item.created_at != null && typeof item.created_at !== "string")
@@ -242,11 +295,16 @@ function parseListing(
     original_currency: originalCurrency,
     original_price_minor: originalCurrency ? (amounts[originalCurrency] ?? null) : null,
     year,
+    catalog_attributes,
+    catalog_numbers,
     mileage: attributeText(attrs.get("mileage") ?? {}),
     transmission: attributeText(attrs.get("gearbox") ?? {}),
     body_type: attributeText(attrs.get("body_type") ?? {}),
     city: attributeText(attrs.get("city") ?? {}),
-    availability: item.status !== "active" ? "Неактивно" : (item.availability ?? "").trim(),
+    availability:
+      item.status !== "active"
+        ? "Неактивно"
+        : (item.availability ?? catalog_attributes.availibility ?? "").trim(),
     published_at: item.created_at ?? "",
     photo_url: photos[0] ?? null,
     photo_urls: photos,
@@ -295,10 +353,73 @@ export async function fetchPage({ page = 1, transport }: FetchPageOptions): Prom
   requireSourceAccess("mashina.kg");
   if (!Number.isSafeInteger(page) || page < 1)
     throw new SourceError("Catalog page must be a positive integer");
-  return transport.fetchDocument(CATALOG_URL, (text) => parsePage(text, page), {
+  const result = await transport.fetchDocument(CATALOG_URL, (text) => parsePage(text, page), {
     source: "mashina.kg",
     page,
     params: { page },
     headers: { RSC: "1", Accept: "text/x-component" },
   });
+  // Enrich at scheduled ingestion, never during a user's search. Two workers bound
+  // additional source traffic; partial/failed pages are not presented as complete.
+  let next = 0;
+  const controller = new AbortController();
+  await Promise.all(
+    Array.from({ length: Math.min(2, result.listings.length) }, async () => {
+      try {
+        while (!controller.signal.aborted) {
+          const index = next++;
+          const listing = result.listings[index];
+          if (!listing) return;
+          const slug = decodeURIComponent(new URL(listing.url).pathname.split("/").at(-1)!);
+          result.listings[index] = await transport.fetchDocument(
+            `https://api.mashina.kg/api/mbank-proxy/v1/ads/${encodeURIComponent(slug)}/detail`,
+            (text) => {
+              let detail: unknown;
+              try {
+                detail = JSON.parse(text);
+              } catch (cause) {
+                throw new SourceError("Malformed Mashina detail response", { cause });
+              }
+              if (
+                !listingShape(detail) ||
+                detail.slug !== slug ||
+                `mashina:${detail.id}` !== listing.id ||
+                detail.category_id !== 1
+              )
+                throw new SourceError("Mashina detail identity or category changed");
+              const enriched = parseListing(detail);
+              return makeListing({
+                ...listing,
+                catalog_attributes: {
+                  ...listing.catalog_attributes,
+                  ...enriched.catalog_attributes,
+                },
+                catalog_numbers: {
+                  ...listing.catalog_numbers,
+                  ...Object.fromEntries(
+                    Object.entries(enriched.catalog_numbers).filter(([, value]) => value !== null),
+                  ),
+                },
+                year: enriched.year ?? listing.year,
+                mileage: enriched.mileage || listing.mileage,
+                city: enriched.city || listing.city,
+                body_type: enriched.body_type || listing.body_type,
+                transmission: enriched.transmission || listing.transmission,
+                availability: enriched.availability || listing.availability,
+              });
+            },
+            {
+              source: "mashina.kg",
+              headers: { Accept: "application/json", "Accept-Language": "ru" },
+              signal: controller.signal,
+            },
+          );
+        }
+      } catch (error) {
+        controller.abort(error);
+      }
+    }),
+  );
+  controller.signal.throwIfAborted();
+  return result;
 }
