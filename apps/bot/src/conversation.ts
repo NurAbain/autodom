@@ -159,9 +159,16 @@ export function profileText(profile: Profile): string {
   }
   const catalog = catalogSummary(profile.catalog_filter);
   return (
-    `Рынок: <b>${MARKETS[profile.market as keyof typeof MARKETS]}</b>\nБюджет: <b>${budget}</b> · ${BUDGET_SCOPES[profile.budget_scope as keyof typeof BUDGET_SCOPES]}\nАвтомобили: ${profile.query ? escapeHtml(profile.query) : "любые модели"}\n` +
-    `Город объявления: ${profile.city ? escapeHtml(profile.city) : "любой"}\nКузов: ${BODY_TYPES[profile.body_type as keyof typeof BODY_TYPES] ?? "любой"}; год от: ${profile.year_min ?? "не задан"}\n` +
-    `Пробег до: ${profile.mileage_max_km === null ? "не задан" : `${profile.mileage_max_km} км`}; коробка: ${TRANSMISSIONS[profile.transmission as keyof typeof TRANSMISSIONS] ?? "любая"}\n` +
+    `Рынок: <b>${MARKETS[profile.market as keyof typeof MARKETS]}</b>\nБюджет: <b>${budget}</b> · ${BUDGET_SCOPES[profile.budget_scope as keyof typeof BUDGET_SCOPES]}\nТекстовый запрос: ${profile.query ? escapeHtml(profile.query) : "не задан"}\n` +
+    (profile.city ? `Город объявления: ${escapeHtml(profile.city)}\n` : "") +
+    (profile.body_type
+      ? `Кузов: ${BODY_TYPES[profile.body_type as keyof typeof BODY_TYPES]}\n`
+      : "") +
+    (profile.year_min !== null ? `Год от: ${profile.year_min}\n` : "") +
+    (profile.mileage_max_km !== null ? `Пробег до: ${profile.mileage_max_km} км\n` : "") +
+    (profile.transmission
+      ? `Коробка: ${TRANSMISSIONS[profile.transmission as keyof typeof TRANSMISSIONS]}\n`
+      : "") +
     `Импорт: ${profile.allow_import === true ? "готов ждать" : profile.allow_import === false ? "исключён" : "не уточнён, разрешён из включённых источников"}\n` +
     `Цель (заметка): ${USE_CASES[profile.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${profile.purchase_by ? escapeHtml(profile.purchase_by) : "не задана"}\n` +
     (catalog ? `${catalog}\n` : "") +
@@ -478,8 +485,8 @@ export class Conversation {
         "<b>Проверьте поиск</b>\n\n" +
         `Рынок: ${MARKETS[candidate.market as keyof typeof MARKETS]}\n` +
         `Бюджет: ${candidate.budget_min_minor ? money(candidate.budget_min_minor, candidate.currency) + " — " : "до "}${money(candidate.budget_max_minor, candidate.currency)} · ${BUDGET_SCOPES[candidate.budget_scope as keyof typeof BUDGET_SCOPES]}\n` +
-        `Модели: ${candidate.query ? escapeHtml(candidate.query) : "любые"}\n` +
-        `Город: ${candidate.city ? escapeHtml(candidate.city) : "любой"}\n` +
+        `Текстовый запрос: ${candidate.query ? escapeHtml(candidate.query) : "не задан"}\n` +
+        (candidate.city ? `Город: ${escapeHtml(candidate.city)}\n` : "") +
         [
           candidate.body_type ? BODY_TYPES[candidate.body_type as keyof typeof BODY_TYPES] : "",
           candidate.year_min ? `от ${candidate.year_min} г.` : "",

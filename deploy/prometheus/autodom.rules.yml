@@ -2,7 +2,7 @@ groups:
   - name: autodom
     rules:
       - alert: AutodomTargetDown
-        expr: up{application="autodom",job=~"autodom-bot|autodom-worker"} == 0
+        expr: up{application="autodom",job=~"autodom-bot|autodom-worker|autodom-vin"} == 0
         for: 2m
         labels: {severity: critical}
         annotations:
@@ -72,3 +72,96 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: Autodom notification monitor heartbeat is stale
+      - alert: AutodomVinTargetMissing
+        expr: absent(up{application="autodom",job="autodom-vin"})
+        for: 2m
+        labels: {application: autodom, severity: critical, role: vin}
+        annotations:
+          summary: Autodom VIN scrape job has no target series
+          description: Check the additive autodom-vin scrape job and private autodom-vin-api:8080 network alias. Keep check/archive/photo authentication enabled.
+          runbook_url: docs/monitoring.md#target-health
+      - alert: AutodomHttpServerErrors
+        expr: |
+          (
+            sum by (application, role, job) (increase(autodom_http_requests_total{application="autodom",route=~"/miniapp/api/.*|/v1/vin/.*",status=~"5.."}[10m]))
+            /
+            sum by (application, role, job) (increase(autodom_http_requests_total{application="autodom",route=~"/miniapp/api/.*|/v1/vin/.*"}[10m]))
+            > 0.05
+          )
+          and on (application, role, job)
+          (sum by (application, role, job) (increase(autodom_http_requests_total{application="autodom",route=~"/miniapp/api/.*|/v1/vin/.*"}[10m])) >= 100)
+        for: 5m
+        labels: {application: autodom, severity: warning}
+        annotations:
+          summary: Autodom HTTP service has sustained server errors
+          description: More than 5% API HTTP 5xx responses with at least 100 API requests per 10 minutes for 5 minutes. Health, assets and scrapes are excluded. Inspect normalized routes and private service logs; do not trigger paid VIN checks to diagnose.
+          runbook_url: docs/monitoring.md#http-errors
+      - alert: AutodomQueueCollectionFailed
+        expr: |
+          (autodom_queue_collection_success{application="autodom",job="autodom-worker",role="worker"} == 0)
+          or
+          (
+            (up{application="autodom",job="autodom-worker",role="worker"} == 1)
+            unless on (application, role, job, instance)
+            autodom_queue_collection_success{application="autodom",job="autodom-worker",role="worker"}
+          )
+        for: 2m
+        labels: {application: autodom, severity: critical}
+        annotations:
+          summary: Autodom cannot collect its BullMQ monitoring snapshot
+          description: Queue sampling failed or its health metric is missing on a reachable worker. Check Redis and sampling timeouts; retained queue depths are not current health.
+          runbook_url: docs/monitoring.md#queue-snapshots
+      - alert: AutodomQueueCollectionStale
+        expr: |
+          (time() - autodom_queue_collection_timestamp_seconds{application="autodom",job="autodom-worker",role="worker"} > 120)
+          or
+          (
+            (up{application="autodom",job="autodom-worker",role="worker"} == 1)
+            unless on (application, role, job, instance)
+            autodom_queue_collection_timestamp_seconds{application="autodom",job="autodom-worker",role="worker"}
+          )
+        for: 2m
+        labels: {application: autodom, severity: critical}
+        annotations:
+          summary: Autodom BullMQ monitoring snapshot is stale
+          description: No complete queue snapshot in over 120 seconds, or its timestamp is missing. Check Redis reachability and the worker sampler before trusting queue depths.
+          runbook_url: docs/monitoring.md#queue-snapshots
+      - alert: AutodomQueueBacklog
+        expr: |
+          (sum by (application, role, job, instance, source) (autodom_collection_queue_jobs{application="autodom",job="autodom-worker",role="worker",state="waiting"}) > 100)
+          and on (application, role, job, instance, source)
+          (autodom_source_enabled{application="autodom",job="autodom-worker",role="worker"} == 1)
+          and on (application, role, job, instance)
+          (autodom_queue_collection_success{application="autodom",job="autodom-worker",role="worker"} == 1)
+          and on (application, role, job, instance)
+          (time() - autodom_queue_collection_timestamp_seconds{application="autodom",job="autodom-worker",role="worker"} <= 120)
+        for: 15m
+        labels: {application: autodom, severity: warning}
+        annotations:
+          summary: Enabled Autodom source has a sustained waiting backlog
+          description: More than 100 waiting jobs for 15 minutes in a healthy, fresh snapshot. Inspect job durations and failures; delayed and paused jobs are not counted. Do not increase source quotas automatically.
+          runbook_url: docs/monitoring.md#queue-backlog
+      - alert: AutodomEventLoopLag
+        expr: autodom_nodejs_eventloop_lag_p99_seconds{application="autodom",role=~"bot|worker|vin"} > 0.5
+        for: 10m
+        labels: {application: autodom, severity: warning}
+        annotations:
+          summary: Autodom Node.js event loop has sustained high lag
+          description: Event-loop p99 exceeds 500 ms for 10 minutes. Correlate CPU, heap, job duration and HTTP latency; the collector percentile covers the interval since the previous scrape.
+          runbook_url: docs/monitoring.md#event-loop
+      - alert: AutodomNotificationErrors
+        expr: |
+          (
+            sum by (application, role, job) (increase(autodom_notification_deliveries_total{application="autodom",role="bot",outcome=~"retry|error"}[10m]))
+            /
+            sum by (application, role, job) (increase(autodom_notification_deliveries_total{application="autodom",role="bot",outcome=~"sent|retry|error"}[10m]))
+            > 0.1
+          )
+          and on (application, role, job)
+          (sum by (application, role, job) (increase(autodom_notification_deliveries_total{application="autodom",role="bot",outcome=~"sent|retry|error"}[10m])) >= 20)
+        for: 5m
+        labels: {application: autodom, severity: warning}
+        annotations:
+          summary: Autodom notification batches have sustained delivery errors
+          description: More than 10% retry or error outcomes with at least 20 non-blocked batch delivery attempts per 10 minutes for 5 minutes. Check Telegram throttling and transport; blocked recipients are excluded.
+          runbook_url: docs/monitoring.md#notification-errors

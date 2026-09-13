@@ -34,8 +34,47 @@ export async function startCollectionWorkers(
   const queues: Queue<SourceJob>[] = [];
   const workers: Worker<SourceJob>[] = [];
   let closing: Promise<void> | undefined;
+  const queueSources: string[] = [];
+  const states = ["waiting", "active", "delayed", "failed", "paused"] as const;
+  let sampleTimer: NodeJS.Timeout | undefined;
+  let sampleDeadline: NodeJS.Timeout | undefined;
+  const stopSampling = () => {
+    clearTimeout(sampleTimer);
+    clearTimeout(sampleDeadline);
+    metrics.queueSuccess.set(0);
+  };
+  const sampleQueues = async () => {
+    if (closing || signal.aborted) return;
+    let expired = false;
+    sampleDeadline = setTimeout(() => {
+      expired = true;
+      metrics.queueSuccess.set(0);
+    }, 1_500).unref();
+    try {
+      // Retain a stalled Redis command's single-flight slot until it settles.
+      // Sequential reads bound outstanding sampling commands to one.
+      const snapshot = [];
+      for (const [index, queue] of queues.entries()) {
+        const counts = await queue.getJobCounts(...states);
+        if (expired || closing || signal.aborted) return;
+        snapshot.push({ source: queueSources[index]!, counts });
+      }
+      for (const { source, counts } of snapshot) {
+        for (const state of states) metrics.queueJobs.set({ source, state }, counts[state] ?? 0);
+      }
+      metrics.queueTimestamp.set(Date.now() / 1000);
+      metrics.queueSuccess.set(1);
+    } catch {
+      metrics.queueSuccess.set(0);
+    } finally {
+      clearTimeout(sampleDeadline);
+      if (!closing && !signal.aborted)
+        sampleTimer = setTimeout(() => void sampleQueues(), 15_000).unref();
+    }
+  };
   const close = () =>
     (closing ??= (async () => {
+      stopSampling();
       const forced = setTimeout(() => {
         logger.warn(
           "Disconnecting unavailable Redis to finish worker shutdown; unfinished jobs remain recoverable",
@@ -76,27 +115,36 @@ export async function startCollectionWorkers(
         logger.error({ err, source: source.id }, "Collection queue error"),
       );
       queues.push(queue);
+      queueSources.push(source.id);
       await queue.setGlobalConcurrency(1);
       signal.throwIfAborted();
       const worker = new Worker<SourceJob>(
         name,
         async (job) => {
-          if (job.data.source !== source.id || job.name !== "tick")
-            throw new Error("Unexpected source job contract");
+          const started = performance.now();
+          let outcome: "completed" | "paused" | "failed" = "failed";
           try {
+            if (job.data.source !== source.id || job.name !== "tick")
+              throw new Error("Unexpected source job contract");
             const pause = Math.max(
               await collectTick(store, source, settings, transport, rates, signal),
               source.id === "bid.cars" ? DETAIL_DELAY_SECONDS : 0,
             );
             await worker.rateLimit(Math.ceil(pause * 1000));
             const sourceError = await store.getMeta(`source:${source.id}:source_error`, "");
-            metrics.jobs.inc({ source: source.id, outcome: sourceError ? "paused" : "completed" });
+            outcome = sourceError ? "paused" : "completed";
+            metrics.jobs.inc({ source: source.id, outcome });
             return pause;
           } catch (err) {
             if (!signal.aborted)
               logger.error({ err, source: source.id }, "Source collection job failed");
             metrics.jobs.inc({ source: source.id, outcome: "failed" });
             throw err;
+          } finally {
+            metrics.jobDuration.observe(
+              { source: source.id, outcome },
+              (performance.now() - started) / 1000,
+            );
           }
         },
         {
@@ -128,6 +176,7 @@ export async function startCollectionWorkers(
       );
       signal.throwIfAborted();
     }
+    void sampleQueues();
     return { close };
   } catch (error) {
     await close();

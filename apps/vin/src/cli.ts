@@ -126,7 +126,7 @@ export async function main(
         ? { checkVinArchive: archiveService.check, getVinArchivePhoto: archiveService.getPhoto }
         : {}),
     });
-    console.log("Autodom VIN API ready.");
+    console.log(JSON.stringify({ level: 30, msg: "Autodom VIN API ready." }));
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.once("close", resolve);
@@ -135,7 +135,10 @@ export async function main(
   } catch {
     // Provider/network errors may contain request URLs or credentials. Do not log them.
     console.error(
-      "VIN API command failed. Check private service configuration and connectivity; use --help for requirements.",
+      JSON.stringify({
+        level: 50,
+        msg: "VIN API command failed. Check private service configuration and connectivity; use --help for requirements.",
+      }),
     );
     exitCode = 1;
   } finally {
@@ -145,7 +148,7 @@ export async function main(
     try {
       await Promise.all([service?.close(), archiveService?.close()]);
     } catch {
-      console.error("VIN API shutdown failed.");
+      console.error(JSON.stringify({ level: 50, msg: "VIN API shutdown failed." }));
       exitCode = 1;
     }
   }

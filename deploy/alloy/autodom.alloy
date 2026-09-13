@@ -1,0 +1,85 @@
+// Append to the existing Domcom Alloy config. Reuses loki.write.loki.
+// Application labels are explicit opt-in; never collect arbitrary bot/worker names.
+// Keep the existing Domcom pipeline separate and exclude io.autodom.application=autodom
+// from it if its service-name allowlist is widened in the future.
+discovery.docker "autodom" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "15s"
+  filter {
+    name   = "label"
+    values = ["io.autodom.application=autodom"]
+  }
+}
+
+discovery.relabel "autodom" {
+  targets = discovery.docker.autodom.targets
+  rule {
+    source_labels = ["__meta_docker_container_label_io_autodom_role"]
+    regex         = "bot|worker|vin"
+    action        = "keep"
+  }
+  rule {
+    target_label = "application"
+    replacement  = "autodom"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_io_autodom_role"]
+    target_label  = "role"
+  }
+}
+
+loki.source.docker "autodom" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.autodom.output
+  forward_to = [loki.process.autodom.receiver]
+}
+
+// Fail closed: only structured events are accepted; output is rebuilt from an
+// allowlist, not the original line. Unknown event messages remain visible as a
+// generic event. VINs, user data, URLs, stack traces, tokens and raw errors never
+// enter Loki, even if a dependency accidentally writes them to local stderr.
+loki.process "autodom" {
+  forward_to = [loki.write.loki.receiver]
+  stage.drop {
+    longer_than         = "16KB"
+    drop_counter_reason = "autodom_oversized"
+  }
+  stage.json {
+    drop_malformed = true
+    expressions = {
+      raw_level = "level",
+      event     = "msg",
+      source_id = "source",
+      err_type  = "err.type",
+    }
+  }
+  stage.template {
+    source   = "level"
+    template = `{{ $v := printf "%v" .raw_level }}{{ if or (eq $v "60") (eq $v "fatal") }}fatal{{ else if or (eq $v "50") (eq $v "error") }}error{{ else if or (eq $v "40") (eq $v "warn") }}warn{{ else if or (eq $v "20") (eq $v "debug") (eq $v "10") (eq $v "trace") }}debug{{ else }}info{{ end }}`
+  }
+  stage.template {
+    source   = "safe_event"
+    template = `{{ if has .event (list "Autodom service ready" "Autodom VIN API ready." "VIN API command failed. Check private service configuration and connectivity; use --help for requirements." "VIN API shutdown failed." "Autodom bot command failed" "Autodom bot configuration failed" "Autodom bot Store shutdown failed" "Autodom worker command failed" "Autodom Redis connection unavailable" "Collection shutdown failed" "Collection queue error" "Source collection job failed" "Collection worker error" "Collection queue metrics failed" "Telegram polling lease lost" "Telegram API request failed" "Telegram update could not be handled" "Mini App request failed") }}{{ .event }}{{ else }}Autodom unclassified event (details omitted){{ end }}`
+  }
+  stage.template {
+    source   = "safe_source"
+    template = `{{ if has .source_id (list "mashina.kg" "encar.com" "truecar.com" "bid.cars" "dubicars.com" "lalafo.kg") }}{{ .source_id }}{{ end }}`
+  }
+  stage.template {
+    source   = "safe_error_type"
+    template = `{{ if has .err_type (list "Error" "TypeError" "RangeError" "AbortError" "TimeoutError" "GrammyError" "HttpError") }}{{ .err_type }}{{ else if .err_type }}Error{{ end }}`
+  }
+  stage.template {
+    source   = "safe_line"
+    template = `{{ dict "level" .level "msg" .safe_event "source" .safe_source "error_type" .safe_error_type | toJson }}`
+  }
+  stage.output {
+    source = "safe_line"
+  }
+  stage.labels {
+    values = { level = "" }
+  }
+  stage.label_keep {
+    values = ["application", "role", "level"]
+  }
+}

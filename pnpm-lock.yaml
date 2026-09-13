@@ -143,6 +143,9 @@ importers:
       '@autodom/sources':
         specifier: workspace:*
         version: link:../../packages/sources
+      '@prometheus-io/client':
+        specifier: 0.16.1
+        version: 0.16.1
 
   apps/worker:
     dependencies:
