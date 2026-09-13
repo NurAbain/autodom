@@ -5,7 +5,7 @@ import type { VinArchivePhotoRequest } from "@autodom/core/vin-archive";
 import { Response } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import { BidCarsArchive } from "../src/bidcars-archive.js";
-import type { BrowserClient } from "../src/bidcars-browser.js";
+import type { BrowserClient } from "../src/cloudflare-browser.js";
 
 const VIN = "1FTFW1ED9NFB06106";
 const LOT = "https://bid.cars/en/lot/0-45397077/2022-Ford-F-150-1FTFW1ED9NFB06106";

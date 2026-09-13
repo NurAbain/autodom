@@ -341,40 +341,49 @@ it("collects and notifies published single-currency KG ads without reporting FX-
   vi.stubEnv("AUTODOM_APPROVED_SOURCES", "lalafo.kg");
   const lalafo = SOURCES.find((candidate) => candidate.id === "lalafo.kg")!;
   const quoteDate = new Date((NOW + 6 * 3600) * 1000)
-    .toISOString().slice(0, 10).split("-").reverse().join(".");
+    .toISOString()
+    .slice(0, 10)
+    .split("-")
+    .reverse()
+    .join(".");
   rates.quotes.USD = parseQuote(
     `<CurrencyRates Date="${quoteDate}"><Currency ISOCode="USD"><Nominal>1</Nominal><Value>90</Value></Currency></CurrencyRates>`,
     "USD",
   );
   let native = 9000;
-  vi.mocked(fetchSourcePage).mockImplementation(async () => makeSourcePage({
-    page: 1,
-    pages: 1,
-    pages_exact: true,
-    scope: "passenger-cars",
-    listings: [makeListing({
-      id: "lalafo:1",
-      source: "lalafo.kg",
-      market: "KG",
-      title: "Toyota Camry",
-      url: "https://lalafo.kg/bishkek/ads/toyota-camry-id-1",
-      availability: "опубликовано",
-      original_currency: "KGS",
-      original_price_minor: native,
-      price_kgs_minor: native,
-    })],
-  }));
-  await db.saveProfile(makeProfile({
-    user_id: 1,
-    chat_id: 1,
-    currency: "USD",
-    budget_min_minor: 0,
-    budget_max_minor: 200,
-    monitoring: true,
-  }));
-  const collect = () => collectTick(
-    db, lalafo, settings, transport, rates, new AbortController().signal,
+  vi.mocked(fetchSourcePage).mockImplementation(async () =>
+    makeSourcePage({
+      page: 1,
+      pages: 1,
+      pages_exact: true,
+      scope: "passenger-cars",
+      listings: [
+        makeListing({
+          id: "lalafo:1",
+          source: "lalafo.kg",
+          market: "KG",
+          title: "Toyota Camry",
+          url: "https://lalafo.kg/bishkek/ads/toyota-camry-id-1",
+          availability: "опубликовано",
+          original_currency: "KGS",
+          original_price_minor: native,
+          price_kgs_minor: native,
+        }),
+      ],
+    }),
   );
+  await db.saveProfile(
+    makeProfile({
+      user_id: 1,
+      chat_id: 1,
+      currency: "USD",
+      budget_min_minor: 0,
+      budget_max_minor: 200,
+      monitoring: true,
+    }),
+  );
+  const collect = () =>
+    collectTick(db, lalafo, settings, transport, rates, new AbortController().signal);
   const send = vi.fn(async () => undefined);
   await collect();
   expect(await db.getListing("lalafo:1")).toMatchObject({

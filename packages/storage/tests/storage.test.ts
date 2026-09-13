@@ -604,7 +604,13 @@ describe("PostgreSQL Store", () => {
       { ...published, id: "05-order", availability: "На заказ" },
       { ...published, id: "06-unknown", availability: "" },
       { ...published, id: "07-import", market: "US", source: "truecar.com" },
-      { ...published, id: "08-unknown-price", original_price_minor: null, price_usd_minor: null, price_kgs_minor: null },
+      {
+        ...published,
+        id: "08-unknown-price",
+        original_price_minor: null,
+        price_usd_minor: null,
+        price_kgs_minor: null,
+      },
     ];
     await db.upsertListings(cars);
     const selected = {
@@ -617,10 +623,14 @@ describe("PostgreSQL Store", () => {
     for (const currency of ["USD", "KGS"]) {
       const filter = { ...selected, currency };
       expect(cars.filter((item) => matches(filter, item)).map((item) => item.id)).toEqual([
-        "01-usd", "02-kgs", "03-source-dual",
+        "01-usd",
+        "02-kgs",
+        "03-source-dual",
       ]);
       expect((await db.search(filter)).map((item) => item.id)).toEqual([
-        "01-usd", "02-kgs", "03-source-dual",
+        "01-usd",
+        "02-kgs",
+        "03-source-dual",
       ]);
       expect(await db.countMatches(filter)).toBe(3);
     }

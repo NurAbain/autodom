@@ -17,7 +17,11 @@ import type { ImpitResponse } from "impit";
 import pLimit, { type LimitFunction } from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { DETAIL_DELAY_SECONDS } from "./bidcars.js";
-import { type BrowserClient, CloudflareBrowser, REFRESH_COOLDOWN_MS } from "./cloudflare-browser.js";
+import {
+  type BrowserClient,
+  CloudflareBrowser,
+  REFRESH_COOLDOWN_MS,
+} from "./cloudflare-browser.js";
 import { RiskBypass, RiskBypassError } from "./riskbypass.js";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -29,7 +33,8 @@ const ORIGINS: Readonly<Record<string, string>> = {
   "bid.cars": "https://bid.cars",
   "nbkr.kg": "https://www.nbkr.kg",
 };
-const LALAFO_CLEARANCE_URL = "https://lalafo.kg/kyrgyzstan/avtomobili-s-probegom";
+// The solver establishes an origin-wide session here; vehicle data stays in category 1502.
+const LALAFO_CLEARANCE_URL = "https://lalafo.kg/kyrgyzstan/nedvizhimost";
 
 export interface ProxyTransportOptions {
   routes: readonly ProxyRoute[];
@@ -195,7 +200,12 @@ export class ProxyTransport implements DocumentTransport {
     return this.#riskBypass;
   }
 
-  private browserClient(route: ProxyRoute, page: number, index: number, source: string): BrowserClient {
+  private browserClient(
+    route: ProxyRoute,
+    page: number,
+    index: number,
+    source: string,
+  ): BrowserClient {
     const key = `${source}:${index}`;
     let clients = this.#browserClients.get(key);
     if (!clients) {
@@ -236,7 +246,9 @@ export class ProxyTransport implements DocumentTransport {
     const urls = requests.map((request) => requestUrl(request.url, request.options));
     for (const { options } of requests) {
       if (!this.#routes[options.source]?.length)
-        throw new SourceError("Source requires its configured proxy route; direct access is disabled");
+        throw new SourceError(
+          "Source requires its configured proxy route; direct access is disabled",
+        );
     }
     const name = `autodom-${randomUUID()}`;
     const config = new Configuration({
@@ -311,16 +323,16 @@ export class ProxyTransport implements DocumentTransport {
     }
   }
 
-  private browserPage(route: ProxyRoute, key: string): number | undefined {
+  private browserPage(route: ProxyRoute, key: string, rotate: boolean): number | undefined {
     const count = Math.max(1, route.port_count);
     const unavailable = this.#browserUnavailable.get(key);
     const now = Date.now();
     let page = this.#browserNextPage.get(key) ?? 1;
     for (let checked = 0; checked < count; checked++) {
       const next = (page % count) + 1;
-      this.#browserNextPage.set(key, next);
       if ((unavailable?.get(page) ?? 0) <= now) {
         unavailable?.delete(page);
+        this.#browserNextPage.set(key, rotate ? next : page);
         return page;
       }
       page = next;
@@ -340,7 +352,9 @@ export class ProxyTransport implements DocumentTransport {
     const signal = AbortSignal.any(signals);
     const routes = this.#routes[options.source];
     if (!routes?.length)
-      throw new SourceError("Source requires its configured proxy route; direct access is disabled");
+      throw new SourceError(
+        "Source requires its configured proxy route; direct access is disabled",
+      );
     const browserRequest = options.source === "bid.cars" || options.source === "lalafo.kg";
     const preferred = browserRequest ? (this.#preferredBrowserRoute.get(options.source) ?? 0) : 0;
     let alternatePorts: Set<number> | undefined;
@@ -351,7 +365,9 @@ export class ProxyTransport implements DocumentTransport {
       const route = routes[index];
       if (!route) throw new SourceError("Configured proxy route is missing");
       const key = `${options.source}:${index}`;
-      const page = browserRequest ? this.browserPage(route, key) : (options.page ?? 1);
+      const page = browserRequest
+        ? this.browserPage(route, key, options.source === "bid.cars")
+        : (options.page ?? 1);
       if (page === undefined) {
         failures.push(`${route.tier}: proxy sessions are cooling down`);
         continue;

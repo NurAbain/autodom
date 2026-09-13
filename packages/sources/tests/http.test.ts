@@ -353,11 +353,8 @@ describe("mandatory proxy document transport", () => {
             return new Response('{"available":true}');
           },
           async refresh(url) {
-            if (
-              route.tier !== "lalafo" ||
-              url.href !== "https://lalafo.kg/kyrgyzstan/avtomobili-s-probegom"
-            )
-              throw new SourceError("Clearance requires the public passenger root");
+            if (route.tier !== "lalafo" || url.href !== "https://lalafo.kg/kyrgyzstan/nedvizhimost")
+              throw new SourceError("Clearance requires the public Lalafo bootstrap");
             await jar.setCookie("session=classified; Secure; Path=/", url.href);
           },
         };
@@ -387,15 +384,18 @@ describe("mandatory proxy document transport", () => {
     const plain = vi.fn(() => {
       throw new Error("Shared route must not be used for Lalafo");
     });
-    const browser = vi.fn((route: ProxyRoute): BrowserClient => ({
-      fetch: async () => {
-        if (route.tier !== "lalafo") throw new Error("Shared browser must not be used for Lalafo");
-        return new Response("Managed challenge", {
-          status: 403,
-          headers: { "cf-mitigated": "challenge" },
-        });
-      },
-    }));
+    const browser = vi.fn(
+      (route: ProxyRoute): BrowserClient => ({
+        fetch: async () => {
+          if (route.tier !== "lalafo")
+            throw new Error("Shared browser must not be used for Lalafo");
+          return new Response("Managed challenge", {
+            status: 403,
+            headers: { "cf-mitigated": "challenge" },
+          });
+        },
+      }),
+    );
     for (const routes of [
       [shared],
       [shared, new ProxyRoute("lalafo", "http://isp.test:7000", "Basic ZGVtbzpkZW1v")],

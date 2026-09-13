@@ -13,7 +13,7 @@ import {
 } from "@autodom/core/vin-archive";
 import { load } from "cheerio";
 import pLimit from "p-limit";
-import { BidCarsBrowser, type BrowserClient } from "./bidcars-browser.js";
+import { type BrowserClient, CloudflareBrowser } from "./cloudflare-browser.js";
 import {
   abortable,
   readBody,
@@ -368,7 +368,8 @@ export class BidCarsArchive {
     const index = preferred < 0 ? 0 : preferred;
     const route = options.routes[index];
     if (!route) throw new SourceError("Bid.Cars archive proxy route is missing");
-    this.#browser = options.browserClientFactory?.(route, 1, index) ?? new BidCarsBrowser(route, 1);
+    this.#browser =
+      options.browserClientFactory?.(route, 1, index) ?? new CloudflareBrowser(route, 1);
   }
 
   async check(

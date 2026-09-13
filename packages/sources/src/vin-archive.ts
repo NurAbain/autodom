@@ -15,8 +15,8 @@ import {
 import pLimit from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
 import { BidCarsArchive } from "./bidcars-archive.js";
-import type { BrowserClient } from "./bidcars-browser.js";
 import { CarwayArchive } from "./carway-archive.js";
+import type { BrowserClient } from "./cloudflare-browser.js";
 import {
   abortable,
   readBody,

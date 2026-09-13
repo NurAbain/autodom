@@ -727,7 +727,12 @@ export const VEHICLE_HISTORY_COVERAGE: readonly {
     markets: ["KG"],
     listing_sources: [
       { source_id: "mashina.kg", claims: ["Заявленные продавцом характеристики и пробег"] },
-      { source_id: "lalafo.kg", claims: ["Заявленные продавцом характеристики и пробег; публикация не подтверждает наличие"] },
+      {
+        source_id: "lalafo.kg",
+        claims: [
+          "Заявленные продавцом характеристики и пробег; публикация не подтверждает наличие",
+        ],
+      },
     ],
     unavailable: [
       "Официальный VIN-отчёт",

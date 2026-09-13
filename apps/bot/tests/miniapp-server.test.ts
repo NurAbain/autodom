@@ -212,17 +212,24 @@ it("opens a specific older notification independently of the current saved filte
 });
 
 it("serves a published Lalafo ad with its native price and exact permitted photo origin", async () => {
-  const response = await fetch(`${base}/miniapp/api/car?id=${encodeURIComponent(lalafoListing.id)}`, {
-    headers: { Authorization: authorization(), Origin: PUBLIC_ORIGIN },
-  });
+  const response = await fetch(
+    `${base}/miniapp/api/car?id=${encodeURIComponent(lalafoListing.id)}`,
+    {
+      headers: { Authorization: authorization(), Origin: PUBLIC_ORIGIN },
+    },
+  );
   expect(response.status).toBe(200);
   const car = await response.json();
   expect(car.availability).toBe("опубликовано");
   expect(car.photoUrls).toEqual([lalafoListing.photo_url]);
   expect(car.price).toBe(money(lalafoListing.original_price_minor!, "KGS"));
   expect(car.detailsHtml).not.toContain("в наличии");
-  const imagePolicy = response.headers.get("content-security-policy")!
-    .split(";").find((directive) => directive.trim().startsWith("img-src "))!.trim().split(/\s+/);
+  const imagePolicy = response.headers
+    .get("content-security-policy")!
+    .split(";")
+    .find((directive) => directive.trim().startsWith("img-src "))!
+    .trim()
+    .split(/\s+/);
   expect(imagePolicy).toContain("https://img5.lalafo.com");
   expect(imagePolicy).not.toContain("https://*.lalafo.com");
 });
