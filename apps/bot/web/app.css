@@ -96,8 +96,8 @@ p { line-height: 1.6; }
   .panel { padding: 18px; }
   .gallery-controls .button { padding: 10px; font-size: 12px; }
   .encar-listing .facts { grid-template-columns: minmax(0, 1fr); }
-  .encar-listing .gallery-controls { flex-wrap: wrap; }
-  .encar-listing .photo-counter { order: -1; flex-basis: 100%; text-align: center; }
+  .vin-source .gallery-controls { flex-wrap: wrap; }
+  .vin-source .photo-counter { order: -1; flex-basis: 100%; text-align: center; white-space: normal; }
 }
 
 .back-link { display: inline-block; border: 0; padding: 10px 0; margin: 0 0 20px; min-height: 44px; background: transparent; color: var(--muted); text-align: left; cursor: pointer; }
