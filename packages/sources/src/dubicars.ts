@@ -273,7 +273,6 @@ function parseCatalog(raw: string, page: number): SourcePage {
       car.itemCondition == null || car.itemCondition === "https://schema.org/UsedCondition",
       "unexpected vehicle condition",
     );
-    requireValue(typeof data.pnr === "boolean", "unknown asking-price qualification");
     const offer = car.offers == null ? null : object(car.offers);
     if (offer) {
       requireValue(
@@ -291,7 +290,8 @@ function parseCatalog(raw: string, page: number): SourcePage {
     let amount: number | null = null;
     const price = card.find(".detail .price");
     requireValue(price.length === 1, "missing rendered price status");
-    if (data.pnr) {
+    const displayed = price.children("strong");
+    if (displayed.length === 0) {
       const status = price.clone();
       status.find(".premium-new, .mobile-only").remove();
       requireValue(
@@ -300,11 +300,10 @@ function parseCatalog(raw: string, page: number): SourcePage {
         "contradictory unavailable price",
       );
     } else {
-      // Analytics pr/rpr/rl do not reliably describe the current cash price.
+      // Analytics pr/rpr/rl/pnr do not establish cash price or its availability.
       // Bind the AED Offer to its rendered asking price, never to financing.
       amount = money(offer?.price);
       requireValue(money(data.spr) === amount, "contradictory native asking price");
-      const displayed = price.children("strong");
       const digits = displayed.text().trim();
       requireValue(
         displayed.length === 1 &&
