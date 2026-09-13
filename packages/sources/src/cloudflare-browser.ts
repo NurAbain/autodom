@@ -73,20 +73,20 @@ async function pinProxy(route: ProxyRoute, page: number): Promise<URL> {
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted();
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(signal.reason);
-    signal.addEventListener("abort", abort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", abort);
-        resolve(value);
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", abort);
-        reject(error);
-      },
-    );
-  });
+  const { promise: result, resolve, reject } = Promise.withResolvers<T>();
+  const abort = () => reject(signal.reason);
+  signal.addEventListener("abort", abort, { once: true });
+  promise.then(
+    (value) => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    },
+    (error: unknown) => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    },
+  );
+  return result;
 }
 
 function nativeClient(proxy: URL, jar: CookieJar, userAgent?: string): Impit {

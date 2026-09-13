@@ -148,7 +148,8 @@ export class RiskBypass {
           task_type: "cloudflare_waf",
           target_url: targetUrl.href,
           target_method: "GET",
-          proxy: proxyUrl.href,
+          // RiskBypass expects a proxy endpoint, not WHATWG URL's implicit root path.
+          proxy: proxyUrl.href.replace(/\/$/, ""),
         }),
       );
       while (true) {

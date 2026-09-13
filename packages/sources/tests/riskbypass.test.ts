@@ -66,6 +66,26 @@ describe("RiskBypass paid-task lifecycle", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("establishes a session with a provider accepting proxy endpoints without a URL path", async () => {
+    const { pool, solver, agent } = fixture();
+    let reachable = false;
+    pool.intercept({ path: "/task/submit", method: "POST" }).reply(({ body }) => {
+      reachable = typeof body === "string" && !JSON.parse(body).proxy.endsWith("/");
+      return { statusCode: 200, data: { ok: true, task_id: "proxy-endpoint" } };
+    });
+    pool.intercept({ path: "/task/result/proxy-endpoint", method: "GET" }).reply(() => ({
+      statusCode: 200,
+      data: reachable
+        ? { status: "SUCCESS", result: session }
+        : { status: "FAILED", error: "Failed to reach the target site, please check your proxy." },
+    }));
+    await expect(solver.solve(target, proxy, new AbortController().signal)).resolves.toEqual({
+      cookies: session.cookies,
+      userAgent: session.user_agent,
+    });
+    agent.assertNoPendingInterceptors();
+  });
+
   it("reports an unsuccessful target solve without resubmitting it", async () => {
     const { pool, solver, agent } = fixture();
     const submit = vi.fn(() => ({ statusCode: 200, data: { ok: true, task_id: "task-1" } }));
