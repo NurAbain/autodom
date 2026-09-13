@@ -1,6 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { money } from "@autodom/core";
-import { normalizeVin, type VinLookup, vinGoogleSearchUrl } from "@autodom/core/vin";
+import {
+  ENCAR_HISTORY_MAX_LISTINGS,
+  ENCAR_HISTORY_MAX_PHOTOS,
+  encarListingUrl,
+  isEncarPhotoUrl,
+  normalizeVin,
+  type VinCheckResult,
+  type VinLookup,
+  vinGoogleSearchUrl,
+} from "@autodom/core/vin";
 import {
   disabledVinArchiveResult,
   groupVinArchiveLots,
@@ -17,12 +26,13 @@ import {
 import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
-import { Bot, GrammyError, InlineKeyboard, InputFile } from "grammy";
+import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
 import { paymentOrderStatus } from "./payment-text.js";
 import type { PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
+  confirmedEncarListings,
   VIN_ARCHIVE_DISCLOSURE,
   VIN_ARCHIVE_LABEL,
   VIN_ARCHIVE_STATUS_TEXT,
@@ -240,9 +250,13 @@ export function createTelegramBot(
     const searchUrl = vinGoogleSearchUrl(vin);
     if (!searchUrl) return;
     let text = VIN_NOT_ENABLED;
+    let result: VinCheckResult | undefined;
     if (options.checkVin) {
       try {
-        text = vinResultText(await options.checkVin(vin));
+        const checked = await options.checkVin(vin);
+        if (checked.vin !== vin) throw new Error("VIN result does not match the request");
+        text = vinResultText(checked);
+        result = checked;
       } catch {
         text =
           "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
@@ -267,6 +281,31 @@ export function createTelegramBot(
         link_preview_options: { is_disabled: true },
         ...(index === replies.length - 1 ? { reply_markup: keyboard } : {}),
       });
+    }
+    if (!result) return;
+    const sentListings = new Set<string>();
+    for (const listing of confirmedEncarListings(result).slice(0, ENCAR_HISTORY_MAX_LISTINGS)) {
+      if (sentListings.has(listing.id)) continue;
+      sentListings.add(listing.id);
+      const photos: string[] = [];
+      for (const url of listing.photo_urls) {
+        if (isEncarPhotoUrl(url, listing.id) && !photos.includes(url)) photos.push(url);
+        if (photos.length === ENCAR_HISTORY_MAX_PHOTOS) break;
+      }
+      for (let offset = 0; offset < photos.length; offset += 10) {
+        await sendReplies(bot, chatId, [
+          {
+            text: escapeHtml(
+              `Фотографии объявления Encar №${listing.id} · VIN ${vin}\n` +
+                `Фото ${offset + 1}–${Math.min(offset + 10, photos.length)} из ${photos.length}.\n` +
+                `Архивные фотографии не подтверждают текущее состояние автомобиля.\n` +
+                `Источник: ${encarListingUrl(listing.id)}`,
+            ),
+            photos: photos.slice(offset, offset + 10),
+            buttons: [],
+          },
+        ]);
+      }
     }
   }
   async function checkVinArchive(chatId: number, vin: string): Promise<void> {
@@ -441,7 +480,31 @@ export function createTelegramBot(
       }
     }
   }
-  bot.use(sequentialize((context) => (context.from ? `autodom:user:${context.from.id}` : [])));
+  const serialize = sequentialize<Context>((context) =>
+    context.from ? `autodom:user:${context.from.id}` : [],
+  );
+  // Reserve user order immediately, while acknowledging ahead of earlier slow media.
+  bot.use(async (context, next) => {
+    const callback = context.callbackQuery;
+    if (!callback) return serialize(context, next);
+    const message = callback.message;
+    if (!message || message.date === 0 || message.chat.type !== "private") {
+      await context.answerCallbackQuery({ text: "Откройте бота в личном чате." });
+      return;
+    }
+    if (message.chat.id !== callback.from.id || callback.from.is_bot) {
+      await context.answerCallbackQuery({ text: "Этот поиск принадлежит другому пользователю." });
+      return;
+    }
+    const acknowledged = context.answerCallbackQuery();
+    await Promise.all([
+      acknowledged,
+      serialize(context, async () => {
+        await acknowledged;
+        await next();
+      }),
+    ]);
+  });
   bot.command("orders", async (context) => {
     if (
       context.chat.type !== "private" ||
@@ -588,18 +651,8 @@ export function createTelegramBot(
   });
   bot.on("callback_query", async (context) => {
     const callback = context.callbackQuery;
-    const message = callback.message;
-    if (!message || message.date === 0 || message.chat.type !== "private") {
-      await context.answerCallbackQuery({ text: "Откройте бота в личном чате." });
-      return;
-    }
-    if (message.chat.id !== callback.from.id || callback.from.is_bot) {
-      await context.answerCallbackQuery({ text: "Этот поиск принадлежит другому пользователю." });
-      return;
-    }
-    await context.answerCallbackQuery();
     const userId = callback.from.id;
-    const chatId = message.chat.id;
+    const chatId = userId;
     const data = "data" in callback ? (callback.data ?? "") : "";
     await store.withLock(`autodom:user:${userId}`, async () => {
       if (data.startsWith("vinarchive:")) {

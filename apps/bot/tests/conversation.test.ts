@@ -674,6 +674,97 @@ describe("grammY transport boundaries", () => {
     expect(photo).toBeInstanceOf(InputFile);
     return (photo as InputFile).toRaw();
   }
+  it("acknowledges archive clicks during photo delivery without overlapping the searches", async () => {
+    const vin = "WBA51AG03NCK98884";
+    const archive = vi.fn<VinArchiveLookup>(async () => ({
+      vin,
+      checked_at: 1_789_000_000,
+      coverage: "indexed_lots_only",
+      sources: [],
+    }));
+    const { bot, calls } = telegram(
+      async () => ({
+        vin,
+        checked_at: 1_789_000_000,
+        carhistory: { status: "disabled", source_url: "", checked_at: null },
+        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+        encar: {
+          status: "available",
+          source_url: "https://fem.encar.com/",
+          checked_at: 1_789_000_000,
+          data: {
+            vin,
+            discovery_url: `https://carcheck.by/auto/${vin}`,
+            partial: false,
+            listings: [
+              {
+                id: "39720103",
+                vin,
+                source_url: "https://fem.encar.com/cars/detail/39720103",
+                model: "BMW",
+                mileage_km: null,
+                advertisement_status: "SOLD",
+                created_at: null,
+                first_advertised_at: null,
+                modified_at: null,
+                re_registered: null,
+                photo_urls: [
+                  "https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg",
+                ],
+              },
+            ],
+          },
+        },
+      }),
+      archive,
+    );
+    const photoEntered = Promise.withResolvers<void>();
+    const photoReleased = Promise.withResolvers<void>();
+    bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === "sendPhoto") {
+        photoEntered.resolve();
+        await photoReleased.promise;
+      }
+      return previous(method, payload, signal);
+    });
+    await bot.init();
+    const message = {
+      message_id: 1,
+      date: 1,
+      from: { id: 1, is_bot: false, first_name: "Buyer" },
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    const vinWork = bot.handleUpdate({
+      update_id: 1,
+      message: { ...message, text: `/vin ${vin}` },
+    });
+    await photoEntered.promise;
+    const archiveWork = bot.handleUpdate({
+      update_id: 2,
+      callback_query: {
+        id: "archive-during-photo",
+        from: message.from,
+        chat_instance: "private",
+        message,
+        data: `vinarchive:${vin}`,
+      },
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(calls.filter((call) => call.method === "answerCallbackQuery")).toEqual([
+        {
+          method: "answerCallbackQuery",
+          payload: { callback_query_id: "archive-during-photo" },
+        },
+      ]);
+      expect(archive).not.toHaveBeenCalled();
+    } finally {
+      photoReleased.resolve();
+      await Promise.all([vinWork, archiveWork]);
+    }
+    expect(archive).toHaveBeenCalledExactlyOnceWith(vin);
+  });
+
   it("requires a valid owner callback before archive lookup and keeps all photos separated by lot", async () => {
     const vin = "KMHDU41DBAU123456";
     const firstPhotos = Array.from(
@@ -1206,9 +1297,6 @@ describe("grammY transport boundaries", () => {
       expect(html).toContain(`https://fem.encar.com/cars/detail/${39720103 + index}`);
       expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
     }
-    expect(
-      calls.some((call) => call.method === "sendPhoto" || call.method === "sendMediaGroup"),
-    ).toBe(false);
     expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
     expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
       inline_keyboard: expect.arrayContaining([
@@ -1219,6 +1307,139 @@ describe("grammY transport boundaries", () => {
         ]),
       ]),
     });
+  });
+  it("keeps VIN photo albums bound to their verified advertisements across Telegram batch boundaries", async () => {
+    const photo = (id: string, index: number) =>
+      `https://ci.encar.com/carpicture/carpicture02/pic3972/${id}_${String(index).padStart(3, "0")}.jpg`;
+    const firstPhotos = Array.from({ length: 21 }, (_, index) => photo("39720103", index + 1));
+    const secondPhotos = [photo("39720104", 1), photo("39720104", 2)];
+    const { bot, calls } = telegram(async (vin) => {
+      const listing = {
+        id: "39720103",
+        vin,
+        source_url: "https://fem.encar.com/cars/detail/39720103",
+        model: "BMW",
+        mileage_km: null,
+        advertisement_status: "SOLD" as const,
+        created_at: null,
+        first_advertised_at: null,
+        modified_at: null,
+        re_registered: null,
+        photo_urls: firstPhotos,
+      };
+      return {
+        vin,
+        checked_at: 1_789_000_000,
+        carhistory: { status: "disabled", source_url: "", checked_at: null },
+        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+        encar: {
+          status: "available",
+          source_url: "https://fem.encar.com/",
+          checked_at: 1_789_000_000,
+          data: {
+            vin,
+            discovery_url: `https://carcheck.by/auto/${vin}`,
+            partial: true,
+            listings: [
+              {
+                ...listing,
+                photo_urls: [
+                  ...firstPhotos,
+                  photo("39720103", 1),
+                  "https://attacker.invalid/photo.jpg",
+                  photo("39720104", 1),
+                ],
+              },
+              { ...listing, id: "39720104", photo_urls: secondPhotos },
+              {
+                ...listing,
+                id: "39720105",
+                vin: "WBA51AG03NCK98884",
+                photo_urls: [photo("39720105", 1)],
+              },
+              listing,
+            ],
+          },
+        },
+      };
+    });
+    await bot.init();
+    await bot.handleUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private", first_name: "Buyer" },
+        text: "/vin KMHDU41DBAU123456",
+      },
+    });
+    const albums = calls
+      .filter((call) => call.method === "sendPhoto" || call.method === "sendMediaGroup")
+      .map((call) =>
+        call.method === "sendPhoto"
+          ? [String(call.payload.photo)]
+          : (call.payload.media as { media: string }[]).map((item) => item.media),
+      );
+    expect(albums.map((album) => album.length)).toEqual([10, 10, 1, 2]);
+    expect(albums.flat()).toEqual([...firstPhotos, ...secondPhotos]);
+    expect(calls.find((call) => call.method === "sendMessage")?.payload.text).toContain(
+      "KMHDU41DBAU123456",
+    );
+  });
+  it("rejects a result for another VIN before attributing its photographs to the requested car", async () => {
+    const otherVin = "WBA51AG03NCK98884";
+    const { bot, calls } = telegram(async () => ({
+      vin: otherVin,
+      checked_at: 1_789_000_000,
+      carhistory: { status: "disabled", source_url: "", checked_at: null },
+      car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+      encar: {
+        status: "available",
+        source_url: "https://fem.encar.com/",
+        checked_at: 1_789_000_000,
+        data: {
+          vin: otherVin,
+          discovery_url: `https://carcheck.by/auto/${otherVin}`,
+          partial: false,
+          listings: [
+            {
+              id: "39720103",
+              vin: otherVin,
+              source_url: "https://fem.encar.com/cars/detail/39720103",
+              model: "BMW",
+              mileage_km: null,
+              advertisement_status: "SOLD",
+              created_at: null,
+              first_advertised_at: null,
+              modified_at: null,
+              re_registered: null,
+              photo_urls: ["https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg"],
+            },
+          ],
+        },
+      },
+    }));
+    await bot.init();
+    await bot.handleUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private", first_name: "Buyer" },
+        text: "/vin KMHDU41DBAU123456",
+      },
+    });
+    expect(
+      calls.filter((call) => call.method === "sendPhoto" || call.method === "sendMediaGroup"),
+    ).toEqual([]);
+    const text = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => String(call.payload.text))
+      .join("\n");
+    expect(text).not.toContain(otherVin);
+    expect(text).toContain("Результат неизвестен");
   });
   it("refuses an existing webhook without replacing it or registering commands", async () => {
     const { bot, calls } = telegram();
@@ -1269,48 +1490,100 @@ describe("grammY transport boundaries", () => {
       ),
     ).toBe(true);
   });
-  it("orders same-user messages and callbacks without blocking another user", async () => {
+  it("preserves currency and budget input order during a slow acknowledgement without blocking another user", async () => {
     const { bot, calls } = telegram();
     await bot.init();
-    const entered = Promise.withResolvers<void>();
-    const gate = Promise.withResolvers<void>();
-    let hold = true;
-    bot.api.config.use(async (previous, method, payload, signal) => {
-      if (method === "sendMessage" && "chat_id" in payload && payload.chat_id === 1 && hold) {
-        hold = false;
-        entered.resolve();
-        await gate.promise;
-      }
-      return previous(method, payload, signal);
-    });
     const from = { id: 1, is_bot: false, first_name: "Buyer" };
     const message = {
       message_id: 1,
       date: 1,
       from,
       chat: { id: 1, type: "private" as const, first_name: "Buyer" },
-      text: "/privacy",
     };
-    const first = bot.handleUpdate({ update_id: 1, message });
-    await entered.promise;
-    const second = bot.handleUpdate({
+    function action(label: string): string {
+      const markup = calls.findLast(
+        (call) => call.method === "sendMessage" && call.payload.chat_id === 1,
+      )?.payload.reply_markup as
+        | { inline_keyboard: { text: string; callback_data?: string }[][] }
+        | undefined;
+      const choice = markup?.inline_keyboard.flat().find((item) => item.text.includes(label));
+      if (!choice?.callback_data) throw new Error(`Button not found: ${label}`);
+      return choice.callback_data;
+    }
+    await bot.handleUpdate({ update_id: 1, message: { ...message, text: "/buy" } });
+    await bot.handleUpdate({
       update_id: 2,
-      callback_query: { id: "own", from, chat_instance: "one", data: "/help", message },
+      callback_query: {
+        id: "consent",
+        from,
+        chat_instance: "one",
+        data: action("Согласен"),
+        message,
+      },
+    });
+    const entered = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>();
+    bot.api.config.use(async (previous, method, payload, signal) => {
+      if (
+        method === "answerCallbackQuery" &&
+        "callback_query_id" in payload &&
+        payload.callback_query_id === "currency"
+      ) {
+        entered.resolve();
+        await gate.promise;
+      }
+      return previous(method, payload, signal);
+    });
+    const currency = bot.handleUpdate({
+      update_id: 3,
+      callback_query: {
+        id: "currency",
+        from,
+        chat_instance: "one",
+        data: action("USD"),
+        message,
+      },
+    });
+    await entered.promise;
+    const budget = bot.handleUpdate({
+      update_id: 4,
+      message: { ...message, text: "15000" },
     });
     try {
       await bot.handleUpdate({
-        update_id: 3,
-        message: { ...message, from: { ...from, id: 2 }, chat: { ...message.chat, id: 2 } },
+        update_id: 5,
+        message: {
+          ...message,
+          from: { ...from, id: 2 },
+          chat: { ...message.chat, id: 2 },
+          text: "/privacy",
+        },
       });
-      expect(calls.some((call) => call.method === "answerCallbackQuery")).toBe(false);
+      expect(
+        calls.some((call) => call.method === "sendMessage" && call.payload.chat_id === 2),
+      ).toBe(true);
     } finally {
       gate.resolve();
-      await Promise.all([first, second]);
+      await Promise.all([currency, budget]);
     }
-    expect(
-      calls.some(
-        (call) => call.method === "answerCallbackQuery" && call.payload.callback_query_id === "own",
-      ),
-    ).toBe(true);
+    await bot.handleUpdate({
+      update_id: 6,
+      message: { ...message, text: "Toyota Camry" },
+    });
+    await bot.handleUpdate({
+      update_id: 7,
+      callback_query: {
+        id: "save",
+        from,
+        chat_instance: "one",
+        data: action("Сохранить без"),
+        message,
+      },
+    });
+    expect(await store.getProfile(1)).toMatchObject({
+      currency: "USD",
+      budget_max_minor: 1_500_000,
+      query: "Toyota Camry",
+    });
   });
 });
