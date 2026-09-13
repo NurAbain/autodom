@@ -3,7 +3,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadBotSettings, loadToken, miniAppUrl } from "@autodom/core";
-import { createVinApiLookup } from "@autodom/core/vin-client";
+import {
+  createVinApiLookup,
+  createVinArchiveApiLookup,
+  createVinArchivePhotoApiLookup,
+} from "@autodom/core/vin-client";
 import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
@@ -95,6 +99,8 @@ export async function main(
     const settings = loadBotSettings(env);
     const publicUrl = miniAppUrl(env);
     const checkVin = createVinApiLookup(env, abort.signal);
+    const checkVinArchive = createVinArchiveApiLookup(env, abort.signal);
+    const getVinArchivePhoto = createVinArchivePhotoApiLookup(env, abort.signal);
     const token = await loadToken(env);
     const photoRecognizer = createPhotoRecognizer(token, env, abort.signal);
     logger = createLogger({ ...env, AUTODOM_BOT_TOKEN: token });
@@ -108,6 +114,8 @@ export async function main(
           payments,
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
           ...(checkVin ? { checkVin } : {}),
+          ...(checkVinArchive ? { checkVinArchive } : {}),
+          ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
           ...(photoRecognizer ? { photoRecognizer } : {}),
         });
         await runBotService(
@@ -120,6 +128,8 @@ export async function main(
             payments,
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
             ...(checkVin ? { checkVin } : {}),
+            ...(checkVinArchive ? { checkVinArchive } : {}),
+            ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
             signal: abort.signal,
           },
           logger,

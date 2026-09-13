@@ -12,6 +12,10 @@
       "types": "./src/vin.ts",
       "default": "./src/vin.ts"
     },
+    "./vin-archive": {
+      "types": "./src/vin-archive.ts",
+      "default": "./src/vin-archive.ts"
+    },
     "./vin-client": {
       "types": "./src/vin-client.ts",
       "default": "./src/vin-client.ts"

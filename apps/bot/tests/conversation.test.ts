@@ -1,6 +1,12 @@
 import { type Listing, makeListing, matches, type Profile } from "@autodom/core";
 import type { VinLookup } from "@autodom/core/vin";
+import type {
+  VinArchiveLookup,
+  VinArchivePhotoLookup,
+  VinArchiveResult,
+} from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
+import { InputFile } from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   Conversation,
@@ -641,9 +647,15 @@ describe("grammY transport boundaries", () => {
     can_connect_to_business: false,
     has_main_web_app: false,
   };
-  function telegram(checkVin?: VinLookup) {
+  function telegram(
+    checkVin?: VinLookup,
+    checkVinArchive?: VinArchiveLookup,
+    getVinArchivePhoto?: VinArchivePhotoLookup,
+  ) {
     const bot = createTelegramBot(store as unknown as Store, "100:test-token", {
       ...(checkVin ? { checkVin } : {}),
+      ...(checkVinArchive ? { checkVinArchive } : {}),
+      ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
     });
     const calls: { method: string; payload: Record<string, unknown> }[] = [];
     bot.api.config.use(async (_previous, method, payload) => {
@@ -658,6 +670,341 @@ describe("grammY transport boundaries", () => {
     });
     return { bot, calls };
   }
+  async function uploadedBytes(photo: unknown): Promise<unknown> {
+    expect(photo).toBeInstanceOf(InputFile);
+    return (photo as InputFile).toRaw();
+  }
+  it("requires a valid owner callback before archive lookup and keeps all photos separated by lot", async () => {
+    const vin = "KMHDU41DBAU123456";
+    const firstPhotos = Array.from(
+      { length: 12 },
+      (_, index) => `https://cs.copart.com/v1/AUTH_svc.pdoc00001/first/${index}.jpg`,
+    );
+    const secondPhoto = "https://cs.copart.com/v1/AUTH_svc.pdoc00001/second/0.jpg";
+    const result: VinArchiveResult = {
+      vin,
+      checked_at: 1_789_000_000,
+      coverage: "indexed_lots_only",
+      sources: [
+        {
+          provider: "copart",
+          status: "available",
+          source_url: "https://www.copart.com/",
+          checked_at: 1_789_000_000,
+          partial: false,
+          lots: [
+            {
+              auction: "copart",
+              lot_id: "12345678",
+              source_url: "https://www.copart.com/lot/12345678",
+              events: [
+                { status: "sold", auction_at: null, auction_date: null, final_bid_usd_minor: null },
+              ],
+              photos: firstPhotos,
+              photos_complete: true,
+            },
+            {
+              auction: "copart",
+              lot_id: "23456789",
+              source_url: "https://www.copart.com/lot/23456789",
+              events: [
+                { status: "sold", auction_at: null, auction_date: null, final_bid_usd_minor: null },
+              ],
+              photos: [secondPhoto],
+              photos_complete: true,
+            },
+          ],
+        },
+        {
+          provider: "bidcars",
+          status: "available",
+          source_url: "https://bid.cars/",
+          checked_at: 1_789_000_000,
+          partial: false,
+          lots: [
+            {
+              auction: "copart",
+              lot_id: "12345678",
+              source_url: `https://bid.cars/en/lot/1-12345678/2011-Hyundai-Elantra-${vin}`,
+              events: [
+                {
+                  status: "ended",
+                  auction_at: null,
+                  auction_date: "2026-08-01",
+                  final_bid_usd_minor: 1250000,
+                },
+              ],
+              photos: [`https://mercury.bid.cars/1-12345678/2011-Hyundai-Elantra-${vin}-1.jpg`],
+              photos_complete: true,
+            },
+          ],
+        },
+      ],
+    };
+    const entered = Promise.withResolvers<void>();
+    const released = Promise.withResolvers<VinArchiveResult>();
+    const archive = vi.fn<VinArchiveLookup>(async () => {
+      entered.resolve();
+      return released.promise;
+    });
+    const firstBytes = firstPhotos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
+    const secondBytes = new Uint8Array([255, 216, 99, 255, 217]);
+    const { bot, calls } = telegram(undefined, archive, async (request) => {
+      if (request.vin !== vin || request.provider !== "copart" || request.auction !== "copart")
+        throw new Error("Unknown archive photo");
+      const index = firstPhotos.indexOf(request.photo_url);
+      const bytes =
+        request.lot_id === "12345678" && index !== -1
+          ? firstBytes[index]
+          : request.lot_id === "23456789" && request.photo_url === secondPhoto
+            ? secondBytes
+            : undefined;
+      if (!bytes) throw new Error("Unknown archive photo");
+      return { bytes, content_type: "image/jpeg" };
+    });
+    await bot.init();
+    const message = {
+      message_id: 1,
+      date: 1,
+      from: { id: 1, is_bot: false, first_name: "Buyer" },
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${vin}` } });
+    expect(archive).not.toHaveBeenCalled();
+    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([expect.objectContaining({ callback_data: `vinarchive:${vin}` })]),
+      ]),
+    });
+    for (const [data, from] of [
+      ["vinarchive:invalid", message.from],
+      [`vinarchive:${vin}`, { ...message.from, id: 2 }],
+    ] as const) {
+      await bot.handleUpdate({
+        update_id: 2,
+        callback_query: { id: "invalid", from, chat_instance: "private", message, data },
+      });
+    }
+    expect(archive).not.toHaveBeenCalled();
+    const work = bot.handleUpdate({
+      update_id: 3,
+      callback_query: {
+        id: "archive",
+        from: message.from,
+        chat_instance: "private",
+        message,
+        data: `vinarchive:${vin}`,
+      },
+    });
+    await entered.promise;
+    expect(calls.at(-1)).toMatchObject({
+      method: "answerCallbackQuery",
+      payload: { callback_query_id: "archive" },
+    });
+    released.resolve(result);
+    await work;
+    const albums = await Promise.all(
+      calls
+        .filter((call) => call.method === "sendMediaGroup")
+        .map((call) =>
+          Promise.all(
+            (call.payload.media as { media: unknown }[]).map((photo) => uploadedBytes(photo.media)),
+          ),
+        ),
+    );
+    expect(albums).toEqual([firstBytes.slice(0, 10), firstBytes.slice(10)]);
+    expect(
+      await Promise.all(
+        calls
+          .filter((call) => call.method === "sendPhoto")
+          .map((call) => uploadedBytes(call.payload.photo)),
+      ),
+    ).toEqual([secondBytes]);
+    const archiveText = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => String(call.payload.text))
+      .join("\n");
+    expect(archiveText).toContain(result.sources[1]!.lots[0]!.source_url);
+    expect(archiveText).toContain("2026-08-01");
+    expect(archiveText).toContain("ENDED");
+    expect(await store.getProfile(1)).toBeNull();
+  });
+
+  it.each(["missing", "expired"] as const)(
+    "retains proven events and original links when the photo loader is %s",
+    async (failure) => {
+      const vin = "KMHDU41DBAU123456";
+      const photo = "https://cs.copart.com/v1/AUTH_svc.pdoc00001/expired.jpg";
+      const sourceUrl = "https://www.copart.com/lot/12345678";
+      const lookup: VinArchiveLookup = async () => ({
+        vin,
+        checked_at: 1_789_000_000,
+        coverage: "indexed_lots_only",
+        sources: [
+          {
+            provider: "copart",
+            status: "available",
+            source_url: "https://www.copart.com/",
+            checked_at: 1_789_000_000,
+            partial: false,
+            lots: [
+              {
+                auction: "copart",
+                lot_id: "12345678",
+                source_url: sourceUrl,
+                events: [
+                  {
+                    status: "sold",
+                    auction_at: null,
+                    auction_date: null,
+                    final_bid_usd_minor: null,
+                  },
+                ],
+                photos: [photo],
+                photos_complete: true,
+              },
+            ],
+          },
+        ],
+      });
+      const { bot, calls } = telegram(
+        undefined,
+        lookup,
+        failure === "expired"
+          ? async () => {
+              throw new Error("Photo grant expired");
+            }
+          : undefined,
+      );
+      await bot.init();
+      await bot.handleUpdate({
+        update_id: 1,
+        callback_query: {
+          id: "archive",
+          from: { id: 1, is_bot: false, first_name: "Buyer" },
+          chat_instance: "private",
+          data: `vinarchive:${vin}`,
+          message: {
+            message_id: 1,
+            date: 1,
+            chat: { id: 1, type: "private", first_name: "Buyer" },
+          },
+        },
+      });
+      const fallback = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => String(call.payload.text))
+        .join("\n");
+      expect(fallback).toContain(photo);
+      expect(fallback).toContain(sourceUrl);
+      expect(fallback).toMatch(/SOLD/);
+      expect(fallback).toMatch(/недоступна/);
+      expect(fallback).toMatch(/Повторите поиск архива/);
+      expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
+        [],
+      );
+    },
+  );
+  it.each(["download", "upload"] as const)(
+    "delivers remaining archive photos after a partial %s failure without losing events",
+    async (failure) => {
+      const vin = "KMHDU41DBAU123456";
+      const photos = Array.from(
+        { length: 4 },
+        (_, index) => `https://cs.copart.com/v1/AUTH_svc.pdoc00001/partial/${index}.jpg`,
+      );
+      const bytes = photos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
+      const sourceUrl = "https://www.copart.com/lot/12345678";
+      const { bot, calls } = telegram(
+        undefined,
+        async () => ({
+          vin,
+          checked_at: 1_789_000_000,
+          coverage: "indexed_lots_only",
+          sources: [
+            {
+              provider: "copart",
+              status: "available",
+              source_url: "https://www.copart.com/",
+              checked_at: 1_789_000_000,
+              partial: false,
+              lots: [
+                {
+                  auction: "copart",
+                  lot_id: "12345678",
+                  source_url: sourceUrl,
+                  events: [
+                    {
+                      status: "sold",
+                      auction_at: null,
+                      auction_date: null,
+                      final_bid_usd_minor: null,
+                    },
+                  ],
+                  photos,
+                  photos_complete: true,
+                },
+              ],
+            },
+          ],
+        }),
+        async (request) => {
+          const index = photos.indexOf(request.photo_url);
+          if (index < 0 || (failure === "download" && index === 1))
+            throw new Error("Photo unavailable");
+          return { bytes: bytes[index]!, content_type: "image/jpeg" };
+        },
+      );
+      if (failure === "upload") {
+        bot.api.config.use(async (previous, method, payload, signal) => {
+          let rejected = method === "sendMediaGroup";
+          if (method === "sendPhoto" && "photo" in payload && payload.photo instanceof InputFile) {
+            const raw = await payload.photo.toRaw();
+            rejected = raw instanceof Uint8Array && raw[2] === 1;
+          }
+          if (rejected)
+            return { ok: false, error_code: 400, description: "Bad Request: IMAGE_PROCESS_FAILED" };
+          return previous(method, payload, signal);
+        });
+      }
+      await bot.init();
+      await bot.handleUpdate({
+        update_id: 1,
+        callback_query: {
+          id: "archive",
+          from: { id: 1, is_bot: false, first_name: "Buyer" },
+          chat_instance: "private",
+          data: `vinarchive:${vin}`,
+          message: {
+            message_id: 1,
+            date: 1,
+            chat: { id: 1, type: "private", first_name: "Buyer" },
+          },
+        },
+      });
+      const delivered = calls.flatMap((call) =>
+        call.method === "sendMediaGroup"
+          ? (call.payload.media as { media: unknown }[]).map((photo) => photo.media)
+          : call.method === "sendPhoto"
+            ? [call.payload.photo]
+            : [],
+      );
+      expect(await Promise.all(delivered.map(uploadedBytes))).toEqual([
+        bytes[0],
+        bytes[2],
+        bytes[3],
+      ]);
+      const text = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => String(call.payload.text))
+        .join("\n");
+      expect(text).toContain(sourceUrl);
+      expect(text).toContain("SOLD");
+      expect(text).toContain(photos[1]);
+      expect(text).toMatch(/недоступна/);
+    },
+  );
+
   it("checks VIN only for its private owner without changing buyer preferences or requiring a profile", async () => {
     const checkVin = vi.fn<VinLookup>(async (vin) => ({
       vin,

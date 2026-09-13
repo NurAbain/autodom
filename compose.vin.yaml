@@ -24,6 +24,8 @@ services:
       # Runtime validates these before listening; image builds must not need secrets.
       AUTODOM_VIN_API_TOKEN: ${AUTODOM_VIN_API_TOKEN:-}
       AUTODOM_VIN_PROVIDERS: ${AUTODOM_VIN_PROVIDERS:-}
+      # Separate, user-triggered lookup. Empty keeps auction sources disabled.
+      AUTODOM_VIN_ARCHIVE_PROVIDERS: ${AUTODOM_VIN_ARCHIVE_PROVIDERS:-}
       AUTODOM_AUTODEV_API_KEY: ${AUTODOM_AUTODEV_API_KEY:-}
       AUTODOM_VIN_API_MAX_IN_FLIGHT: ${AUTODOM_VIN_API_MAX_IN_FLIGHT:-10}
       AUTODOM_CRAWL_DELAY: ${AUTODOM_CRAWL_DELAY:-2}

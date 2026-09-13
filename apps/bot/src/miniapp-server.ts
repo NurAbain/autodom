@@ -11,7 +11,17 @@ import {
   money,
 } from "@autodom/core";
 import type { VinLookup } from "@autodom/core/vin";
-import { readVinRequest, VinRequestError } from "@autodom/core/vin-request";
+import {
+  disabledVinArchiveResult,
+  VIN_ARCHIVE_PHOTO_MAX_BYTES,
+  type VinArchiveLookup,
+  type VinArchivePhotoLookup,
+} from "@autodom/core/vin-archive";
+import {
+  readVinArchivePhotoRequest,
+  readVinRequest,
+  VinRequestError,
+} from "@autodom/core/vin-request";
 import type { Store } from "@autodom/storage";
 import { listingText, type Reply } from "./conversation.js";
 import { RequestError, readFlatJson } from "./http-body.js";
@@ -77,6 +87,8 @@ export interface MiniAppServerOptions {
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
   checkVin?: VinLookup;
+  checkVinArchive?: VinArchiveLookup;
+  getVinArchivePhoto?: VinArchivePhotoLookup;
   /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
   dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
   payments?: PaymentService;
@@ -111,7 +123,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
       response.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
+        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src blob: https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net https://cs.copart.com; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
@@ -145,6 +157,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           ![
             "/miniapp/api/car",
             "/miniapp/api/vin",
+            "/miniapp/api/vin/archive-photos",
+            "/miniapp/api/vin/archive-photo",
             "/miniapp/api/dialogue",
             "/miniapp/api/orders",
             "/miniapp/api/orders/checkout",
@@ -185,7 +199,61 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           if (!response.destroyed) respond(response, 200, { replies });
           return;
         }
-        if (url.pathname === "/miniapp/api/vin") {
+        if (url.pathname === "/miniapp/api/vin/archive-photo") {
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "POST");
+            throw new VinRequestError(
+              405,
+              "method_not_allowed",
+              "Фото доступно только через POST.",
+            );
+          }
+          if (url.search)
+            throw new VinRequestError(
+              400,
+              "invalid_request",
+              "Передайте запрос фото только в теле.",
+            );
+          const photoRequest = await readVinArchivePhotoRequest(request);
+          const controller = new AbortController();
+          const onClose = () => controller.abort();
+          response.once("close", onClose);
+          if (response.destroyed) controller.abort();
+          try {
+            if (!options.getVinArchivePhoto) throw new Error("Archive photos not enabled");
+            const photo = await options.getVinArchivePhoto(photoRequest, controller.signal);
+            if (
+              !["image/jpeg", "image/png", "image/webp"].includes(photo.content_type) ||
+              photo.bytes.byteLength === 0 ||
+              photo.bytes.byteLength > VIN_ARCHIVE_PHOTO_MAX_BYTES
+            )
+              throw new Error("Invalid archive photo");
+            if (!response.destroyed) {
+              response.writeHead(200, {
+                "Content-Type": photo.content_type,
+                "Content-Length": photo.bytes.byteLength,
+              });
+              response.end(photo.bytes);
+            }
+          } catch {
+            if (!response.destroyed) {
+              options.onError?.(new Error("VIN archive photo API request failed"));
+              respond(response, 503, {
+                code: "vin_archive_photo_unavailable",
+                error:
+                  "Фото временно недоступно. Лот и события сохранены. Повторите поиск архивных фото.",
+              });
+            }
+          } finally {
+            response.off("close", onClose);
+          }
+          return;
+        }
+        if (
+          url.pathname === "/miniapp/api/vin" ||
+          url.pathname === "/miniapp/api/vin/archive-photos"
+        ) {
+          const archive = url.pathname === "/miniapp/api/vin/archive-photos";
           if (request.method !== "POST") {
             response.setHeader("Allow", "POST");
             throw new VinRequestError(
@@ -201,7 +269,12 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               "Передайте один VIN только в теле запроса.",
             );
           const vin = await readVinRequest(request);
-          if (!options.checkVin) {
+          if (archive && !options.checkVinArchive) {
+            respond(response, 200, disabledVinArchiveResult(vin));
+            return;
+          }
+          const lookup = archive ? options.checkVinArchive : options.checkVin;
+          if (!lookup) {
             respond(response, 503, { code: "vin_not_enabled", error: VIN_NOT_ENABLED });
             return;
           }
@@ -210,15 +283,18 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           response.once("close", onClose);
           if (response.destroyed) controller.abort();
           try {
-            const result = await options.checkVin(vin, controller.signal);
+            const result = await lookup(vin, controller.signal);
             if (!response.destroyed) respond(response, 200, result);
           } catch {
             if (!response.destroyed) {
-              options.onError?.(new Error("VIN API request failed"));
+              options.onError?.(
+                new Error(archive ? "VIN archive API request failed" : "VIN API request failed"),
+              );
               respond(response, 503, {
-                code: "vin_unavailable",
-                error:
-                  "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите позже.",
+                code: archive ? "vin_archive_unavailable" : "vin_unavailable",
+                error: archive
+                  ? "Поиск архивных фото временно недоступен. Результат неизвестен; это не отсутствие истории. Повторите позже."
+                  : "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите позже.",
               });
             }
           } finally {

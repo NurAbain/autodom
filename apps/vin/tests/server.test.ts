@@ -1,11 +1,23 @@
 import { once } from "node:events";
 import { request as httpRequest, type Server } from "node:http";
 import { VIN_SOURCE_URLS, type VinCheckResult, type VinLookup } from "@autodom/core/vin";
+import {
+  disabledVinArchiveResult,
+  type VinArchiveLookup,
+  type VinArchivePhotoLookup,
+} from "@autodom/core/vin-archive";
 import { afterEach, describe, expect, it } from "vitest";
 import { startVinApiServer } from "../src/server.js";
 
 const token = "private-server-test-token-with-32-characters";
 const vin = "KMFXKN7BPXU258800";
+const photoRequest = {
+  vin: "1FTFW1ED9NFB06106",
+  provider: "bidcars",
+  auction: "iaai",
+  lot_id: "45397077",
+  photo_url: "https://mercury.bid.cars/0-45397077/2022-Ford-F-150-1FTFW1ED9NFB06106-1.jpg",
+};
 const result: VinCheckResult = {
   vin,
   checked_at: 1_700_000_000,
@@ -37,7 +49,12 @@ afterEach(async () => {
   );
 });
 
-async function start(checkVin: VinLookup, maxInFlight?: number) {
+async function start(
+  checkVin: VinLookup,
+  maxInFlight?: number,
+  checkVinArchive?: VinArchiveLookup,
+  getVinArchivePhoto?: VinArchivePhotoLookup,
+) {
   const shutdown = new AbortController();
   shutdowns.push(shutdown);
   const server = await startVinApiServer({
@@ -45,6 +62,8 @@ async function start(checkVin: VinLookup, maxInFlight?: number) {
     port: 0,
     apiToken: token,
     checkVin,
+    ...(checkVinArchive ? { checkVinArchive } : {}),
+    ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
     ...(maxInFlight === undefined ? {} : { maxInFlight }),
     signal: shutdown.signal,
   });
@@ -84,6 +103,155 @@ describe("private VIN API", () => {
       ).status,
     ).toBe(400);
     expect(calls).toBe(0);
+  });
+
+  it("requires authentication on archive photo requests without calling decoders", async () => {
+    let calls = 0;
+    const { url } = await start(async () => {
+      calls++;
+      return result;
+    });
+    const response = await fetch(`${url}/v1/vin/archive-photos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vin }),
+    });
+    expect(response.status).toBe(401);
+    expect(calls).toBe(0);
+  });
+
+  it("shares admission capacity between archive photos and regular VIN checks", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const { url } = await start(
+      async () => result,
+      1,
+      async () => {
+        entered.resolve();
+        await release.promise;
+        return disabledVinArchiveResult(vin);
+      },
+    );
+    const pending = fetch(`${url}/v1/vin/archive-photos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ vin }),
+    });
+    try {
+      await Promise.race([
+        entered.promise,
+        pending.then(() => {
+          throw new Error("Archive request ended before entering its lookup");
+        }),
+      ]);
+      expect((await post(url)).status).toBe(429);
+      release.resolve();
+      expect((await pending).status).toBe(200);
+      expect((await post(url)).status).toBe(200);
+    } finally {
+      release.resolve();
+      await pending;
+    }
+  });
+
+  it("returns exact binary archive bytes and rejects unauthenticated or forged bodies before loading", async () => {
+    const bytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=",
+      "base64",
+    );
+    let photoCalls = 0;
+    let decoderCalls = 0;
+    const { url } = await start(
+      async () => {
+        decoderCalls++;
+        return result;
+      },
+      undefined,
+      undefined,
+      async () => {
+        photoCalls++;
+        return { bytes, content_type: "image/png" };
+      },
+    );
+    const send = (body: string, authorization = `Bearer ${token}`) =>
+      fetch(`${url}/v1/vin/archive-photo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: authorization },
+        body,
+      });
+    const body = JSON.stringify(photoRequest);
+    expect((await send(body, "")).status).toBe(401);
+    expect((await send(JSON.stringify({ ...photoRequest, lot_id: "45397078" }))).status).toBe(400);
+    expect((await send(body.replace('"provider":', '"extra":"no","provider":'))).status).toBe(400);
+    expect(
+      (await send(body.replace('"provider":', '"pr\\u006fvider":"copart","provider":'))).status,
+    ).toBe(400);
+    expect(photoCalls).toBe(0);
+    const response = await send(body);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/png");
+    expect(response.headers.get("content-length")).toBe(String(bytes.length));
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+    expect(decoderCalls).toBe(0);
+    expect(photoCalls).toBe(1);
+  });
+
+  it("shares photo admission, propagates disconnect cancellation and keeps source errors private", async () => {
+    const entered = Promise.withResolvers<void>();
+    const cancelled = Promise.withResolvers<void>();
+    let calls = 0;
+    const { url } = await start(
+      async () => result,
+      1,
+      undefined,
+      async (_request, signal) => {
+        if (++calls > 1) throw new Error(`secret ${token} ${photoRequest.photo_url}`);
+        entered.resolve();
+        const pending = Promise.withResolvers<never>();
+        signal?.addEventListener(
+          "abort",
+          () => {
+            cancelled.resolve();
+            pending.reject(signal.reason);
+          },
+          { once: true },
+        );
+        return pending.promise;
+      },
+    );
+    const request = httpRequest(`${url}/v1/vin/archive-photo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    });
+    const closed = Promise.withResolvers<void>();
+    request.once("close", () => closed.resolve());
+    request.on("error", () => {
+      /* Expected disconnect. */
+    });
+    request.end(JSON.stringify(photoRequest));
+    await entered.promise;
+    expect((await post(url)).status).toBe(429);
+    const archive = await fetch(`${url}/v1/vin/archive-photos`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ vin }),
+    });
+    expect(archive.status).toBe(429);
+    request.destroy();
+    await Promise.all([cancelled.promise, closed.promise]);
+    expect((await post(url)).status).toBe(200);
+    const response = await fetch(`${url}/v1/vin/archive-photo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(photoRequest),
+    });
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect(text).not.toContain(token);
+    expect(text).not.toContain(photoRequest.photo_url);
+    expect(text).not.toContain(photoRequest.vin);
   });
 
   it("returns partial provider results and checks health without querying providers", async () => {

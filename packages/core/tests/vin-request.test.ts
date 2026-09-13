@@ -1,5 +1,9 @@
-import { createServer, request as httpRequest, type Server } from "node:http";
-import { readVinRequest, VinRequestError } from "@autodom/core/vin-request";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import {
+  readVinArchivePhotoRequest,
+  readVinRequest,
+  VinRequestError,
+} from "@autodom/core/vin-request";
 import { afterEach, describe, expect, it } from "vitest";
 
 const servers: Server[] = [];
@@ -15,11 +19,16 @@ afterEach(async () => {
   );
 });
 
-async function parse(body: string | Buffer, contentType = "application/json", chunked = false) {
+async function parse(
+  body: string | Buffer,
+  contentType = "application/json",
+  chunked = false,
+  reader: (request: IncomingMessage) => Promise<unknown> = readVinRequest,
+) {
   const server = createServer((request, response) => {
-    void readVinRequest(request).then(
-      (vin) => {
-        response.end(JSON.stringify({ vin }));
+    void reader(request).then(
+      (value) => {
+        response.end(JSON.stringify(typeof value === "string" ? { vin: value } : value));
       },
       (error: unknown) => {
         response.writeHead(error instanceof VinRequestError ? error.status : 500, {
@@ -98,5 +107,44 @@ describe("bounded VIN JSON request", () => {
 
   it("refuses non-JSON media types", async () => {
     expect((await parse('{"vin":"KMFXKN7BPXU258800"}', "text/plain")).status).toBe(415);
+  });
+});
+
+describe("bounded archive photo identity request", () => {
+  const photo = {
+    vin: "1FTFW1ED9NFB06106",
+    provider: "bidcars",
+    auction: "iaai",
+    lot_id: "45397077",
+    photo_url: "https://mercury.bid.cars/0-45397077/2022-Ford-F-150-1FTFW1ED9NFB06106-1.jpg",
+  };
+  const parsePhoto = (body: string) =>
+    parse(body, "application/json", false, readVinArchivePhotoRequest);
+
+  it("normalizes the VIN while preserving the source-bound photo identity", async () => {
+    expect(
+      await parsePhoto(JSON.stringify({ ...photo, vin: ` ${photo.vin.toLowerCase()} ` })),
+    ).toEqual({
+      status: 200,
+      body: photo,
+    });
+  });
+
+  it("rejects escaped duplicate fields before parsing discards the evidence", async () => {
+    const body = JSON.stringify(photo).slice(0, -1);
+    expect((await parsePhoto(`${body},"photo\\u005furl":"${photo.photo_url}"}`)).status).toBe(400);
+  });
+
+  it("rejects cross-vehicle, cross-auction, unknown fields and foreign-host photo requests", async () => {
+    for (const invalid of [
+      { ...photo, vin: "1FTFW1ED9NFB06107" },
+      { ...photo, lot_id: "45397078" },
+      { ...photo, auction: "copart" },
+      { ...photo, provider: "copart" },
+      { ...photo, extra: "not allowed" },
+      { ...photo, photo_url: photo.photo_url.replace("mercury.bid.cars", "localhost") },
+    ]) {
+      expect((await parsePhoto(JSON.stringify(invalid))).status).toBe(400);
+    }
   });
 });

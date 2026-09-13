@@ -4,7 +4,9 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadProxyRoutes } from "@autodom/core";
 import { configuredVinProviders } from "@autodom/core/vin";
+import { configuredVinArchiveProviders } from "@autodom/core/vin-archive";
 import { VinCheckService } from "@autodom/sources/vin";
+import { VinArchiveService } from "@autodom/sources/vin-archive";
 import { startVinApiServer, validateVinApiOptions } from "./server.js";
 
 const HELP = `Autodom private VIN API
@@ -14,8 +16,10 @@ Usage: pnpm vin [serve|health] [--help]
   serve     Start the authenticated private VIN API (default)
   health    Probe the local /health endpoint with a five-second timeout
 
-serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters), explicit
-AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev).
+serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters) and at least
+one explicit AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev) or
+AUTODOM_VIN_ARCHIVE_PROVIDERS (copart,bidcars). Archive photos require an explicit
+action, use existing proxies, and cover indexed completed auction lots only.
 Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
 free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
@@ -36,6 +40,7 @@ export async function main(
 ): Promise<number> {
   process.umask(0o077);
   let service: VinCheckService | undefined;
+  let archiveService: VinArchiveService | undefined;
   let exitCode = 0;
   const shutdown = new AbortController();
   const stop = () => shutdown.abort();
@@ -82,17 +87,20 @@ export async function main(
     };
     validateVinApiOptions(options);
     const providers = configuredVinProviders(env);
-    if (!providers.length)
-      throw new Error("AUTODOM_VIN_PROVIDERS must explicitly enable at least one provider.");
+    const archiveProviders = configuredVinArchiveProviders(env);
+    if (!providers.length && !archiveProviders.length)
+      throw new Error("Explicitly enable at least one VIN or archive provider.");
     const delayText = env.AUTODOM_CRAWL_DELAY ?? "2";
     const requestDelaySeconds = Number(delayText);
     if (!delayText.trim() || !Number.isFinite(requestDelaySeconds) || requestDelaySeconds < 0)
       throw new Error("AUTODOM_CRAWL_DELAY must be a non-negative number of seconds.");
-    const routes = providers.some(
-      (provider) => provider === "carhistory" || provider === "car365" || provider === "encar",
-    )
-      ? loadProxyRoutes(env)
-      : [];
+    const routes =
+      archiveProviders.length ||
+      providers.some(
+        (provider) => provider === "carhistory" || provider === "car365" || provider === "encar",
+      )
+        ? loadProxyRoutes(env)
+        : [];
     service = new VinCheckService({
       providers,
       routes,
@@ -100,9 +108,22 @@ export async function main(
       autoDevApiKey: env.AUTODOM_AUTODEV_API_KEY,
       signal: shutdown.signal,
     });
+    if (archiveProviders.length)
+      archiveService = new VinArchiveService({
+        providers: archiveProviders,
+        routes,
+        requestDelaySeconds,
+        signal: shutdown.signal,
+      });
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    const server = await startVinApiServer({ ...options, checkVin: service.check });
+    const server = await startVinApiServer({
+      ...options,
+      checkVin: service.check,
+      ...(archiveService
+        ? { checkVinArchive: archiveService.check, getVinArchivePhoto: archiveService.getPhoto }
+        : {}),
+    });
     console.log("Autodom VIN API ready.");
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -120,7 +141,7 @@ export async function main(
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     try {
-      await service?.close();
+      await Promise.all([service?.close(), archiveService?.close()]);
     } catch {
       console.error("VIN API shutdown failed.");
       exitCode = 1;

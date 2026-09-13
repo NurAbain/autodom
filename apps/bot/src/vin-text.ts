@@ -9,6 +9,79 @@ import {
   type VinCheckResult,
   type VinProvider,
 } from "@autodom/core/vin";
+import {
+  isVinArchiveLotUrl,
+  VIN_ARCHIVE_AUCTION_NAMES,
+  VIN_ARCHIVE_PROVIDER_NAMES,
+  VIN_ARCHIVE_SOURCE_URLS,
+  type VinArchiveLot,
+  type VinArchiveProvider,
+  type VinArchiveStatus,
+} from "@autodom/core/vin-archive";
+
+export const VIN_ARCHIVE_LABEL = "Архивные фото США";
+export const VIN_ARCHIVE_DISCLOSURE =
+  "Отдельный поиск: только по нажатию кнопки VIN передаётся подключённым Copart и Bid.Cars через сервис Autodom и настроенный прокси. Ищем сохранившиеся завершённые аукционы и фотографии. Copart проверяем напрямую, лоты Copart и IAAI — также через посредника Bid.Cars. Прямого запроса в IAAI нет.";
+export const VIN_ARCHIVE_STATUS_TEXT: Record<VinArchiveStatus, string> = {
+  available: "Найдены сохранившиеся фотографии.",
+  no_photos: "Завершённые аукционы найдены, но фотографии недоступны.",
+  not_found: "В завершённом поиске не найдены сохранившиеся завершённые аукционы по этому VIN.",
+  unavailable: "Поиск временно недоступен. Результат неизвестен — это не отсутствие истории.",
+  disabled: "Поиск архивных фото не подключён. Запрос не отправлен.",
+};
+
+const archiveDateTime = new Intl.DateTimeFormat("ru-RU", {
+  dateStyle: "medium",
+  timeStyle: "short",
+  timeZone: "UTC",
+});
+
+export function vinArchiveTime(value: number | null): string {
+  return value === null ? "неизвестно" : `${archiveDateTime.format(new Date(value * 1000))} UTC`;
+}
+
+const archiveBid = new Intl.NumberFormat("ru-RU", {
+  style: "currency",
+  currency: "USD",
+});
+
+export function vinArchiveLotText(lot: VinArchiveLot, provider: VinArchiveProvider): string {
+  return [
+    `Данные: ${VIN_ARCHIVE_PROVIDER_NAMES[provider]}${provider === "bidcars" ? ` (посредник, аукцион ${VIN_ARCHIVE_AUCTION_NAMES[lot.auction]})` : " (аукцион напрямую)"}.`,
+    ...lot.events.map((event) =>
+      [
+        event.status === "sold"
+          ? "SOLD (продан по данным источника)."
+          : "ENDED (торги завершены; продажа не подтверждена).",
+        `Дата аукциона: ${event.auction_date ?? vinArchiveTime(event.auction_at)}.`,
+        ...(event.auction_date !== null && event.auction_at !== null
+          ? [`Время: ${vinArchiveTime(event.auction_at)}.`]
+          : []),
+        `Финальная ставка: ${event.final_bid_usd_minor === null ? "неизвестна / скрыта" : archiveBid.format(event.final_bid_usd_minor / 100)}.`,
+      ].join(" "),
+    ),
+    "Ставка не равна цене сделки. Статус не подтверждает переход права собственности.",
+    ...(!lot.photos_complete
+      ? ["Фотографии получены не полностью; часть может быть недоступна."]
+      : []),
+    ...(!lot.photos.length ? ["Фотографии этого лота недоступны."] : []),
+  ].join("\n");
+}
+
+export function vinArchiveSourceUrl(
+  value: string,
+  provider: VinArchiveProvider,
+  lot?: VinArchiveLot,
+  vin?: string,
+): string | null {
+  return lot
+    ? vin && isVinArchiveLotUrl(value, provider, lot.auction, lot.lot_id, vin)
+      ? value
+      : null
+    : value === VIN_ARCHIVE_SOURCE_URLS[provider]
+      ? value
+      : null;
+}
 
 export const VIN_DISCLOSURE =
   "По вашему запросу VIN передаётся отдельному сервису Autodom. Сначала проверяем подключённые корейские источники через настроенный прокси: CarHistory, Car365 и историю объявлений Encar. Для Encar VIN передаётся Carcheck для поиска кандидатов, затем найденные объявления сверяются с полным VIN на официальном Encar. Подключённые NHTSA vPIC и Auto.dev запрашиваем напрямую, только если все подключённые корейские источники ответили «не найдено»; если корейские источники отключены — сразу. При найденном VIN или ошибке корейской проверки эти декодеры не запрашиваем. Платные отчёты не покупаем и не получаем; Car365 проверяет государственную экспортную запись. Google — только внешний поиск по нажатию, без автоматических запросов. NHTSA даёт характеристики для рынка США, Auto.dev — глобальную расшифровку с неполным покрытием; это не история ДТП, пробега или владельцев. Auto.dev используется на бесплатном тарифе с лимитом. VIN не сохраняется в вашем поиске или профиле.";

@@ -1,18 +1,31 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { VinLookup } from "@autodom/core/vin";
-import { readVinRequest, VinRequestError } from "@autodom/core/vin-request";
+import {
+  disabledVinArchiveResult,
+  type VinArchiveLookup,
+  type VinArchivePhotoLookup,
+} from "@autodom/core/vin-archive";
+import {
+  readVinArchivePhotoRequest,
+  readVinRequest,
+  VinRequestError,
+} from "@autodom/core/vin-request";
 
 export interface VinApiServerOptions {
   host: string;
   port: number;
   apiToken: string;
   checkVin: VinLookup;
+  checkVinArchive?: VinArchiveLookup;
+  getVinArchivePhoto?: VinArchivePhotoLookup;
   maxInFlight?: number;
   signal?: AbortSignal;
 }
 
-export function validateVinApiOptions(options: Omit<VinApiServerOptions, "checkVin">): void {
+export function validateVinApiOptions(
+  options: Omit<VinApiServerOptions, "checkVin" | "checkVinArchive" | "getVinArchivePhoto">,
+): void {
   if (!/^[\x21-\x7e]{32,}$/u.test(options.apiToken))
     throw new Error(
       "AUTODOM_VIN_API_TOKEN must contain at least 32 printable non-space ASCII characters.",
@@ -59,7 +72,11 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
           json(response, 200, { healthy: true, service: "autodom-vin-api" });
           return;
         }
-        if (request.url !== "/v1/vin/check")
+        if (
+          request.url !== "/v1/vin/check" &&
+          request.url !== "/v1/vin/archive-photos" &&
+          request.url !== "/v1/vin/archive-photo"
+        )
           throw new VinRequestError(404, "not_found", "Endpoint not found.");
         if (request.method !== "POST") {
           response.setHeader("Allow", "POST");
@@ -91,9 +108,35 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
         request.once("error", disconnected);
         response.once("close", disconnected);
         try {
+          if (request.url === "/v1/vin/archive-photo") {
+            const photoRequest = await readVinArchivePhotoRequest(request);
+            controller.signal.throwIfAborted();
+            if (!options.getVinArchivePhoto)
+              throw new VinRequestError(
+                503,
+                "photo_unavailable",
+                "Archive photo is unavailable; repeat the archive lookup.",
+              );
+            const photo = await options.getVinArchivePhoto(photoRequest, controller.signal);
+            controller.signal.throwIfAborted();
+            if (!response.destroyed && !response.writableEnded) {
+              response.writeHead(200, {
+                "Content-Type": photo.content_type,
+                "Content-Length": photo.bytes.byteLength,
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+              });
+              response.end(photo.bytes);
+            }
+            return;
+          }
           const vin = await readVinRequest(request);
           controller.signal.throwIfAborted();
-          const result = await options.checkVin(vin, controller.signal);
+          const result =
+            request.url === "/v1/vin/archive-photos"
+              ? await (options.checkVinArchive?.(vin, controller.signal) ??
+                  disabledVinArchiveResult(vin))
+              : await options.checkVin(vin, controller.signal);
           controller.signal.throwIfAborted();
           json(response, 200, result);
         } finally {
@@ -105,6 +148,11 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
       })().catch((error: unknown) => {
         if (error instanceof VinRequestError)
           json(response, error.status, { code: error.code, error: error.message });
+        else if (request.url === "/v1/vin/archive-photo")
+          json(response, 503, {
+            code: "photo_unavailable",
+            error: "Archive photo is unavailable; repeat the archive lookup.",
+          });
         else
           json(response, 502, { code: "check_failed", error: "VIN check could not be completed." });
       });

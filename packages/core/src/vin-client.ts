@@ -11,6 +11,17 @@ import {
   type VinCheckResult,
   type VinLookup,
 } from "./vin.js";
+import {
+  isVinArchiveLotUrl,
+  isVinArchivePhotoUrl,
+  parseVinArchivePhotoRequest,
+  VIN_ARCHIVE_PHOTO_MAX_BYTES,
+  VIN_ARCHIVE_SOURCE_URLS,
+  type VinArchiveLookup,
+  type VinArchivePhoto,
+  type VinArchivePhotoLookup,
+  type VinArchiveResult,
+} from "./vin-archive.js";
 
 const status = z.enum(["available", "not_found", "unavailable", "disabled"]);
 const instant = z.number().nonnegative().max(8_640_000_000_000);
@@ -113,10 +124,31 @@ const resultSchema = z
   })
   .strict();
 
-export function createVinApiLookup(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-  signal?: AbortSignal,
-): VinLookup | undefined {
+function parseVinResult(value: unknown, vin: string): VinCheckResult {
+  const result = resultSchema.parse(value);
+  for (const provider of VIN_PROVIDERS) {
+    const item = result[provider];
+    if (
+      item !== undefined &&
+      ((item.status === "disabled") !== (item.checked_at === null) ||
+        ("data" in item &&
+          ((item.status === "available") !== (item.data !== null) ||
+            (item.data !== null && item.data.vin !== vin))))
+    )
+      throw new Error("VIN API observation identity or state mismatch");
+  }
+  return result;
+}
+
+function createApiTransport(
+  path: string,
+  env: Readonly<Record<string, string | undefined>>,
+  signal: AbortSignal | undefined,
+  maxResponseBytes: number,
+  accept = "application/json",
+):
+  | ((body: unknown, signal?: AbortSignal) => Promise<{ bytes: Uint8Array; contentType: string }>)
+  | undefined {
   const rawUrl = env.AUTODOM_VIN_API_URL?.trim() ?? "";
   const token = env.AUTODOM_VIN_API_TOKEN?.trim() ?? "";
   if (!rawUrl && !token) return undefined;
@@ -137,13 +169,10 @@ export function createVinApiLookup(
     url.pathname !== "/"
   )
     throw new Error("AUTODOM_VIN_API_URL must be an HTTP(S) origin without credentials or a path");
-  const endpoint = new URL("/v1/vin/check", url).href;
+  const endpoint = new URL(path, url).href;
   const authorization = `Bearer ${token}`;
 
-  return async (value, callerSignal): Promise<VinCheckResult> => {
-    const vin = normalizeVin(value);
-    if (!vin)
-      throw new RangeError("VIN must contain 17 ASCII letters and digits, without I, O or Q");
+  return async (body, callerSignal) => {
     const requestSignal = AbortSignal.any([
       AbortSignal.timeout(45_000),
       ...(signal ? [signal] : []),
@@ -155,9 +184,9 @@ export function createVinApiLookup(
         headers: {
           Authorization: authorization,
           "Content-Type": "application/json",
-          Accept: "application/json",
+          Accept: accept,
         },
-        body: JSON.stringify({ vin }),
+        body: JSON.stringify(body),
         redirect: "error",
         signal: requestSignal,
       });
@@ -169,37 +198,207 @@ export function createVinApiLookup(
       if (!reader) throw new Error("VIN API response missing");
       const chunks: Uint8Array[] = [];
       let bytes = 0;
-      let body: string;
+      const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
       try {
         for (;;) {
           const chunk = await reader.read();
           if (chunk.done) break;
           bytes += chunk.value.byteLength;
-          if (bytes > 64 * 1024) throw new Error("VIN API response too large");
+          if (bytes > maxResponseBytes) throw new Error("VIN API response too large");
           chunks.push(chunk.value);
         }
-        body = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, bytes));
+        return { bytes: Buffer.concat(chunks, bytes), contentType };
       } finally {
         await reader.cancel().catch(() => undefined);
         reader.releaseLock();
       }
-      const result = resultSchema.parse(JSON.parse(body));
-      if (result.vin !== vin) throw new Error("VIN API result identity mismatch");
-      for (const provider of VIN_PROVIDERS) {
-        const item = result[provider];
-        if (
-          item !== undefined &&
-          ((item.status === "disabled") !== (item.checked_at === null) ||
-            ("data" in item &&
-              ((item.status === "available") !== (item.data !== null) ||
-                (item.data !== null && item.data.vin !== vin))))
-        )
-          throw new Error("VIN API observation identity or state mismatch");
-      }
-      return result;
     } catch {
       // Neither the credential, service URL nor an upstream error body reaches the user/logs.
       throw new Error("VIN API unavailable or returned an invalid result");
     }
+  };
+}
+
+function createApiLookup<T extends { vin: string }>(
+  path: string,
+  parse: (value: unknown, vin: string) => T,
+  env: Readonly<Record<string, string | undefined>>,
+  signal: AbortSignal | undefined,
+  maxResponseBytes: number,
+): ((vin: string, signal?: AbortSignal) => Promise<T>) | undefined {
+  const transport = createApiTransport(path, env, signal, maxResponseBytes);
+  if (!transport) return undefined;
+  return async (value, callerSignal) => {
+    const vin = normalizeVin(value);
+    if (!vin)
+      throw new RangeError("VIN must contain 17 ASCII letters and digits, without I, O or Q");
+    try {
+      const response = await transport({ vin }, callerSignal);
+      const body = new TextDecoder("utf-8", { fatal: true }).decode(response.bytes);
+      const result = parse(JSON.parse(body), vin);
+      if (result.vin !== vin) throw new Error("VIN API result identity mismatch");
+      return result;
+    } catch {
+      throw new Error("VIN API unavailable or returned an invalid result");
+    }
+  };
+}
+
+const archiveEventSchema = z
+  .object({
+    status: z.enum(["sold", "ended"]),
+    auction_at: instant.int().nullable(),
+    auction_date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/u)
+      .nullable(),
+    final_bid_usd_minor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+  })
+  .strict();
+
+const archiveLotSchema = z
+  .object({
+    auction: z.enum(["copart", "iaai"]),
+    lot_id: z.string().regex(/^[1-9]\d{0,11}$/u),
+    source_url: z.string(),
+    events: z.array(archiveEventSchema).min(1).max(200),
+    photos: z.array(z.string().max(2048)).max(200),
+    photos_complete: z.boolean(),
+  })
+  .strict();
+const archiveResultSchema = z
+  .object({
+    vin: z.string(),
+    checked_at: instant.int(),
+    coverage: z.literal("indexed_lots_only"),
+    sources: z
+      .array(
+        z
+          .object({
+            provider: z.enum(["copart", "bidcars"]),
+            status: z.enum(["available", "no_photos", "not_found", "unavailable", "disabled"]),
+            source_url: z.string(),
+            checked_at: instant.int().nullable(),
+            partial: z.boolean(),
+            lots: z.array(archiveLotSchema).max(200),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(2),
+  })
+  .strict();
+
+function parseVinArchiveResult(value: unknown, vin: string): VinArchiveResult {
+  const result = archiveResultSchema.parse(value);
+  if (
+    result.vin !== vin ||
+    new Set(result.sources.map((source) => source.provider)).size !== result.sources.length
+  )
+    throw new Error("Invalid archive identity");
+  for (const source of result.sources) {
+    const hasPhotos = source.lots.some((lot) => lot.photos.length > 0);
+    if (
+      source.source_url !== VIN_ARCHIVE_SOURCE_URLS[source.provider] ||
+      (source.checked_at !== null && source.checked_at > result.checked_at) ||
+      (source.status === "disabled") !== (source.checked_at === null) ||
+      (source.status === "available") !== hasPhotos ||
+      (source.status === "no_photos" && (!source.lots.length || hasPhotos)) ||
+      (["disabled", "not_found", "unavailable"].includes(source.status) &&
+        source.lots.length > 0) ||
+      (["disabled", "not_found"].includes(source.status) && source.partial) ||
+      (source.status === "unavailable" && !source.partial)
+    )
+      throw new Error("Invalid archive observation state");
+    const lotIds = new Set<string>();
+    for (const lot of source.lots) {
+      const key = `${lot.auction}:${lot.lot_id}`;
+      if (
+        lotIds.has(key) ||
+        !isVinArchiveLotUrl(lot.source_url, source.provider, lot.auction, lot.lot_id, vin) ||
+        lot.photos.some(
+          (photo) => !isVinArchivePhotoUrl(photo, source.provider, lot.auction, lot.lot_id, vin),
+        ) ||
+        new Set(lot.photos).size !== lot.photos.length ||
+        (!lot.photos_complete && !source.partial)
+      )
+        throw new Error("Invalid archive lot provenance or state");
+      for (const event of lot.events) {
+        const date = event.auction_date;
+        const parsedDate = date === null ? null : new Date(`${date}T00:00:00Z`);
+        if (
+          (event.auction_at !== null && event.auction_at > (source.checked_at ?? 0)) ||
+          (parsedDate !== null &&
+            (!Number.isFinite(parsedDate.getTime()) ||
+              parsedDate.toISOString().slice(0, 10) !== date ||
+              date! > new Date((source.checked_at ?? 0) * 1000).toISOString().slice(0, 10)))
+        )
+          throw new Error("Invalid archive event date");
+      }
+      lotIds.add(key);
+    }
+  }
+  return result;
+}
+
+export function createVinApiLookup(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  signal?: AbortSignal,
+): VinLookup | undefined {
+  return createApiLookup("/v1/vin/check", parseVinResult, env, signal, 64 * 1024);
+}
+
+export function createVinArchiveApiLookup(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  signal?: AbortSignal,
+): VinArchiveLookup | undefined {
+  return createApiLookup("/v1/vin/archive-photos", parseVinArchiveResult, env, signal, 1024 * 1024);
+}
+
+export function createVinArchivePhotoApiLookup(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  signal?: AbortSignal,
+): VinArchivePhotoLookup | undefined {
+  const transport = createApiTransport(
+    "/v1/vin/archive-photo",
+    env,
+    signal,
+    VIN_ARCHIVE_PHOTO_MAX_BYTES,
+    "image/jpeg, image/png, image/webp",
+  );
+  if (!transport) return undefined;
+  return async (value, callerSignal): Promise<VinArchivePhoto> => {
+    const request = parseVinArchivePhotoRequest(value);
+    const { bytes, contentType } = await transport(request, callerSignal);
+    const jpeg =
+      contentType === "image/jpeg" &&
+      bytes.length >= 3 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff;
+    const png =
+      contentType === "image/png" &&
+      bytes.length >= 8 &&
+      bytes[0] === 137 &&
+      bytes[1] === 80 &&
+      bytes[2] === 78 &&
+      bytes[3] === 71 &&
+      bytes[4] === 13 &&
+      bytes[5] === 10 &&
+      bytes[6] === 26 &&
+      bytes[7] === 10;
+    const webp =
+      contentType === "image/webp" &&
+      bytes.length >= 12 &&
+      bytes[0] === 82 &&
+      bytes[1] === 73 &&
+      bytes[2] === 70 &&
+      bytes[3] === 70 &&
+      bytes[8] === 87 &&
+      bytes[9] === 69 &&
+      bytes[10] === 66 &&
+      bytes[11] === 80;
+    if (!jpeg && !png && !webp) throw new Error("VIN API unavailable or returned an invalid photo");
+    return { bytes, content_type: contentType as VinArchivePhoto["content_type"] };
   };
 }

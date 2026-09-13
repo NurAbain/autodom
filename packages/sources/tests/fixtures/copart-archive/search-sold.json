@@ -1,0 +1,74 @@
+{
+  "returnCode": 1,
+  "returnCodeDesc": "Success",
+  "data": {
+    "query": {
+      "filter": {
+        "MISC": ["ps_vin_number:4JGFB4JB0LA163026"]
+      },
+      "page": 0,
+      "size": 20,
+      "watchListOnly": false,
+      "freeFormSearch": false,
+      "hideImages": false,
+      "defaultSort": false,
+      "reloadWatchListData": false,
+      "vanityKeyword": false,
+      "specificRowProvided": false
+    },
+    "results": {
+      "totalElements": 1,
+      "content": [
+        {
+          "driveStatus": false,
+          "soldToCurrentBuyer": false,
+          "hasV5n": false,
+          "showClaimForm": false,
+          "readyForReplayFlag": false,
+          "inspectedLot": false,
+          "otherGoodsLot": false,
+          "carFaxReportAvailable": false,
+          "npalot": false,
+          "lotYardSameAsKioskYard": false,
+          "pwlot": false,
+          "lotNumberStr": "52446376",
+          "ln": 52446376,
+          "hb": 0,
+          "ahb": 0,
+          "lbd": 0,
+          "ia": 0,
+          "ss": -1,
+          "bndc": "",
+          "lic": [],
+          "gr": "",
+          "myb": 0,
+          "ess": "",
+          "showSeller": false,
+          "sstpflg": false,
+          "ifs": false,
+          "pbf": false,
+          "crg": 0,
+          "ldu": "",
+          "pcf": false,
+          "btcf": false,
+          "tpfs": false,
+          "trf": false,
+          "csc": "UNKNOWN",
+          "mlf": false,
+          "fcd": false,
+          "cfx": false,
+          "hcfx": true,
+          "hideLaneItem": false,
+          "hideGridRow": false,
+          "isPWlot": false,
+          "isNPAlot": false,
+          "lspa": 0
+        }
+      ],
+      "facetFields": null,
+      "spellCheckList": null,
+      "suggestions": null,
+      "realTime": false
+    }
+  }
+}
