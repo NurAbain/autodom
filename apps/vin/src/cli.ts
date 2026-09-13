@@ -15,11 +15,13 @@ Usage: pnpm vin [serve|health] [--help]
   health    Probe the local /health endpoint with a five-second timeout
 
 serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters), explicit
-AUTODOM_VIN_PROVIDERS (carhistory,car365,nhtsa_vpic,autodev).
+AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev).
 Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
 free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
 not vehicle history. Auto.dev Free is capped at 1,000 calls/month; no paid upgrades.
+encar discovers public advertisement IDs through Carcheck and confirms full VIN,
+metadata and retained photos from official Encar pages; no complete history or sale is implied.
 Configured Korean providers run first. Decoders run only after all return not_found,
 or directly if no Korean provider is configured. Korean hits/errors skip both decoders.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
@@ -86,7 +88,9 @@ export async function main(
     const requestDelaySeconds = Number(delayText);
     if (!delayText.trim() || !Number.isFinite(requestDelaySeconds) || requestDelaySeconds < 0)
       throw new Error("AUTODOM_CRAWL_DELAY must be a non-negative number of seconds.");
-    const routes = providers.some((provider) => provider === "carhistory" || provider === "car365")
+    const routes = providers.some(
+      (provider) => provider === "carhistory" || provider === "car365" || provider === "encar",
+    )
       ? loadProxyRoutes(env)
       : [];
     service = new VinCheckService({

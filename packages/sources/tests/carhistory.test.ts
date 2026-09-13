@@ -41,7 +41,7 @@ function sessionWith(...responses: string[]): {
         requests.push({ path, options });
         const body = responses.shift();
         if (body === undefined) throw new Error("Unexpected extra provider request");
-        return { body, headers: new Headers() };
+        return { body, status: 200 };
       },
     },
   };

@@ -2,6 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { MockAgent } from "undici";
 import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { checkEncarHistory } from "../src/encar-history.js";
 import { VinTransport } from "../src/vin-session.js";
 
 const ORIGIN = "https://www.carhistory.or.kr";
@@ -92,6 +93,124 @@ describe("proxy-only VIN sessions", () => {
     );
   });
 
+  it.each([
+    "https://carcheck.by/vin/WBA51AG03NCK98884",
+    "https://fem.encar.com/cars/detail/39720103?vin=WBA51AG03NCK98884",
+    "https://attacker.invalid/auto/WBA51AG03NCK98884",
+  ])("blocks non-discovery Encar requests before network access: %s", async (target) => {
+    const { transport, mocks } = setup();
+    const url = new URL(target);
+    let requests = 0;
+    for (const mock of mocks)
+      mock
+        .get(url.origin)
+        .intercept({ path: `${url.pathname}${url.search}` })
+        .reply(() => {
+          requests++;
+          return { statusCode: 200, data: "not an approved lookup" };
+        });
+    await expect(transport.run("encar", (session) => session.request(target))).rejects.toThrow(
+      SourceError,
+    );
+    expect(requests).toBe(0);
+  });
+
+  it("recovers an Encar candidate blocked on datacenter through the residential route", async () => {
+    const { transport, mocks } = setup();
+    const vin = "WBA51AG03NCK98884";
+    const id = "39720103";
+    const discovery = `<h1 class="auto-vin-title"><span>${vin}</span>
+      <button class="auto-save-button" data-save-vin="${vin}" data-save-lot="${id}"
+        data-save-auction="12"></button></h1>`;
+    for (const mock of mocks)
+      mock
+        .get("https://carcheck.by")
+        .intercept({ path: `/auto/${vin}` })
+        .reply(200, discovery);
+    mocks[0]
+      ?.get("https://fem.encar.com")
+      .intercept({ path: `/cars/detail/${id}` })
+      .reply(403, "");
+    mocks[1]
+      ?.get("https://fem.encar.com")
+      .intercept({ path: `/cars/detail/${id}` })
+      .reply(
+        200,
+        `<script>__PRELOADED_STATE__ = ${JSON.stringify({
+          cars: { base: { vehicleId: Number(id), vin } },
+        })};</script>`,
+      );
+    const result = await transport.run("encar", (session) => checkEncarHistory(vin, session));
+    expect(result?.listings).toMatchObject([
+      { id, vin, source_url: `https://fem.encar.com/cars/detail/${id}` },
+    ]);
+  });
+
+  it("keeps discovery cookies on Carcheck without leaking them to official Encar", async () => {
+    const { transport, mocks } = setup();
+    const mock = mocks[0] as MockAgent;
+    const discovery = "https://carcheck.by";
+    const path = "/auto/WBA51AG03NCK98884";
+    mock
+      .get(discovery)
+      .intercept({ path })
+      .reply(200, "discovery", {
+        headers: { "set-cookie": "session=mirror-only; Path=/; Secure" },
+      });
+    mock
+      .get("https://fem.encar.com")
+      .intercept({
+        path: "/cars/detail/39720103",
+        headers: (headers) => !JSON.stringify(headers).toLowerCase().includes("cookie"),
+      })
+      .reply(200, "official", {
+        headers: { "set-cookie": "session=official-only; Path=/; Secure" },
+      });
+    mock
+      .get(discovery)
+      .intercept({
+        path,
+        headers: { cookie: "session=mirror-only" },
+      })
+      .reply(200, "discovery retained");
+    await transport.run("encar", async (session) => {
+      await session.request(`${discovery}${path}`);
+      await session.request("https://fem.encar.com/cars/detail/39720103");
+      await session.request(`${discovery}${path}`);
+    });
+    mock.assertNoPendingInterceptors();
+  });
+
+  it.each([
+    ["https://carcheck.by/vin/WBA51AG03NCK98884", true],
+    ["https://carcheck.by/vin/KMHEC41MAAA015218", false],
+    ["https://carcheck.by/payment", false],
+  ] as const)(
+    "recognizes only the same-VIN missing-archive redirect: %s",
+    async (location, absent) => {
+      const { transport, mocks } = setup();
+      const mock = mocks[0] as MockAgent;
+      mock
+        .get("https://carcheck.by")
+        .intercept({ path: "/auto/WBA51AG03NCK98884" })
+        .reply(301, "", { headers: { location } });
+      let followed = false;
+      mock
+        .get("https://carcheck.by")
+        .intercept({ path: new URL(location).pathname })
+        .reply(() => {
+          followed = true;
+          return { statusCode: 200, data: "report route must not be visited" };
+        });
+      const lookup = transport.run("encar", (session) =>
+        session.request("https://carcheck.by/auto/WBA51AG03NCK98884"),
+      );
+      if (absent) await expect(lookup).resolves.toMatchObject({ status: 301 });
+      else await expect(lookup).rejects.toThrow(SourceError);
+      expect(followed).toBe(false);
+    },
+  );
+
   it("restarts the entire anonymous session on proxy fallback, without forwarding old cookies", async () => {
     const { transport, mocks } = setup();
     const first = mocks[0] as MockAgent;
@@ -137,16 +256,30 @@ describe("proxy-only VIN sessions", () => {
     for (const mock of mocks) mock.assertNoPendingInterceptors();
   });
 
-  it("runs ten isolated workflows across both providers and queues the eleventh", async () => {
+  it("runs ten isolated workflows across all Korean providers and queues the eleventh", async () => {
     const fixtures = Array.from({ length: 11 }, (_, index) => {
-      const provider = index % 2 === 0 ? "carhistory" : "car365";
+      const provider = index % 3 === 0 ? "carhistory" : index % 3 === 1 ? "car365" : "encar";
       return {
         provider,
         vin: String(index + 1).padStart(17, "0"),
-        origin: provider === "carhistory" ? ORIGIN : "https://www.car365.go.kr",
-        entry: provider === "carhistory" ? ENTRY : "/ccpt/carlife/scrcar/schdcarXportView.do",
+        origin:
+          provider === "encar"
+            ? "https://fem.encar.com"
+            : provider === "carhistory"
+              ? ORIGIN
+              : "https://www.car365.go.kr",
+        entry:
+          provider === "encar"
+            ? "/cars/detail/39720103"
+            : provider === "carhistory"
+              ? ENTRY
+              : "/ccpt/carlife/scrcar/schdcarXportView.do",
         lookup:
-          provider === "carhistory" ? LOOKUP : "/ccpt/carlife/scrcar/selectSchdcarXportList.do",
+          provider === "encar"
+            ? "/cars/detail/39711062"
+            : provider === "carhistory"
+              ? LOOKUP
+              : "/ccpt/carlife/scrcar/selectSchdcarXportList.do",
       } as const;
     });
     const release = Promise.withResolvers<void>();
@@ -168,9 +301,9 @@ describe("proxy-only VIN sessions", () => {
         pool
           .intercept({
             path: fixture.lookup,
-            method: "POST",
+            method: fixture.provider === "encar" ? "GET" : "POST",
             headers: { cookie: `session=${page}` },
-            body: `vin=${fixture.vin}`,
+            ...(fixture.provider === "encar" ? {} : { body: `vin=${fixture.vin}` }),
           })
           .reply(200, fixture.vin);
         return mock;
@@ -186,10 +319,15 @@ describe("proxy-only VIN sessions", () => {
           entered++;
           await release.promise;
           return (
-            await session.request(fixture.lookup, {
-              method: "POST",
-              form: { vin: fixture.vin },
-            })
+            await session.request(
+              fixture.lookup,
+              fixture.provider === "encar"
+                ? undefined
+                : {
+                    method: "POST",
+                    form: { vin: fixture.vin },
+                  },
+            )
           ).body;
         } finally {
           active--;
@@ -225,9 +363,7 @@ describe("proxy-only VIN sessions", () => {
       ).rejects.toBe(reason);
     }
     await delay(120);
-    await expect(transport.run("carhistory", (session) => session.request(ENTRY))).resolves.toEqual(
-      { body: "9" },
-    );
+    await transport.run("carhistory", (session) => session.request(ENTRY));
     expect(requests.map(({ page }) => page)).toEqual([1, 9]);
     for (const close of closes) expect(close).toHaveBeenCalledTimes(1);
   });

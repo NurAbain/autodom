@@ -1,4 +1,9 @@
 import {
+  type EncarListing,
+  encarHistoryDiscoveryUrl,
+  encarListingUrl,
+  isEncarPhotoUrl,
+  normalizeVin,
   VIN_PROVIDERS,
   VIN_SOURCE_URLS,
   type VinCheckResult,
@@ -6,7 +11,7 @@ import {
 } from "@autodom/core/vin";
 
 export const VIN_DISCLOSURE =
-  "По вашему запросу VIN передаётся отдельному сервису Autodom. Сначала проверяем подключённые CarHistory и Car365 через настроенный прокси. Подключённые NHTSA vPIC и Auto.dev запрашиваем напрямую, только если все подключённые корейские источники ответили «не найдено»; если корейские источники отключены — сразу. При найденном VIN или ошибке корейской проверки эти декодеры не запрашиваем. Платный отчёт CarHistory не покупаем и не получаем; Car365 проверяет государственную экспортную запись. NHTSA даёт характеристики для рынка США, Auto.dev — глобальную расшифровку с неполным покрытием; это не история ДТП, пробега или владельцев. Auto.dev используется на бесплатном тарифе с лимитом. VIN не сохраняется в вашем поиске или профиле.";
+  "По вашему запросу VIN передаётся отдельному сервису Autodom. Сначала проверяем подключённые корейские источники через настроенный прокси: CarHistory, Car365 и историю объявлений Encar. Для Encar VIN передаётся Carcheck для поиска кандидатов, затем найденные объявления сверяются с полным VIN на официальном Encar. Подключённые NHTSA vPIC и Auto.dev запрашиваем напрямую, только если все подключённые корейские источники ответили «не найдено»; если корейские источники отключены — сразу. При найденном VIN или ошибке корейской проверки эти декодеры не запрашиваем. Платные отчёты не покупаем и не получаем; Car365 проверяет государственную экспортную запись. Google — только внешний поиск по нажатию, без автоматических запросов. NHTSA даёт характеристики для рынка США, Auto.dev — глобальную расшифровку с неполным покрытием; это не история ДТП, пробега или владельцев. Auto.dev используется на бесплатном тарифе с лимитом. VIN не сохраняется в вашем поиске или профиле.";
 export const VIN_NOT_ENABLED = "Проверка VIN не подключена. Запрос провайдерам не отправлен.";
 export const VIN_HELP = `Отправьте /vin и VIN: 17 латинских букв и цифр, без I, O, Q. Например: /vin KMHDU41DBAU123456.\n\n${VIN_DISCLOSURE}`;
 export const VIN_CAUTION =
@@ -21,9 +26,67 @@ export const VIN_PREMIUM_DESCRIPTION =
 export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
   carhistory: "Корея · CarHistory · наличие отчёта",
   car365: "Корея · Car365 · экспортная запись",
+  encar: "Корея · Encar · история объявлений",
   nhtsa_vpic: "NHTSA vPIC · США, характеристики",
   autodev: "Auto.dev · глобальные характеристики",
 };
+
+export function confirmedEncarListings(result: VinCheckResult): EncarListing[] {
+  const history = result.encar?.data;
+  if (
+    result.encar?.status !== "available" ||
+    !history ||
+    normalizeVin(result.vin) !== result.vin ||
+    history.vin !== result.vin
+  )
+    return [];
+  return history.listings.filter(
+    (listing) => listing.vin === result.vin && encarListingUrl(listing.id) !== null,
+  );
+}
+
+export function encarHistorySummary(result: VinCheckResult): string {
+  const listings = confirmedEncarListings(result);
+  if (!listings.length)
+    return "Объявления с подтверждённым полным VIN недоступны. Результат неизвестен; это не отсутствие истории.";
+  return [
+    `Найдено объявлений с подтверждённым полным VIN: ${listings.length}. Это не полный архив Encar.`,
+    ...(result.encar?.data?.partial
+      ? [
+          "Частичный результат: часть найденных кандидатов не подтверждена или достигнут лимит проверки. Подтверждённые объявления показаны ниже.",
+        ]
+      : []),
+    "Данные и фотографии относятся к этим объявлениям, а не подтверждают текущее состояние автомобиля. Даты — местные дата и время источника, без определения часового пояса; это не даты продажи.",
+  ].join("\n");
+}
+
+export function encarListingFacts(listing: EncarListing): [string, string][] {
+  const facts: [string, string][] = [];
+  if (listing.model) facts.push(["Модель в объявлении", listing.model]);
+  facts.push([
+    "Записанный пробег (не текущий реальный)",
+    listing.mileage_km === null ? "Неизвестен" : `${listing.mileage_km.toLocaleString("ru-RU")} км`,
+  ]);
+  facts.push([
+    "Статус объявления",
+    listing.advertisement_status === "SOLD"
+      ? "Снято / продано по данным Encar (SOLD); совершённая сделка не подтверждена"
+      : listing.advertisement_status === "ADVERTISE"
+        ? "Опубликовано по данным Encar (ADVERTISE); актуальность предложения уточняйте у источника"
+        : "Неизвестен",
+  ]);
+  if (listing.created_at) facts.push(["Создано у источника", listing.created_at]);
+  if (listing.first_advertised_at)
+    facts.push(["Впервые опубликовано у источника", listing.first_advertised_at]);
+  if (listing.modified_at) facts.push(["Изменено у источника", listing.modified_at]);
+  if (listing.re_registered !== null)
+    facts.push(["Повторное размещение по данным Encar", listing.re_registered ? "Да" : "Нет"]);
+  facts.push([
+    "Фотографии объявления",
+    `${listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)).length} · просмотр в MiniApp или у источника`,
+  ]);
+  return facts;
+}
 
 export function vinSourceText(provider: VinProvider, result: VinCheckResult): string {
   const observation = result[provider];
@@ -42,14 +105,30 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
       description =
         provider === "carhistory"
           ? "Наличие полного отчёта не подтверждено. Может понадобиться прежний корейский госномер."
-          : provider === "nhtsa_vpic" || provider === "autodev"
-            ? "Декодер не смог установить характеристики для этого VIN. Это не подтверждает отсутствие ДТП или других событий в истории."
-            : "Экспортная запись с пробегом не найдена. Это не означает отсутствие повреждений.";
+          : provider === "encar"
+            ? "В публичном поиске Carcheck кандидаты Encar не найдены. Это не означает, что автомобиль никогда не размещался на Encar, и не подтверждает отсутствие событий в истории."
+            : provider === "nhtsa_vpic" || provider === "autodev"
+              ? "Декодер не смог установить характеристики для этого VIN. Это не подтверждает отсутствие ДТП или других событий в истории."
+              : "Экспортная запись с пробегом не найдена. Это не означает отсутствие повреждений.";
       break;
     case "available": {
       if (provider === "carhistory") {
         description =
           "Провайдер подтвердил наличие платного отчёта. Сам отчёт не получен и не куплен; ДТП, ремонт и владельцы пока неизвестны.";
+        break;
+      }
+      if (provider === "encar") {
+        description = [
+          encarHistorySummary(result),
+          `Поиск кандидатов (Carcheck): ${encarHistoryDiscoveryUrl(result.vin)}`,
+          ...confirmedEncarListings(result).map((listing) =>
+            [
+              `Объявление Encar №${listing.id} · VIN ${listing.vin}`,
+              ...encarListingFacts(listing).map(([label, value]) => `${label}: ${value}`),
+              `Официальное объявление и фотографии: ${encarListingUrl(listing.id)}`,
+            ].join("\n"),
+          ),
+        ].join("\n\n");
         break;
       }
       if (provider === "nhtsa_vpic") {

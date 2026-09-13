@@ -1,5 +1,8 @@
 import type { PaymentOrder } from "@autodom/core/payments";
 import {
+  encarHistoryDiscoveryUrl,
+  encarListingUrl,
+  isEncarPhotoUrl,
   normalizeVin,
   VIN_PROVIDERS,
   VIN_SOURCE_URLS,
@@ -11,6 +14,9 @@ import { KOREAN_REPORT_EXAMPLE } from "../src/korean-report-example.js";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
 import { PAYMENT_PRIVACY_NOTICE, paymentOrderStatus } from "../src/payment-text.js";
 import {
+  confirmedEncarListings,
+  encarHistorySummary,
+  encarListingFacts,
   VIN_CAUTION,
   VIN_DISCLOSURE,
   VIN_GOOGLE_SEARCH_LABEL,
@@ -508,10 +514,10 @@ function showDialogue(view: "buy" | "sell"): void {
   void send(view === "buy" ? "/buy" : "/sell");
 }
 
-function gallery(car: MiniAppCar): HTMLElement {
+function gallery(title: string, photoUrls: readonly string[]): HTMLElement {
   const section = element("section", "gallery");
-  section.setAttribute("aria-label", "Фотографии автомобиля");
-  const photos = car.photoUrls.map(safeUrl).filter((url): url is string => url !== null);
+  section.setAttribute("aria-label", `Фотографии: ${title}`);
+  const photos = photoUrls.map(safeUrl).filter((url): url is string => url !== null);
   if (!photos.length) {
     section.append(element("p", "photo-empty", "Фотографии не предоставлены источником."));
     return section;
@@ -538,9 +544,10 @@ function gallery(car: MiniAppCar): HTMLElement {
   );
   function renderPhoto(): void {
     const image = element("img");
-    image.alt = `${car.title} — фото ${selected + 1}`;
+    image.alt = `${title} — фото ${selected + 1}`;
     image.referrerPolicy = "no-referrer";
     image.decoding = "async";
+    image.loading = "lazy";
     image.src = photos[selected]!;
     image.addEventListener(
       "error",
@@ -576,7 +583,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element(
       "p",
       "muted",
-      "Проверим наличие отчёта CarHistory и экспортную запись Car365. Полную историю бесплатно не получаем.",
+      "Проверим наличие отчёта CarHistory, экспортную запись Car365 и найденные объявления Encar с подтверждённым VIN. Полную историю бесплатно не получаем.",
     ),
   );
   if (car) {
@@ -685,7 +692,13 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             "badge",
             provider === "carhistory" && observation.status === "available"
               ? "Отчёт доступен у провайдера"
-              : statuses[observation.status],
+              : provider === "encar" && observation.status === "available"
+                ? confirmedEncarListings(result).length
+                  ? result.encar?.data?.partial
+                    ? "Объявления найдены · частичный результат"
+                    : "Подтверждённые объявления найдены"
+                  : statuses.unavailable
+                : statuses[observation.status],
           ),
         );
         if (provider === "car365" && observation.status === "available") {
@@ -722,6 +735,45 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
                   ? "Внимание: в записи указана полная гибель автомобиля."
                   : "Полная гибель в записи не указана. Это не подтверждает отсутствие ДТП или повреждений.",
             ),
+            element(
+              "p",
+              "footnote",
+              observation.checked_at === null
+                ? "Время проверки неизвестно."
+                : `Проверено: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(observation.checked_at * 1000))} · Бишкек`,
+            ),
+          );
+        } else if (provider === "encar" && observation.status === "available") {
+          section.append(element("p", "vin-observation", encarHistorySummary(result)));
+          section.append(
+            sourceLink(encarHistoryDiscoveryUrl(result.vin), "Поиск кандидатов: Carcheck"),
+          );
+          for (const listing of confirmedEncarListings(result)) {
+            const advertisement = element("article", "encar-listing");
+            advertisement.append(
+              element("h4", "", `Объявление Encar №${listing.id}`),
+              element("p", "footnote", `Подтверждённый VIN: ${listing.vin}`),
+            );
+            const facts = element("dl", "facts");
+            for (const [label, value] of encarListingFacts(listing)) {
+              const fact = element("div", "fact");
+              fact.append(element("dt", "", label), element("dd", "", value));
+              facts.append(fact);
+            }
+            advertisement.append(
+              facts,
+              gallery(
+                `Encar №${listing.id} · ${listing.model ?? listing.vin}`,
+                listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)),
+              ),
+              sourceLink(
+                encarListingUrl(listing.id),
+                "Открыть официальное объявление и фотографии",
+              ),
+            );
+            section.append(advertisement);
+          }
+          section.append(
             element(
               "p",
               "footnote",
@@ -767,7 +819,7 @@ function showCar(car: MiniAppCar): void {
     element("h1", "", car.title),
     element("p", "price", car.price),
   );
-  main.append(heading, gallery(car));
+  main.append(heading, gallery(car.title, car.photoUrls));
   const facts = element("dl", "facts");
   for (const [label, value] of [
     ["Год", car.year === null ? "Не указан" : String(car.year)],

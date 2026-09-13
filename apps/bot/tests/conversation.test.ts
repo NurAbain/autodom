@@ -786,13 +786,38 @@ describe("grammY transport boundaries", () => {
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
   });
-  it("delivers long decoder results within Telegram limits without parsing source text as markup", async () => {
+  it("delivers long decoder and Encar results within Telegram limits without losing ads or parsing source markup", async () => {
     const literal = "<literal & data>".repeat(32);
     const { bot, calls } = telegram(async (vin) => ({
       vin,
       checked_at: 1_789_000_000,
       carhistory: { status: "disabled", source_url: "", checked_at: null },
       car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+      encar: {
+        status: "available",
+        source_url: "https://fem.encar.com",
+        checked_at: 1_789_000_000,
+        data: {
+          vin,
+          discovery_url: `https://carcheck.by/auto/${vin}`,
+          partial: true,
+          listings: Array.from({ length: 5 }, (_, index) => ({
+            id: String(39720103 + index),
+            vin,
+            source_url: `https://fem.encar.com/cars/detail/${39720103 + index}`,
+            model: `Ad ${index}: ${"<Encar & record>".repeat(20)}`,
+            mileage_km: 10000 + index,
+            advertisement_status: "SOLD" as const,
+            created_at: `2024-05-0${index + 1}T11:12:13`,
+            first_advertised_at: null,
+            modified_at: null,
+            re_registered: false,
+            photo_urls: [
+              `https://ci.encar.com/carpicture/carpicture07/pic3972/${39720103 + index}_001.jpg`,
+            ],
+          })),
+        },
+      },
       autodev: {
         status: "available",
         source_url: "https://docs.auto.dev/v2/products/vin-decode",
@@ -829,6 +854,14 @@ describe("grammY transport boundaries", () => {
     const html = sent.map((call) => String(call.payload.text)).join("");
     expect(html).not.toContain("<literal");
     expect(html.match(/&lt;literal &amp; data&gt;/g)).toHaveLength(32 * 8);
+    expect(html.match(/&lt;Encar &amp; record&gt;/g)).toHaveLength(5 * 20);
+    for (let index = 0; index < 5; index += 1) {
+      expect(html).toContain(`https://fem.encar.com/cars/detail/${39720103 + index}`);
+      expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
+    }
+    expect(
+      calls.some((call) => call.method === "sendPhoto" || call.method === "sendMediaGroup"),
+    ).toBe(false);
     expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
     expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
       inline_keyboard: expect.arrayContaining([

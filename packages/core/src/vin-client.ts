@@ -1,5 +1,10 @@
 import { z } from "zod";
 import {
+  ENCAR_HISTORY_MAX_LISTINGS,
+  ENCAR_HISTORY_MAX_PHOTOS,
+  encarHistoryDiscoveryUrl,
+  encarListingUrl,
+  isEncarPhotoUrl,
   normalizeVin,
   VIN_PROVIDERS,
   VIN_SOURCE_URLS,
@@ -46,6 +51,45 @@ const autoDevRecord = z
     ambiguous: z.boolean(),
   })
   .strict();
+const encarListing = z
+  .object({
+    id: z.string().regex(/^[1-9]\d{0,9}$/u),
+    vin: z.string(),
+    source_url: z.string().max(128),
+    model: z.string().max(512).nullable(),
+    mileage_km: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    advertisement_status: z.enum(["ADVERTISE", "SOLD"]).nullable(),
+    created_at: z.iso.datetime({ local: true }).nullable(),
+    first_advertised_at: z.iso.datetime({ local: true }).nullable(),
+    modified_at: z.iso.datetime({ local: true }).nullable(),
+    re_registered: z.boolean().nullable(),
+    photo_urls: z.array(z.string().max(256)).max(ENCAR_HISTORY_MAX_PHOTOS),
+  })
+  .strict()
+  .superRefine((listing, context) => {
+    if (
+      listing.source_url !== encarListingUrl(listing.id) ||
+      listing.photo_urls.some((url) => !isEncarPhotoUrl(url, listing.id)) ||
+      new Set(listing.photo_urls).size !== listing.photo_urls.length
+    )
+      context.addIssue({ code: "custom", message: "Untrusted Encar advertisement links" });
+  });
+const encarRecord = z
+  .object({
+    vin: z.string(),
+    discovery_url: z.string().max(128),
+    listings: z.array(encarListing).min(1).max(ENCAR_HISTORY_MAX_LISTINGS),
+    partial: z.boolean(),
+  })
+  .strict()
+  .superRefine((history, context) => {
+    if (
+      history.discovery_url !== encarHistoryDiscoveryUrl(history.vin) ||
+      history.listings.some((listing) => listing.vin !== history.vin) ||
+      new Set(history.listings.map((listing) => listing.id)).size !== history.listings.length
+    )
+      context.addIssue({ code: "custom", message: "Encar history identity mismatch" });
+  });
 const resultSchema = z
   .object({
     vin: z.string(),
@@ -54,6 +98,10 @@ const resultSchema = z
     car365: observation
       .extend({ source_url: z.literal(VIN_SOURCE_URLS.car365), data: record.nullable() })
       .strict(),
+    encar: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.encar), data: encarRecord.nullable() })
+      .strict()
+      .optional(),
     nhtsa_vpic: observation
       .extend({ source_url: z.literal(VIN_SOURCE_URLS.nhtsa_vpic), data: nhtsaRecord.nullable() })
       .strict()
