@@ -1,0 +1,28 @@
+# Merge these entries into the existing Prometheus configuration.
+# This is an additive fragment, NOT a replacement for global Domcom jobs.
+# Prometheus must share the private Docker network with these aliases.
+scrape_configs:
+  - job_name: autodom-bot
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['autodom-bot-metrics:9901']
+        labels: {application: autodom, role: bot}
+  - job_name: autodom-worker
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['autodom-worker-metrics:9901']
+        labels: {application: autodom, role: worker}
+  - job_name: autodom-vin
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['autodom-vin-api:8080']
+        labels: {application: autodom, role: vin}
+rule_files:
+  # Mount the rule file here or adjust this path in the merged configuration.
+  - /etc/prometheus/autodom.rules.yml

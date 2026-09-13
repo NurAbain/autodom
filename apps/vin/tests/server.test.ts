@@ -81,7 +81,180 @@ function post(url: string, body = JSON.stringify({ vin }), authorization = `Bear
   });
 }
 
+function sample(
+  text: string,
+  name: string,
+  labels: Record<string, string> = {},
+): number | undefined {
+  const line = text
+    .split("\n")
+    .find(
+      (line) =>
+        line.startsWith(`${name}{`) &&
+        Object.entries(labels).every(([key, value]) => line.includes(`${key}="${value}"`)),
+    );
+  return line ? Number(line.slice(line.lastIndexOf(" ") + 1)) : undefined;
+}
+
 describe("private VIN API", () => {
+  it("scrapes without authentication and bounds HTTP and returned observation labels", async () => {
+    let calls = 0;
+    const archiveResult = disabledVinArchiveResult(vin);
+    const { url } = await start(
+      async () => {
+        calls++;
+        return result;
+      },
+      1,
+      async () => {
+        calls++;
+        return archiveResult;
+      },
+    );
+    const initial = await fetch(`${url}/metrics`);
+    expect(initial.status).toBe(200);
+    expect(initial.headers.get("content-type")).toContain("text/plain");
+    expect(sample(await initial.text(), "autodom_vin_in_flight")).toBe(0);
+    expect(calls).toBe(0);
+    for (const path of ["/v1/vin/check", "/v1/vin/archive-photos", "/v1/vin/archive-photo"]) {
+      expect(
+        (await fetch(`${url}${path}`, { method: "POST", body: JSON.stringify({ vin }) })).status,
+      ).toBe(401);
+    }
+    expect(calls).toBe(0);
+    expect((await fetch(`${url}/${vin}?token=${token}`, { method: "DELETE" })).status).toBe(400);
+    expect((await post(url)).status).toBe(200);
+    expect(
+      (
+        await fetch(`${url}/v1/vin/archive-photos`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ vin }),
+        })
+      ).status,
+    ).toBe(200);
+    const text = await (await fetch(`${url}/metrics`)).text();
+    expect(calls).toBe(2);
+    expect(text).not.toContain(vin);
+    expect(text).not.toContain(token);
+    expect(text).not.toContain(VIN_SOURCE_URLS.carhistory);
+    expect(text).not.toContain('provider="nhtsa_vpic"');
+    expect(text).not.toContain('provider="autodev"');
+    expect(
+      sample(text, "autodom_http_requests_total", {
+        route: "unmatched",
+        method: "other",
+        status: "400",
+      }),
+    ).toBe(1);
+    expect(
+      sample(text, "autodom_http_requests_total", {
+        route: "/v1/vin/check",
+        method: "POST",
+        status: "401",
+      }),
+    ).toBe(1);
+    expect(
+      sample(text, "autodom_http_requests_total", {
+        route: "/v1/vin/check",
+        method: "POST",
+        status: "200",
+      }),
+    ).toBe(1);
+    expect(
+      sample(text, "autodom_http_request_duration_seconds_count", {
+        route: "/v1/vin/check",
+        method: "POST",
+        status: "200",
+      }),
+    ).toBe(1);
+    expect(
+      sample(text, "autodom_vin_provider_observations_total", {
+        provider: "carhistory",
+        status: "unavailable",
+      }),
+    ).toBe(1);
+    expect(
+      sample(text, "autodom_vin_provider_observations_total", {
+        provider: "car365",
+        status: "not_found",
+      }),
+    ).toBe(1);
+    expect(
+      sample(text, "autodom_vin_provider_observations_total", {
+        provider: "carway",
+        status: "disabled",
+      }),
+    ).toBe(1);
+  });
+
+  it("keeps scrapes outside capacity and counts disconnects once while cancelled work settles", async () => {
+    const entered = Promise.withResolvers<void>();
+    const cancelled = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<VinCheckResult>();
+    let calls = 0;
+    const { url } = await start(async (_value, signal) => {
+      calls++;
+      signal?.addEventListener("abort", () => cancelled.resolve(), { once: true });
+      entered.resolve();
+      return release.promise;
+    }, 1);
+    const request = httpRequest(`${url}/v1/vin/check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    });
+    request.on("error", () => {
+      /* Expected client disconnect. */
+    });
+    request.end(JSON.stringify({ vin }));
+    try {
+      await entered.promise;
+      const busy = await fetch(`${url}/metrics`);
+      expect(busy.status).toBe(200);
+      const busyText = await busy.text();
+      expect(sample(busyText, "autodom_vin_in_flight")).toBe(1);
+      expect(sample(busyText, "autodom_vin_max_in_flight")).toBe(1);
+      request.destroy();
+      await cancelled.promise;
+      expect((await post(url)).status).toBe(429);
+      const cancelledText = await (await fetch(`${url}/metrics`)).text();
+      expect(sample(cancelledText, "autodom_vin_in_flight")).toBe(1);
+      expect(
+        sample(cancelledText, "autodom_http_requests_total", {
+          route: "/v1/vin/check",
+          method: "POST",
+          status: "aborted",
+        }),
+      ).toBe(1);
+      expect(
+        sample(cancelledText, "autodom_http_request_duration_seconds_count", {
+          route: "/v1/vin/check",
+          method: "POST",
+          status: "aborted",
+        }),
+      ).toBe(1);
+      expect(calls).toBe(1);
+      release.resolve(result);
+      await expect
+        .poll(async () =>
+          sample(await (await fetch(`${url}/metrics`)).text(), "autodom_vin_in_flight"),
+        )
+        .toBe(0);
+      expect((await post(url)).status).toBe(200);
+      const settledText = await (await fetch(`${url}/metrics`)).text();
+      expect(
+        sample(settledText, "autodom_http_requests_total", {
+          route: "/v1/vin/check",
+          method: "POST",
+          status: "aborted",
+        }),
+      ).toBe(1);
+    } finally {
+      request.destroy();
+      release.resolve(result);
+    }
+  });
+
   it("rejects authentication, invalid bodies and query parameters before invoking providers", async () => {
     let calls = 0;
     const { url } = await start(async () => {

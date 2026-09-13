@@ -20,6 +20,9 @@ services:
     mem_limit: 512m
     cpus: 1.0
     command: [serve]
+    labels:
+      io.autodom.application: autodom
+      io.autodom.role: worker
     environment:
       AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:-}
       AUTODOM_REDIS_URL: ${AUTODOM_REDIS_URL:-}

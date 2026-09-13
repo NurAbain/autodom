@@ -1,0 +1,17 @@
+apiVersion: 1
+
+# Add alongside existing providers; do not replace Domcom's default.yml.
+# Mount deploy/grafana/dashboards at /var/lib/grafana/autodom-dashboards.
+# Reuses existing prometheus/loki datasource UIDs; dashboard selectors allow others.
+providers:
+  - name: Autodom Dashboards
+    orgId: 1
+    folder: Autodom
+    folderUid: autodom
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/autodom-dashboards
+      foldersFromFilesStructure: false

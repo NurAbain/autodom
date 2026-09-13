@@ -144,3 +144,270 @@ tests:
         exp_alerts:
           - exp_labels: {application: autodom, role: bot, job: autodom-bot, instance: 'bot:9901', severity: critical}
             exp_annotations: {summary: 'Autodom notification monitor heartbeat is stale'}
+  - name: VIN missing target retains application and role after pending boundary
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AutodomVinTargetMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomVinTargetMissing
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "vin", "job": "autodom-vin", "severity": "critical"}
+            exp_annotations:
+              summary: "Autodom VIN scrape job has no target series"
+              description: "Check the additive autodom-vin scrape job and private autodom-vin-api:8080 network alias. Keep check/archive/photo authentication enabled."
+              runbook_url: "docs/monitoring.md#target-health"
+  - name: VIN configured but down is not missing and recovers
+    interval: 1m
+    input_series:
+      - series: 'up{application="autodom",role="vin",job="autodom-vin",instance="vin:8080"}'
+        values: '0+0x2 1+0x3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AutodomTargetDown
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomTargetDown
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "vin", "job": "autodom-vin", "severity": "critical", "instance": "vin:8080"}
+            exp_annotations:
+              summary: "Autodom metrics target cannot be scraped"
+      - eval_time: 2m
+        alertname: AutodomVinTargetMissing
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: AutodomTargetDown
+        exp_alerts: []
+  - name: HTTP high ratio requires volume and recovers after errors stop
+    interval: 1m
+    input_series:
+      - series: 'autodom_http_requests_total{application="autodom",role="bot",job="autodom-bot",status="500",route="/miniapp/api/dialogue",method="POST"}'
+        values: '0+4x20 80+0x20'
+      - series: 'autodom_http_requests_total{application="autodom",role="bot",job="autodom-bot",status="200",route="/miniapp/api/dialogue",method="POST"}'
+        values: '0+36x40'
+      - series: 'autodom_http_requests_total{application="autodom",role="vin",job="autodom-vin",status="500",route="/v1/vin/check",method="POST"}'
+        values: '0+1x40'
+      - series: 'autodom_http_requests_total{application="autodom",role="bot",job="autodom-bot",status="200",route="/health",method="GET"}'
+        values: '0+10000x40'
+      - series: 'autodom_http_requests_total{application="autodom",role="vin",job="autodom-vin",status="200",route="/metrics",method="GET"}'
+        values: '0+10000x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AutodomHttpServerErrors
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AutodomHttpServerErrors
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "bot", "job": "autodom-bot", "severity": "warning"}
+            exp_annotations:
+              summary: "Autodom HTTP service has sustained server errors"
+              description: "More than 5% API HTTP 5xx responses with at least 100 API requests per 10 minutes for 5 minutes. Health, assets and scrapes are excluded. Inspect normalized routes and private service logs; do not trigger paid VIN checks to diagnose."
+              runbook_url: "docs/monitoring.md#http-errors"
+      - eval_time: 40m
+        alertname: AutodomHttpServerErrors
+        exp_alerts: []
+  - name: HTTP exactly five percent errors does not alert
+    interval: 1m
+    input_series:
+      - series: 'autodom_http_requests_total{application="autodom",role="bot",job="autodom-bot",status="500",route="/miniapp/api/dialogue",method="POST"}'
+        values: '0+1x30'
+      - series: 'autodom_http_requests_total{application="autodom",role="bot",job="autodom-bot",status="200",route="/miniapp/api/dialogue",method="POST"}'
+        values: '0+19x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AutodomHttpServerErrors
+        exp_alerts: []
+  - name: Reachable worker missing queue sampler is not silently healthy
+    interval: 1m
+    input_series:
+      - series: 'up{application="autodom",role="worker",job="autodom-worker",instance="worker:9901"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AutodomQueueCollectionFailed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomQueueCollectionFailed
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "worker", "job": "autodom-worker", "severity": "critical", "instance": "worker:9901"}
+            exp_annotations:
+              summary: "Autodom cannot collect its BullMQ monitoring snapshot"
+              description: "Queue sampling failed or its health metric is missing on a reachable worker. Check Redis and sampling timeouts; retained queue depths are not current health."
+              runbook_url: "docs/monitoring.md#queue-snapshots"
+      - eval_time: 1m
+        alertname: AutodomQueueCollectionStale
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomQueueCollectionStale
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "worker", "job": "autodom-worker", "severity": "critical", "instance": "worker:9901"}
+            exp_annotations:
+              summary: "Autodom BullMQ monitoring snapshot is stale"
+              description: "No complete queue snapshot in over 120 seconds, or its timestamp is missing. Check Redis reachability and the worker sampler before trusting queue depths."
+              runbook_url: "docs/monitoring.md#queue-snapshots"
+  - name: Queue failure and frozen timestamp pending boundaries and recovery
+    interval: 1m
+    input_series:
+      - series: 'autodom_queue_collection_success{application="autodom",role="worker",job="autodom-worker",instance="worker:9901"}'
+        values: '0+0x5 1+0x4'
+      - series: 'autodom_queue_collection_timestamp_seconds{application="autodom",role="worker",job="autodom-worker",instance="worker:9901"}'
+        values: '0+0x5 360+60x4'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AutodomQueueCollectionFailed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomQueueCollectionFailed
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "worker", "job": "autodom-worker", "severity": "critical", "instance": "worker:9901"}
+            exp_annotations:
+              summary: "Autodom cannot collect its BullMQ monitoring snapshot"
+              description: "Queue sampling failed or its health metric is missing on a reachable worker. Check Redis and sampling timeouts; retained queue depths are not current health."
+              runbook_url: "docs/monitoring.md#queue-snapshots"
+      - eval_time: 4m
+        alertname: AutodomQueueCollectionStale
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: AutodomQueueCollectionStale
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "worker", "job": "autodom-worker", "severity": "critical", "instance": "worker:9901"}
+            exp_annotations:
+              summary: "Autodom BullMQ monitoring snapshot is stale"
+              description: "No complete queue snapshot in over 120 seconds, or its timestamp is missing. Check Redis reachability and the worker sampler before trusting queue depths."
+              runbook_url: "docs/monitoring.md#queue-snapshots"
+      - eval_time: 6m
+        alertname: AutodomQueueCollectionFailed
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AutodomQueueCollectionStale
+        exp_alerts: []
+  - name: Waiting backlog excludes disabled sources exact threshold and delayed jobs
+    interval: 1m
+    input_series:
+      - series: 'autodom_queue_collection_success{application="autodom",role="worker",job="autodom-worker",instance="worker:9901"}'
+        values: '1+0x25'
+      - series: 'autodom_queue_collection_timestamp_seconds{application="autodom",role="worker",job="autodom-worker",instance="worker:9901"}'
+        values: '0+60x25'
+      - series: 'autodom_source_enabled{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="mashina.kg"}'
+        values: '1+0x25'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="mashina.kg",state="waiting"}'
+        values: '101+0x19 0+0x5'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="mashina.kg",state="delayed"}'
+        values: '500+0x25'
+      - series: 'autodom_source_enabled{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="bid.cars"}'
+        values: '0+0x25'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="bid.cars",state="waiting"}'
+        values: '101+0x25'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="bid.cars",state="delayed"}'
+        values: '500+0x25'
+      - series: 'autodom_source_enabled{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="encar"}'
+        values: '1+0x25'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="encar",state="waiting"}'
+        values: '100+0x25'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="worker:9901",source="encar",state="delayed"}'
+        values: '500+0x25'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: AutodomQueueBacklog
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AutodomQueueBacklog
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "worker", "job": "autodom-worker", "severity": "warning", "instance": "worker:9901", "source": "mashina.kg"}
+            exp_annotations:
+              summary: "Enabled Autodom source has a sustained waiting backlog"
+              description: "More than 100 waiting jobs for 15 minutes in a healthy, fresh snapshot. Inspect job durations and failures; delayed and paused jobs are not counted. Do not increase source quotas automatically."
+              runbook_url: "docs/monitoring.md#queue-backlog"
+      - eval_time: 20m
+        alertname: AutodomQueueBacklog
+        exp_alerts: []
+  - name: Unhealthy or frozen queue snapshots do not page retained backlog
+    interval: 1m
+    input_series:
+      - series: 'autodom_queue_collection_success{application="autodom",role="worker",job="autodom-worker",instance="failed:9901"}'
+        values: '0+0x30'
+      - series: 'autodom_queue_collection_timestamp_seconds{application="autodom",role="worker",job="autodom-worker",instance="failed:9901"}'
+        values: '0+60x30'
+      - series: 'autodom_source_enabled{application="autodom",role="worker",job="autodom-worker",instance="failed:9901",source="mashina.kg"}'
+        values: '1+0x30'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="failed:9901",source="mashina.kg",state="waiting"}'
+        values: '101+0x30'
+      - series: 'autodom_queue_collection_success{application="autodom",role="worker",job="autodom-worker",instance="stale:9901"}'
+        values: '1+0x30'
+      - series: 'autodom_queue_collection_timestamp_seconds{application="autodom",role="worker",job="autodom-worker",instance="stale:9901"}'
+        values: '0+0x30'
+      - series: 'autodom_source_enabled{application="autodom",role="worker",job="autodom-worker",instance="stale:9901",source="mashina.kg"}'
+        values: '1+0x30'
+      - series: 'autodom_collection_queue_jobs{application="autodom",role="worker",job="autodom-worker",instance="stale:9901",source="mashina.kg",state="waiting"}'
+        values: '101+0x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AutodomQueueBacklog
+        exp_alerts: []
+  - name: Event loop threshold sustained boundary and recovery
+    interval: 1m
+    input_series:
+      - series: 'autodom_nodejs_eventloop_lag_p99_seconds{application="autodom",role="bot",job="autodom-bot",instance="bot:9901"}'
+        values: '0.6+0x10 0.1+0x5'
+      - series: 'autodom_nodejs_eventloop_lag_p99_seconds{application="autodom",role="vin",job="autodom-vin",instance="vin:8080"}'
+        values: '0.5+0x15'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: AutodomEventLoopLag
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AutodomEventLoopLag
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "bot", "job": "autodom-bot", "severity": "warning", "instance": "bot:9901"}
+            exp_annotations:
+              summary: "Autodom Node.js event loop has sustained high lag"
+              description: "Event-loop p99 exceeds 500 ms for 10 minutes. Correlate CPU, heap, job duration and HTTP latency; the collector percentile covers the interval since the previous scrape."
+              runbook_url: "docs/monitoring.md#event-loop"
+      - eval_time: 11m
+        alertname: AutodomEventLoopLag
+        exp_alerts: []
+  - name: Notification retries alert with sustained volume
+    interval: 1m
+    input_series:
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="retry"}'
+        values: '0+2x20'
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="sent"}'
+        values: '0+8x20'
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="blocked"}'
+        values: '0+1000x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: AutodomNotificationErrors
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: AutodomNotificationErrors
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "bot", "job": "autodom-bot", "severity": "warning"}
+            exp_annotations:
+              summary: "Autodom notification batches have sustained delivery errors"
+              description: "More than 10% retry or error outcomes with at least 20 non-blocked batch delivery attempts per 10 minutes for 5 minutes. Check Telegram throttling and transport; blocked recipients are excluded."
+              runbook_url: "docs/monitoring.md#notification-errors"
+  - name: Sparse notification errors do not page
+    interval: 1m
+    input_series:
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="error"}'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AutodomNotificationErrors
+        exp_alerts: []
+  - name: Exactly ten percent notification errors do not page
+    interval: 1m
+    input_series:
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="error"}'
+        values: '0+1x20'
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="sent"}'
+        values: '0+9x20'
+      - series: 'autodom_notification_deliveries_total{application="autodom",role="bot",job="autodom-bot",outcome="blocked"}'
+        values: '0+5x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: AutodomNotificationErrors
+        exp_alerts: []

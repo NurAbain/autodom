@@ -7,6 +7,7 @@ import {
   matches,
   type Profile,
 } from "@autodom/core";
+import type { Metrics } from "@autodom/runtime/metrics";
 import { GrammyError, HttpError } from "grammy";
 import { listingReplies, menu, packReplies, type Reply } from "./conversation.js";
 
@@ -36,6 +37,7 @@ export async function notifyOnce(
   store: MonitorStore,
   send: SendReplies,
   signal?: AbortSignal,
+  metrics?: Pick<Metrics, "recordNotificationDelivery">,
 ): Promise<number> {
   let delivered = 0;
   for (const candidate of await store.monitoringProfiles()) {
@@ -100,7 +102,20 @@ export async function notifyOnce(
           if (count > shown)
             header += ` Ещё подходящих обновлений: ${count - shown} — смотрите /search.`;
           cards[cards.length - 1]!.buttons = menu(profile);
-          await send(profile.chat_id, [...packReplies(header, []), ...cards]);
+          try {
+            await send(profile.chat_id, [...packReplies(header, []), ...cards]);
+          } catch (error) {
+            metrics?.recordNotificationDelivery(
+              error instanceof GrammyError && error.error_code === 403
+                ? "blocked"
+                : (error instanceof GrammyError && error.error_code === 429) ||
+                    error instanceof HttpError
+                  ? "retry"
+                  : "error",
+            );
+            throw error;
+          }
+          metrics?.recordNotificationDelivery("sent");
           delivered += 1;
         }
         await store.advanceCursor(profile.user_id, lastEvent.id, profile.revision);
@@ -130,11 +145,21 @@ export async function monitor(
   send: SendReplies,
   interval: number,
   signal: AbortSignal,
+  metrics?: Pick<Metrics, "recordMonitorIteration" | "recordNotificationDelivery">,
 ): Promise<void> {
   while (!signal.aborted) {
-    await store.setMeta("last_monitor_at", String(Date.now() / 1000));
-    await store.setMeta("telegram_error", "");
-    await notifyOnce(store, send, signal);
+    const started = performance.now();
+    let outcome: "success" | "error" | "aborted" = "success";
+    try {
+      await store.setMeta("last_monitor_at", String(Date.now() / 1000));
+      await store.setMeta("telegram_error", "");
+      await notifyOnce(store, send, signal, metrics);
+    } catch (error) {
+      outcome = signal.aborted ? "aborted" : "error";
+      throw error;
+    } finally {
+      metrics?.recordMonitorIteration(outcome, (performance.now() - started) / 1000);
+    }
     await delay(interval * 1000, undefined, { signal });
   }
 }

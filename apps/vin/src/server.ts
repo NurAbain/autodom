@@ -11,6 +11,7 @@ import {
   readVinRequest,
   VinRequestError,
 } from "@autodom/core/vin-request";
+import { VinMetrics } from "./metrics.js";
 
 export interface VinApiServerOptions {
   host: string;
@@ -58,9 +59,11 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
   const expectedToken = createHash("sha256").update(`Bearer ${options.apiToken}`).digest();
   const active = new Set<AbortController>();
   const maxInFlight = options.maxInFlight ?? 10;
+  const metrics = new VinMetrics(maxInFlight);
   const server = createServer(
     { maxHeaderSize: 8192, headersTimeout: 10_000, requestTimeout: 15_000 },
     (request, response) => {
+      metrics.trackHttp(request, response);
       void (async () => {
         if (request.url?.includes("?"))
           throw new VinRequestError(
@@ -70,6 +73,18 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
           );
         if (request.url === "/health" && (request.method === "GET" || request.method === "HEAD")) {
           json(response, 200, { healthy: true, service: "autodom-vin-api" });
+          return;
+        }
+        if (request.url === "/metrics" && request.method === "GET") {
+          const body = await metrics.registry.metrics();
+          if (!response.destroyed && !response.writableEnded) {
+            response.writeHead(200, {
+              "Content-Type": metrics.registry.contentType,
+              "Cache-Control": "no-store",
+              "X-Content-Type-Options": "nosniff",
+            });
+            response.end(body);
+          }
           return;
         }
         if (
@@ -104,6 +119,7 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
         const controller = new AbortController();
         const disconnected = () => controller.abort();
         active.add(controller);
+        metrics.inFlight.set(active.size);
         request.once("aborted", disconnected);
         request.once("error", disconnected);
         response.once("close", disconnected);
@@ -137,10 +153,12 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
               ? await (options.checkVinArchive?.(vin, controller.signal) ??
                   disabledVinArchiveResult(vin))
               : await options.checkVin(vin, controller.signal);
+          metrics.recordResult(result);
           controller.signal.throwIfAborted();
           json(response, 200, result);
         } finally {
           active.delete(controller);
+          metrics.inFlight.set(active.size);
           request.off("aborted", disconnected);
           request.off("error", disconnected);
           response.off("close", disconnected);

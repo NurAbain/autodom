@@ -24,7 +24,10 @@ import type { PaymentService } from "./payments.js";
 import { loadPaymentListenerSettings, startPaymentListener } from "./payments-http.js";
 import { type AutodomBot, configureTelegramBot, sendReplies } from "./telegram.js";
 
-export function startPolling(bot: Bot): RunnerHandle {
+export function startPolling(
+  bot: Bot,
+  metrics?: Pick<Metrics, "recordTelegramUpdate">,
+): RunnerHandle {
   let offset = 0;
   const active = new Set<Promise<void>>();
   const source = createSource<Update>({
@@ -73,7 +76,16 @@ export function startPolling(bot: Bot): RunnerHandle {
   const sink = createConcurrentSink<Update, BotError<Context>>(
     {
       consume(update) {
-        const task = bot.handleUpdate(update);
+        const started = performance.now();
+        const task = bot.handleUpdate(update).then(
+          () => {
+            metrics?.recordTelegramUpdate("success", (performance.now() - started) / 1000);
+          },
+          (error: unknown) => {
+            metrics?.recordTelegramUpdate("error", (performance.now() - started) / 1000);
+            throw error;
+          },
+        );
         active.add(task);
         return task.finally(() => {
           active.delete(task);
@@ -261,6 +273,7 @@ export async function runBotService(
         ready,
         // Request errors can contain private Telegram initData or profile values.
         onError: () => logger.warn("Mini App request failed"),
+        onRequest: (observation) => metrics.recordHttpRequest(observation),
       });
       watchServer(miniAppServer, "Mini App");
       abort.signal.throwIfAborted();
@@ -281,7 +294,7 @@ export async function runBotService(
     );
     watchServer(metricsServer, "Metrics");
     abort.signal.throwIfAborted();
-    runner = startPolling(bot);
+    runner = startPolling(bot, metrics);
     const polling = runner.task();
     if (!polling) throw new Error("Telegram polling did not start");
     tasks.push(
@@ -293,6 +306,7 @@ export async function runBotService(
         (chatId, replies) => sendReplies(bot, chatId, replies, miniAppUrl ? { miniAppUrl } : {}),
         settings.monitor_seconds,
         abort.signal,
+        metrics,
       ),
       maintain(store, settings, "bot", abort.signal),
     );

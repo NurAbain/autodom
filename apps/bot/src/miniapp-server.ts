@@ -86,6 +86,12 @@ export interface MiniAppServerOptions {
   assetsDirectory?: string;
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
+  onRequest?: (observation: {
+    route: string;
+    method: "GET" | "POST" | "other";
+    status: number | "aborted";
+    durationSeconds: number;
+  }) => void;
   checkVin?: VinLookup;
   checkVinArchive?: VinArchiveLookup;
   getVinArchivePhoto?: VinArchivePhotoLookup;
@@ -108,6 +114,16 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       type,
     });
   }
+  const apiRoutes = [
+    "/miniapp/api/car",
+    "/miniapp/api/vin",
+    "/miniapp/api/vin/archive-photos",
+    "/miniapp/api/vin/archive-photo",
+    "/miniapp/api/dialogue",
+    "/miniapp/api/orders",
+    "/miniapp/api/orders/checkout",
+    "/miniapp/api/orders/cancel",
+  ];
 
   function respond(response: ServerResponse, status: number, value: unknown): void {
     response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -117,6 +133,35 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
   const server = createServer(
     { requestTimeout: 15_000, headersTimeout: 10_000 },
     (request, response) => {
+      let route = "unmatched";
+      if (options.onRequest) {
+        const started = performance.now();
+        let observed = false;
+        const observe = (status: number | "aborted") => {
+          if (observed) return;
+          observed = true;
+          response.off("finish", onFinish);
+          response.off("close", onClose);
+          request.off("aborted", onAbort);
+          try {
+            options.onRequest?.({
+              route,
+              method:
+                request.method === "GET" || request.method === "POST" ? request.method : "other",
+              status,
+              durationSeconds: (performance.now() - started) / 1000,
+            });
+          } catch {
+            // An optional observer must never change HTTP delivery or error handling.
+          }
+        };
+        const onFinish = () => observe(response.statusCode);
+        const onClose = () => observe(response.writableFinished ? response.statusCode : "aborted");
+        const onAbort = () => observe("aborted");
+        response.once("finish", onFinish);
+        response.once("close", onClose);
+        request.once("aborted", onAbort);
+      }
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("X-Content-Type-Options", "nosniff");
       response.setHeader("Referrer-Policy", "no-referrer");
@@ -127,6 +172,14 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
+        route =
+          url.pathname === "/health" ||
+          url.pathname === "/ready" ||
+          url.pathname === "/miniapp" ||
+          assets.has(url.pathname) ||
+          apiRoutes.includes(url.pathname)
+            ? url.pathname
+            : "unmatched";
         if (request.method === "GET" && url.pathname === "/health") {
           respond(response, 200, { healthy: true });
           return;
@@ -153,19 +206,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           response.end(request.method === "HEAD" ? undefined : asset.body);
           return;
         }
-        if (
-          ![
-            "/miniapp/api/car",
-            "/miniapp/api/vin",
-            "/miniapp/api/vin/archive-photos",
-            "/miniapp/api/vin/archive-photo",
-            "/miniapp/api/dialogue",
-            "/miniapp/api/orders",
-            "/miniapp/api/orders/checkout",
-            "/miniapp/api/orders/cancel",
-          ].includes(url.pathname)
-        )
-          throw new RequestError(404, "Страница не найдена.");
+        if (!apiRoutes.includes(url.pathname)) throw new RequestError(404, "Страница не найдена.");
         if (
           (request.headers.origin && request.headers.origin !== origin) ||
           request.headers["sec-fetch-site"] === "cross-site"

@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { enabledSources, type RequestOutcome, type Settings, SOURCE_IDS } from "@autodom/core";
 import type { Store } from "@autodom/storage";
-import { Counter, collectDefaultMetrics, Gauge, Registry } from "@prometheus-io/client";
+import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from "@prometheus-io/client";
 
 // A timed-out query retains its slot until it actually settles. A new scrape
 // cannot enqueue more DB work, and a late query cannot publish a partial snapshot.
@@ -58,6 +58,17 @@ export class Metrics {
   readonly registry = new Registry();
   readonly requests: Counter<"source" | "tier" | "outcome">;
   readonly jobs: Counter<"source" | "outcome">;
+  readonly jobDuration: Histogram<"source" | "outcome">;
+  readonly queueJobs: Gauge<"source" | "state">;
+  readonly queueSuccess: Gauge;
+  readonly queueTimestamp: Gauge;
+  private readonly httpRequests: Counter<"route" | "method" | "status">;
+  private readonly httpDuration: Histogram<"route" | "method" | "status">;
+  private readonly telegramUpdates: Counter<"outcome">;
+  private readonly telegramDuration: Histogram<"outcome">;
+  private readonly monitorIterations: Counter<"outcome">;
+  private readonly monitorDuration: Histogram<"outcome">;
+  private readonly notificationDeliveries: Counter<"outcome">;
   private readonly collectState: () => Promise<void>;
   private readonly stateSuccess: Gauge;
   constructor(
@@ -77,6 +88,74 @@ export class Metrics {
       name: "autodom_collection_jobs_total",
       help: "Durable source job outcomes",
       labelNames: ["source", "outcome"],
+      registers: [this.registry],
+    });
+    this.jobDuration = new Histogram({
+      name: "autodom_collection_job_duration_seconds",
+      help: "Source job execution duration including collection and rate-limit bookkeeping",
+      labelNames: ["source", "outcome"],
+      buckets: [0.1, 1, 5, 15, 30, 60, 120, 300, 600, 1800],
+      registers: [this.registry],
+    });
+    this.queueJobs = new Gauge({
+      name: "autodom_collection_queue_jobs",
+      help: "Jobs in the last complete Redis queue snapshot; check collection success and age",
+      labelNames: ["source", "state"],
+      registers: [this.registry],
+    });
+    this.queueSuccess = new Gauge({
+      name: "autodom_queue_collection_success",
+      help: "Whether the latest bounded Redis queue snapshot succeeded (worker role only)",
+      registers: [this.registry],
+    });
+    this.queueTimestamp = new Gauge({
+      name: "autodom_queue_collection_timestamp_seconds",
+      help: "UNIX timestamp of the last complete Redis queue snapshot (worker role only)",
+      registers: [this.registry],
+    });
+    this.httpRequests = new Counter({
+      name: "autodom_http_requests_total",
+      help: "Terminal HTTP requests, including clients aborted before response completion",
+      labelNames: ["route", "method", "status"],
+      registers: [this.registry],
+    });
+    this.httpDuration = new Histogram({
+      name: "autodom_http_request_duration_seconds",
+      help: "HTTP request duration until response completion or client abort",
+      labelNames: ["route", "method", "status"],
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120],
+      registers: [this.registry],
+    });
+    this.telegramUpdates = new Counter({
+      name: "autodom_telegram_updates_total",
+      help: "Telegram updates handled by the polling sink",
+      labelNames: ["outcome"],
+      registers: [this.registry],
+    });
+    this.telegramDuration = new Histogram({
+      name: "autodom_telegram_update_duration_seconds",
+      help: "Telegram update handling duration, excluding polling and admission wait",
+      labelNames: ["outcome"],
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120],
+      registers: [this.registry],
+    });
+    this.monitorIterations = new Counter({
+      name: "autodom_monitor_iterations_total",
+      help: "Notification monitor iterations; success does not imply a notification was sent",
+      labelNames: ["outcome"],
+      registers: [this.registry],
+    });
+    this.monitorDuration = new Histogram({
+      name: "autodom_monitor_iteration_duration_seconds",
+      help: "Notification monitor iteration duration including retries, excluding interval sleep",
+      labelNames: ["outcome"],
+      buckets: [0.01, 0.1, 0.5, 1, 5, 15, 30, 60, 120, 300, 600],
+      registers: [this.registry],
+    });
+    this.notificationDeliveries = new Counter({
+      name: "autodom_notification_deliveries_total",
+      help: "Actual notification batch send outcomes; cursor-only changes are not deliveries",
+      labelNames: ["outcome"],
       registers: [this.registry],
     });
     const gauge = (name: string, help: string) =>
@@ -164,6 +243,31 @@ export class Metrics {
   recordRequest(outcome: RequestOutcome): void {
     this.requests.inc({ ...outcome });
   }
+  recordHttpRequest(observation: {
+    route: string;
+    method: "GET" | "POST" | "other";
+    status: number | "aborted";
+    durationSeconds: number;
+  }): void {
+    const { durationSeconds, ...labels } = observation;
+    this.httpRequests.inc(labels);
+    this.httpDuration.observe(labels, durationSeconds);
+  }
+
+  recordTelegramUpdate(outcome: "success" | "error", durationSeconds: number): void {
+    this.telegramUpdates.inc({ outcome });
+    this.telegramDuration.observe({ outcome }, durationSeconds);
+  }
+
+  recordMonitorIteration(outcome: "success" | "error" | "aborted", durationSeconds: number): void {
+    this.monitorIterations.inc({ outcome });
+    this.monitorDuration.observe({ outcome }, durationSeconds);
+  }
+
+  recordNotificationDelivery(outcome: "sent" | "blocked" | "retry" | "error"): void {
+    this.notificationDeliveries.inc({ outcome });
+  }
+
   async serve(port: number, healthy: () => Promise<boolean>): Promise<Server> {
     const health = singleFlight(healthy);
     const server = createServer((request, response) => {
