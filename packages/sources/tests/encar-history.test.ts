@@ -231,6 +231,64 @@ describe("VIN-confirmed Encar advertisement history", () => {
     await expect(checkEncarHistory(VIN, session)).rejects.toBe(abort);
   });
 
+  it("returns verified partial evidence rather than admitting a tail request without enough budget", async () => {
+    const { session, requested } = sessionWith(discovery(row(SECOND)), {
+      [FIRST]: html(base()),
+      [SECOND]: new DOMException("Deadline exceeded", "TimeoutError"),
+    });
+    session.remainingMs = () => 16_999;
+    const result = await checkEncarHistory(VIN, session);
+    expect(result?.listings.map(({ id }) => id)).toEqual([FIRST]);
+    expect(result?.partial).toBe(true);
+    expect(requested).toEqual([DISCOVERY, `https://fem.encar.com/cars/detail/${FIRST}`]);
+  });
+
+  it("admits the next candidate at the remaining-budget boundary", async () => {
+    const { session, requested } = sessionWith(discovery(row(SECOND)), {
+      [FIRST]: html(base()),
+      [SECOND]: html(base(SECOND)),
+    });
+    session.remainingMs = () => 17_000;
+    const result = await checkEncarHistory(VIN, session);
+    expect(result?.listings.map(({ id }) => id)).toEqual([FIRST, SECOND]);
+    expect(result?.partial).toBe(false);
+    expect(requested).toContain(`https://fem.encar.com/cars/detail/${SECOND}`);
+  });
+
+  it("revalidates supplied candidates with the same strict parser and incomplete discovery", async () => {
+    const { session, requested } = sessionWith(new SourceError("Discovery unavailable"), {
+      [FIRST]: html(base(FIRST, { photos: base(SECOND).photos })),
+      [SECOND]: html(base(SECOND, { vin: null })),
+    });
+    const result = await checkEncarHistory(VIN, session, [FIRST, SECOND]);
+    expect(result?.partial).toBe(true);
+    expect(result?.listings).toMatchObject([{ id: FIRST, vin: VIN, photo_urls: [] }]);
+    expect(requested).toEqual([
+      `https://fem.encar.com/cars/detail/${FIRST}`,
+      `https://fem.encar.com/cars/detail/${SECOND}`,
+    ]);
+  });
+
+  it("rejects unsafe supplied IDs before making any requests", async () => {
+    const { session, requested } = sessionWith(discovery());
+    await expect(checkEncarHistory(VIN, session, [FIRST, "../other"])).rejects.toBeInstanceOf(
+      SourceError,
+    );
+    expect(requested).toEqual([]);
+  });
+
+  it("limits cached candidate revalidation to five official requests", async () => {
+    const ids = [FIRST, SECOND, "40122438", "42455240", "42458676", "42459999"];
+    const { session, requested } = sessionWith(
+      new SourceError("Discovery unavailable"),
+      Object.fromEntries(ids.map((id) => [id, html(base(id))])),
+    );
+    const result = await checkEncarHistory(VIN, session, ids);
+    expect(result?.listings.map(({ id }) => id)).toEqual(ids.slice(0, 5));
+    expect(result?.partial).toBe(true);
+    expect(requested).not.toContain(`https://fem.encar.com/cars/detail/${ids[5]}`);
+  });
+
   it("bounds candidate requests without losing the distinction between truncation and coverage", async () => {
     const ids = [FIRST, SECOND, "40122438", "42455240", "42458676", "42459999"];
     const { session, requested } = sessionWith(

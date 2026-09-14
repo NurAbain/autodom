@@ -7,7 +7,8 @@ import {
   VIN_SOURCE_URLS,
 } from "@autodom/core";
 import pLimit from "p-limit";
-import { type Dispatcher, fetch, getSetCookies, Headers, ProxyAgent, type Response } from "undici";
+import { type Dispatcher, fetch, getSetCookies, Headers, ProxyAgent } from "undici";
+import type { CarcheckSession } from "./carcheck-session.js";
 import { readBody, retryAfterSeconds } from "./http-response.js";
 
 type KoreanVinProvider = "carhistory" | "car365" | "encar";
@@ -26,6 +27,7 @@ const REQUEST_PATHS: Readonly<
 };
 
 export interface VinSession {
+  remainingMs?(): number;
   request(
     path: string,
     options?: {
@@ -43,6 +45,7 @@ export interface VinTransportOptions {
   // A whole anonymous workflow, including queueing and proxy fallback, is bounded.
   timeoutMs?: number;
   dispatcherFactory?: (route: ProxyRoute, page: number, index: number) => Dispatcher;
+  encarDiscovery?: Pick<CarcheckSession, "fetch">;
 }
 
 interface SessionCookie {
@@ -84,6 +87,7 @@ export class VinTransport {
     workflow: (session: VinSession) => Promise<T>,
     signal?: AbortSignal,
   ): Promise<T> {
+    const deadline = Date.now() + (this.#options.timeoutMs ?? 40_000);
     const combined = AbortSignal.any([
       this.#abort.signal,
       AbortSignal.timeout(this.#options.timeoutMs ?? 40_000),
@@ -92,6 +96,7 @@ export class VinTransport {
     ]);
     const task = this.#limit(async () => {
       const page = ++this.#page;
+      const discovery = new Map<string, { body: string; status: number }>();
       for (const [index, route] of this.#options.routes.entries()) {
         combined.throwIfAborted();
         this.#requireNotRateLimited(provider);
@@ -100,7 +105,7 @@ export class VinTransport {
           new ProxyAgent({ uri: route.urlFor(page), token: route.authorization });
         try {
           // Cookies and CSRF are never shared between providers, lookups or proxy tiers.
-          return await workflow(this.#session(provider, dispatcher, combined));
+          return await workflow(this.#session(provider, dispatcher, combined, discovery, deadline));
         } catch (error) {
           combined.throwIfAborted();
           if (!(error instanceof VinRequestError)) throw error;
@@ -128,11 +133,11 @@ export class VinTransport {
     if (remaining > 0) throw new SourceRateLimited(Math.ceil(remaining / 1000));
   }
 
-  async #dispatch(
+  async #dispatch<T>(
     provider: KoreanVinProvider,
     signal: AbortSignal,
-    request: () => Promise<Response>,
-  ): Promise<Response> {
+    request: () => Promise<T>,
+  ): Promise<T> {
     signal.throwIfAborted();
     let queue = this.#requestQueues.get(provider);
     if (!queue) {
@@ -172,10 +177,17 @@ export class VinTransport {
     }
   }
 
-  #session(provider: KoreanVinProvider, dispatcher: Dispatcher, signal: AbortSignal): VinSession {
+  #session(
+    provider: KoreanVinProvider,
+    dispatcher: Dispatcher,
+    signal: AbortSignal,
+    discovery: Map<string, { body: string; status: number }>,
+    deadline: number,
+  ): VinSession {
     const origin = new URL(VIN_SOURCE_URLS[provider]).origin;
     const cookies = new Map<string, SessionCookie>();
     return {
+      remainingMs: () => (signal.aborted ? 0 : Math.max(0, deadline - Date.now())),
       request: async (path, options = {}) => {
         const url = new URL(path, origin);
         const method = options.method ?? "GET";
@@ -199,6 +211,48 @@ export class VinTransport {
         for (const name of ["cookie", "authorization", "proxy-authorization", "host", "connection"])
           if (headers.has(name))
             throw new SourceError("VIN session credentials are transport-owned");
+        const encarDiscovery = this.#options.encarDiscovery;
+        if (url.origin === ENCAR_DISCOVERY_ORIGIN && encarDiscovery) {
+          const cached = discovery.get(url.href);
+          if (cached) return cached;
+          const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(35_000)]);
+          try {
+            const response = await this.#dispatch(provider, requestSignal, () =>
+              encarDiscovery.fetch(url, requestSignal),
+            );
+            if (
+              response.status === 301 &&
+              response.headers.get("cf-mitigated") !== "challenge" &&
+              response.headers.get("location") ===
+                `${ENCAR_DISCOVERY_ORIGIN}/vin/${url.pathname.slice("/auto/".length)}`
+            ) {
+              await response.body?.cancel();
+              const result = { body: "", status: 301 };
+              discovery.set(url.href, result);
+              return result;
+            }
+            if (response.status !== 200 || response.headers.get("cf-mitigated") === "challenge") {
+              await response.body?.cancel();
+              if (response.status === 429 || response.status >= 500) {
+                const seconds = retryAfterSeconds(response.headers.get("retry-after"));
+                this.#rateLimitedUntil.set(provider, Date.now() + seconds * 1000);
+                throw new SourceRateLimited(seconds);
+              }
+              throw new SourceError("encar: Carcheck discovery is unavailable");
+            }
+            const result = {
+              body: await readBody(response, requestSignal),
+              status: response.status,
+            };
+            requestSignal.throwIfAborted();
+            discovery.set(url.href, result);
+            return result;
+          } catch (error) {
+            if (error instanceof SourceRateLimited) throw error;
+            // Discovery owns its session recovery, never restart it on another ordinary tier.
+            throw new SourceError("encar: Carcheck discovery is unavailable");
+          }
+        }
         headers.set(
           "User-Agent",
           "Mozilla/5.0 (compatible; AutodomBot/0.2; +https://autodom.skup.kg)",

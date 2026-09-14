@@ -1,5 +1,5 @@
 import { ProxyRoute } from "@autodom/core";
-import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
+import { fetch, getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VinCheckService } from "../src/vin.js";
 
@@ -132,11 +132,117 @@ describe("VIN lookup source independence", () => {
       routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
       requestDelaySeconds: 0,
       dispatcherFactory: () => source,
+      encarDiscovery: {
+        fetch: (url, signal) => fetch(url, { dispatcher: source, signal, redirect: "manual" }),
+      },
     });
     try {
       const result = await service.check(archiveVin);
       expect(result.encar?.data?.listings.map((listing) => listing.id)).toEqual(["39720103"]);
       expect(result.encar?.data?.partial).toBe(true);
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("rechecks confirmed Encar IDs when Carcheck is unavailable on a later lookup", async () => {
+    const archiveVin = "WBA51AG03NCK98884";
+    const sources = [new MockAgent(), new MockAgent()];
+    for (const [index, source] of sources.entries()) {
+      source.disableNetConnect();
+      source
+        .get("https://carcheck.by")
+        .intercept({ path: `/auto/${archiveVin}` })
+        .reply(
+          index === 0 ? 200 : 504,
+          index === 0
+            ? `<h1 class="auto-vin-title"><span>${archiveVin}</span>
+              <button class="auto-save-button" data-save-vin="${archiveVin}"
+                data-save-lot="39720103" data-save-auction="12"></button></h1>`
+            : "Gateway time-out",
+        );
+      source
+        .get("https://fem.encar.com")
+        .intercept({ path: "/cars/detail/39720103" })
+        .reply(
+          200,
+          `<script>__PRELOADED_STATE__ = ${JSON.stringify({
+            cars: {
+              base: {
+                vehicleId: 39720103,
+                queryCarId: 39720103,
+                vin: archiveVin,
+                manage: { dummy: false },
+                spec: { mileage: index === 0 ? 21986 : 22000 },
+                advertisement: { status: index === 0 ? "ADVERTISE" : "SOLD" },
+                photos: [{ path: "/carpicture02/pic3972/39720103_001.jpg" }],
+              },
+            },
+          })};</script>`,
+        );
+    }
+    const service = new VinCheckService({
+      providers: ["encar"],
+      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
+      requestDelaySeconds: 0,
+      dispatcherFactory: (_route, page) => sources[page - 1] as MockAgent,
+      encarDiscovery: {
+        fetch: (url, signal) =>
+          fetch(url, { dispatcher: sources[0] as MockAgent, signal, redirect: "manual" }),
+      },
+    });
+    try {
+      expect((await service.check(archiveVin)).encar?.status).toBe("available");
+      const repeated = await service.check(archiveVin);
+      expect(repeated.encar?.status).toBe("available");
+      expect(repeated.encar?.data?.listings).toMatchObject([
+        { id: "39720103", vin: archiveVin, mileage_km: 22000, advertisement_status: "SOLD" },
+      ]);
+      expect(repeated.encar?.data?.partial).toBe(true);
+    } finally {
+      await service.close();
+    }
+  });
+
+  it("lets another caller finish a shared Encar lookup after the first caller cancels", async () => {
+    const source = new MockAgent();
+    source.disableNetConnect();
+    source
+      .get("https://carcheck.by")
+      .intercept({ path: `/auto/${VIN}` })
+      .reply(
+        200,
+        `<h1 class="auto-vin-title"><span>${VIN}</span>
+          <button class="auto-save-button" data-save-vin="${VIN}"
+            data-save-lot="39720103" data-save-auction="12"></button></h1>`,
+      );
+    source
+      .get("https://fem.encar.com")
+      .intercept({ path: "/cars/detail/39720103" })
+      .reply(
+        200,
+        `<script>__PRELOADED_STATE__ = ${JSON.stringify({
+          cars: { base: { vehicleId: 39720103, vin: VIN, manage: { dummy: false } } },
+        })};</script>`,
+      );
+    const service = new VinCheckService({
+      providers: ["encar"],
+      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
+      requestDelaySeconds: 0,
+      dispatcherFactory: () => source,
+      encarDiscovery: {
+        fetch: (url, signal) => fetch(url, { dispatcher: source, signal, redirect: "manual" }),
+      },
+    });
+    const firstCaller = new AbortController();
+    try {
+      const first = service.check(VIN, firstCaller.signal);
+      const second = service.check(VIN);
+      firstCaller.abort(new Error("Caller left"));
+      await expect(first).rejects.toThrow("Caller left");
+      const result = await second;
+      expect(result.encar?.status).toBe("available");
+      expect(result.encar?.data?.listings).toMatchObject([{ id: "39720103", vin: VIN }]);
     } finally {
       await service.close();
     }
@@ -322,6 +428,9 @@ describe("Korean-first VIN lookup", () => {
         routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
         requestDelaySeconds: 0,
         dispatcherFactory: () => source,
+        encarDiscovery: {
+          fetch: (url, signal) => fetch(url, { dispatcher: source, signal, redirect: "manual" }),
+        },
       });
       services.push(service);
       const result = await service.check(VIN);
