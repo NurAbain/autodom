@@ -23,6 +23,7 @@ import {
   type DataTable,
   LEGACY_DATA_TABLES,
   OWNER_DATA_TABLES,
+  PAYMENT_DATA_TABLES,
   type paymentOrders,
   schema,
 } from "./schema.js";
@@ -30,7 +31,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -187,6 +188,16 @@ export async function insertSnapshotRow(
     if (Date.parse(String(row.updated_at)) < Date.parse(String(row.created_at)))
       throw new Error("Invalid refund timestamp");
     if (row.note !== null) validatePaymentText(String(row.note), "refund note", 2000);
+    if (row.confirmation_reference !== null)
+      validatePaymentText(String(row.confirmation_reference), "refund confirmation", 300);
+  }
+  if (table === "web_report_sessions") {
+    if (!/^[0-9a-f]{64}$/u.test(String(row.token_hash)) || safeNumber(row.user_id) <= 0)
+      throw new Error("Invalid website session");
+    validatePaymentTimestamp(String(row.created_at));
+    validatePaymentTimestamp(String(row.expires_at));
+    if (Date.parse(String(row.expires_at)) <= Date.parse(String(row.created_at)))
+      throw new Error("Invalid website session lifetime");
   }
   const values = names.map((name) =>
     columns[name]!.dataType === "json"
@@ -217,6 +228,7 @@ export async function backup(store: Store, destination: string): Promise<void> {
       payment_orders: 0,
       payment_events: 0,
       payment_refunds: 0,
+      web_report_sessions: 0,
     };
     const emit = async (value: unknown, digest = true) => {
       const line = `${JSON.stringify(value)}\n`;
@@ -233,7 +245,7 @@ export async function backup(store: Store, destination: string): Promise<void> {
       for (const table of DATA_TABLES) {
         // Server cursor bounds memory independently of catalog size, within one MVCC snapshot.
         await store.database.execute(
-          sql`DECLARE snapshot_rows NO SCROLL CURSOR FOR SELECT * FROM ${sql.identifier(table)} ORDER BY ${sql.identifier(table === "metadata" ? "key" : table === "profiles" || table === "drafts" || table === "owner_vehicles" ? "user_id" : "id")}`,
+          sql`DECLARE snapshot_rows NO SCROLL CURSOR FOR SELECT * FROM ${sql.identifier(table)} ORDER BY ${sql.identifier(table === "web_report_sessions" ? "token_hash" : table === "metadata" ? "key" : table === "profiles" || table === "drafts" || table === "owner_vehicles" ? "user_id" : "id")}`,
         );
         try {
           for (;;) {
@@ -292,23 +304,27 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
-          (header.schema_version as number) >= 5
+          header.schema_version === SCHEMA_VERSION
             ? DATA_TABLES
-            : header.schema_version === 4
-              ? OWNER_DATA_TABLES
-              : LEGACY_DATA_TABLES,
+            : (header.schema_version as number) >= 5
+              ? PAYMENT_DATA_TABLES
+              : header.schema_version === 4
+                ? OWNER_DATA_TABLES
+                : LEGACY_DATA_TABLES,
         )
     )
       throw new Error("Unsupported Autodom snapshot format");
     const snapshotTables: readonly DataTable[] =
-      (header.schema_version as number) >= 5
+      header.schema_version === SCHEMA_VERSION
         ? DATA_TABLES
-        : header.schema_version === 4
-          ? OWNER_DATA_TABLES
-          : LEGACY_DATA_TABLES;
+        : (header.schema_version as number) >= 5
+          ? PAYMENT_DATA_TABLES
+          : header.schema_version === 4
+            ? OWNER_DATA_TABLES
+            : LEGACY_DATA_TABLES;
     store = await Store.open(databaseUrl);
     const target = store;
     await target.transaction(async () => {
@@ -324,6 +340,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         payment_orders: 0,
         payment_events: 0,
         payment_refunds: 0,
+        web_report_sessions: 0,
       };
       let finished = false;
       let sequences: Record<string, unknown> | undefined;
@@ -409,6 +426,11 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
           if (added.some((name) => Object.hasOwn(row, name)))
             throw new Error("Unexpected report columns in historical snapshot");
           row = { ...row, ...Object.fromEntries(added.map((name) => [name, null])) };
+        }
+        if ((header.schema_version as number) < 8 && table === "payment_refunds") {
+          if (Object.hasOwn(row, "confirmed_by") || Object.hasOwn(row, "confirmation_reference"))
+            throw new Error("Unexpected refund confirmation in historical snapshot");
+          row = { ...row, confirmed_by: null, confirmation_reference: null };
         }
         await insertSnapshotRow(target, table, row);
         counts[table]++;

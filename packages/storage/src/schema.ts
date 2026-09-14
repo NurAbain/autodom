@@ -212,7 +212,7 @@ export const paymentOrders = pgTable(
     uniqueIndex("payment_orders_charge").on(table.provider, table.charge_id),
     check(
       "payment_orders_kind",
-      sql`(${table.provider} = 'finik' AND ${table.product} = 'inspection' AND ${table.currency} = 'KGS' AND ${table.vin} IS NULL) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
+      sql`(${table.provider} = 'finik' AND ${table.currency} = 'KGS' AND ((${table.product} = 'inspection' AND ${table.vin} IS NULL) OR (${table.product} = 'vin_report' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'))) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
     ),
     check(
       "payment_orders_amount",
@@ -234,7 +234,29 @@ export const paymentOrders = pgTable(
     uniqueIndex("payment_orders_pre_checkout").on(table.pre_checkout_id),
     check(
       "payment_orders_report",
-      sql`(${table.provider} = 'finik' AND ${table.payment_status} <> 'refunded' AND ${table.fulfillment_status} NOT IN ('delivering','delivery_unknown') AND ${table.report_file_id} IS NULL AND ${table.report_message_id} IS NULL AND ${table.delivered_at} IS NULL AND ${table.admin_notified_at} IS NULL AND ${table.pre_checkout_id} IS NULL) OR (${table.provider} = 'telegram_stars' AND (${table.pre_checkout_id} IS NULL OR ${table.accepted_at} IS NOT NULL) AND (${table.payment_status} = 'unpaid' OR ${table.pre_checkout_id} IS NOT NULL) AND (${table.fulfillment_status} NOT IN ('delivering','delivery_unknown','fulfilled') OR ${table.report_file_id} IS NOT NULL) AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.report_message_id} BETWEEN 1 AND 9007199254740991 AND ${table.report_message_id} IS NOT NULL AND ${table.delivered_at} IS NOT NULL) OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.report_message_id} IS NULL AND ${table.delivered_at} IS NULL)) AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid') AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))`,
+      sql`(${table.provider} = 'finik' AND ${table.product} = 'inspection'
+        AND ${table.payment_status} <> 'refunded'
+        AND ${table.fulfillment_status} NOT IN ('delivering','delivery_unknown')
+        AND ${table.report_file_id} IS NULL AND ${table.report_message_id} IS NULL
+        AND ${table.delivered_at} IS NULL AND ${table.admin_notified_at} IS NULL
+        AND ${table.pre_checkout_id} IS NULL)
+      OR (${table.provider} = 'telegram_stars'
+        AND (${table.pre_checkout_id} IS NULL OR ${table.accepted_at} IS NOT NULL)
+        AND (${table.payment_status} = 'unpaid' OR ${table.pre_checkout_id} IS NOT NULL)
+        AND (${table.fulfillment_status} NOT IN ('delivering','delivery_unknown','fulfilled') OR ${table.report_file_id} IS NOT NULL)
+        AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.report_message_id} BETWEEN 1 AND 9007199254740991
+          AND ${table.report_message_id} IS NOT NULL AND ${table.delivered_at} IS NOT NULL)
+          OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.report_message_id} IS NULL AND ${table.delivered_at} IS NULL))
+        AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid')
+        AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))
+      OR (${table.provider} = 'finik' AND ${table.product} = 'vin_report'
+        AND ${table.pre_checkout_id} IS NULL AND ${table.report_message_id} IS NULL
+        AND ${table.fulfillment_status} NOT IN ('delivering','delivery_unknown')
+        AND (${table.payment_status} = 'unpaid' OR ${table.paid_at} IS NOT NULL)
+        AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.report_file_id} IS NOT NULL AND ${table.delivered_at} IS NOT NULL)
+          OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.report_file_id} IS NULL AND ${table.delivered_at} IS NULL))
+        AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid')
+        AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))`,
     ),
   ],
 );
@@ -280,6 +302,8 @@ export const paymentRefunds = pgTable(
     created_at: text("created_at").notNull(),
     updated_at: text("updated_at").notNull(),
     note: text("note"),
+    confirmed_by: money("confirmed_by"),
+    confirmation_reference: text("confirmation_reference"),
   },
   (table) => [
     index("payment_refunds_order").on(table.order_id),
@@ -290,9 +314,35 @@ export const paymentRefunds = pgTable(
       ),
     check(
       "payment_refunds_kind",
-      sql`(${table.provider} = 'finik' AND ${table.status} IN ('requested','submitted','failed')) OR (${table.provider} = 'telegram_stars' AND ${table.status} IN ('requested','submitted','failed','confirmed'))`,
+      sql`${table.provider} IN ('finik','telegram_stars') AND ${table.status} IN ('requested','submitted','failed','confirmed')`,
     ),
     check("payment_refunds_amount", sql`${table.amount} BETWEEN 1 AND 9007199254740991`),
+    check(
+      "payment_refunds_confirmation",
+      sql`(${table.provider} = 'finik' AND ${table.status} = 'confirmed'
+        AND ${table.confirmed_by} BETWEEN 1 AND 9007199254740991 AND ${table.confirmed_by} IS NOT NULL
+        AND ${table.confirmation_reference} IS NOT NULL AND length(btrim(${table.confirmation_reference})) BETWEEN 1 AND 300)
+        OR ((${table.provider} <> 'finik' OR ${table.status} <> 'confirmed')
+          AND ${table.confirmed_by} IS NULL AND ${table.confirmation_reference} IS NULL)`,
+    ),
+  ],
+);
+export const webReportSessions = pgTable(
+  "web_report_sessions",
+  {
+    token_hash: text("token_hash").primaryKey(),
+    user_id: money("user_id").notNull(),
+    created_at: text("created_at").notNull(),
+    expires_at: text("expires_at").notNull(),
+  },
+  (table) => [
+    index("web_report_sessions_expiry").on(table.expires_at),
+    check("web_report_sessions_hash", sql`${table.token_hash} ~ '^[0-9a-f]{64}$'`),
+    check("web_report_sessions_buyer", sql`${table.user_id} BETWEEN 1 AND 9007199254740991`),
+    check(
+      "web_report_sessions_expiry_order",
+      sql`${table.expires_at}::timestamptz > ${table.created_at}::timestamptz`,
+    ),
   ],
 );
 export const schema = {
@@ -305,13 +355,15 @@ export const schema = {
   payment_orders: paymentOrders,
   payment_events: paymentEvents,
   payment_refunds: paymentRefunds,
+  web_report_sessions: webReportSessions,
 };
 export const LEGACY_DATA_TABLES = ["listings", "events", "profiles", "drafts", "metadata"] as const;
 export const OWNER_DATA_TABLES = [...LEGACY_DATA_TABLES, "owner_vehicles"] as const;
-export const DATA_TABLES = [
+export const PAYMENT_DATA_TABLES = [
   ...OWNER_DATA_TABLES,
   "payment_orders",
   "payment_events",
   "payment_refunds",
 ] as const;
+export const DATA_TABLES = [...PAYMENT_DATA_TABLES, "web_report_sessions"] as const;
 export type DataTable = (typeof DATA_TABLES)[number];

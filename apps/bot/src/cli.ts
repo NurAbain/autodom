@@ -12,7 +12,12 @@ import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
 import { Conversation } from "./conversation.js";
-import { loadFinikGatewaySettings, loadVinReportStarsEnabled, PaymentService } from "./payments.js";
+import {
+  loadFinikGatewaySettings,
+  loadVinReportFinikEnabled,
+  loadVinReportStarsEnabled,
+  PaymentService,
+} from "./payments.js";
 import { runPaymentsCommand } from "./payments-cli.js";
 import { SellerConversation } from "./seller-conversation.js";
 import { metricsPort, runBotService } from "./service.js";
@@ -108,7 +113,12 @@ export async function main(
       store = await Store.open(settings.database_url);
       if (!abort.signal.aborted) {
         const conversation = new Conversation(store, { seller: new SellerConversation(store) });
-        const payments = new PaymentService(store, loadFinikGatewaySettings(env));
+        const payments = new PaymentService(
+          store,
+          loadFinikGatewaySettings(env),
+          fetch,
+          loadVinReportFinikEnabled(env),
+        );
         const bot = createTelegramBot(store, token, {
           conversation,
           payments,

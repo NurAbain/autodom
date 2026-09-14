@@ -115,6 +115,8 @@ it("keeps an ambiguous refund pending and only confirms it on a successful retry
       reason: "Unable to deliver",
       status: "requested",
       createdAt: order.createdAt,
+      confirmedBy: null,
+      confirmationReference: null,
     };
   });
   vi.spyOn(service.ledger, "markRefund").mockImplementation(async (_id, state) => {

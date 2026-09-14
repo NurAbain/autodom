@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="referrer" content="no-referrer">
+    <meta name="description" content="Оригинальный корейский PDF по VIN — 499 сом через Finik. Ручная выдача в течение часа после подтверждённой оплаты, полный возврат при недоступности отчёта.">
+    <title>Автодом — корейский PDF по VIN</title>
+    <link rel="stylesheet" href="/reports/app.css">
+    <script type="module" src="/reports/app.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <a class="brand" href="/reports/" aria-label="Автодом, отчёты по VIN">Автодом</a>
+        <a class="source-link" href="#orders">Мои заказы</a>
+      </header>
+      <main>
+        <section class="home-heading" aria-labelledby="title">
+          <p class="eyebrow">Корейская история автомобиля</p>
+          <h1 id="title">Оригинальный PDF.<br>По вашему VIN.</h1>
+          <p>Сначала проверим доступность корейского отчёта. Затем покажем точный состав заказа и условия — до создания счёта.</p>
+          <p class="price"><span id="price-label">499 сом</span> <span class="price-note">· разово, через Finik</span></p>
+          <div class="button-row">
+            <a class="button" href="#purchase">Проверить VIN</a>
+            <a class="button button-quiet" href="/miniapp/reports/vin-korea-otchet-kr.pdf" target="_blank" rel="noopener noreferrer">Посмотреть оригинальный пример PDF</a>
+          </div>
+          <p class="footnote">Образец другого автомобиля, не результат по вашему VIN. Даты внутри образца расходятся; его подлинность и полнота независимо не подтверждены.</p>
+        </section>
+        <section class="panel premium-panel" aria-labelledby="what-you-buy">
+          <h2 id="what-you-buy">Что вы покупаете</h2>
+          <dl class="facts">
+            <div class="fact"><dt>Результат</dt><dd>Настоящий корейский PDF по указанному VIN</dd></div>
+            <div class="fact"><dt>Выдача</dt><dd>Вручную, до 1 часа после подтверждённой оплаты</dd></div>
+            <div class="fact"><dt>Если отчёт недоступен</dt><dd>Полный возврат оплаты</dd></div>
+            <div class="fact"><dt>Где получить</dt><dd>Скачать на этом сайте в разделе «Мои заказы»</dd></div>
+          </dl>
+          <p>Отчёт показывает сохранившиеся записи источника, а не все ДТП и ремонты. Отсутствие записи не подтверждает чистую историю. Доступность PDF не гарантирует полноту данных.</p>
+          <p class="footnote">Продавец и исполнитель — владелец Autodom, Telegram ID 706854211. Это отдельная покупка на сайте, не оплата цифрового товара в Telegram или Mini App.</p>
+          <details class="disclosure"><summary>Общие условия услуги</summary><p id="site-terms" class="details">Загружаем актуальные условия. Сохранённые условия конкретного заказа будут показаны перед оплатой.</p></details>
+        </section>
+        <section id="purchase" class="panel vin-panel" aria-labelledby="purchase-title">
+          <p class="eyebrow">01 · Бесплатно, без покупки</p>
+          <h2 id="purchase-title">Проверить доступность по VIN</h2>
+          <p>Бесплатный поиск автомобилей, уведомления и проверка VIN в Автодоме остаются независимыми от покупки PDF. Здесь проверка доступности тоже не создаёт счёт.</p>
+          <p class="footnote">При проверке VIN передаётся подключённым корейским источникам. Отчёт на этом шаге не покупается.</p>
+          <div id="session-status" class="notice" role="status" aria-live="polite">Проверяем вход…</div>
+          <div id="auth"></div>
+          <form id="vin-form" class="vin-form" hidden>
+            <label for="vin">VIN автомобиля · 17 латинских букв и цифр, без I, O, Q</label>
+            <input id="vin" class="text-input vin-input" name="vin" maxlength="40" required autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="vin-status">
+            <button id="check-vin" class="button" type="submit">Проверить бесплатно</button>
+          </form>
+          <p id="vin-status" class="details" role="status" aria-live="polite"></p>
+          <div id="offer-actions"></div>
+        </section>
+        <section id="orders" aria-labelledby="orders-title">
+          <div class="section-heading"><div><p class="eyebrow">02 · Покупка и выдача</p><h2 id="orders-title">Мои заказы на сайте</h2></div><button id="refresh-orders" class="button button-quiet" type="button" disabled>Обновить статус</button></div>
+          <p class="footnote">Оплату подтверждает только сервер. Возврат со страницы Finik не означает успешную оплату. Если уже заплатили, не платите повторно.</p>
+          <p id="orders-status" class="notice" role="status" aria-live="polite">Войдите, чтобы увидеть свои заказы.</p>
+          <div id="order-list" class="order-list"></div>
+          <div id="order-detail"></div>
+        </section>
+      </main>
+      <footer class="footer"><p>Автодом · Корейские отчёты по VIN</p><p class="footnote">Покупки Telegram Stars остаются в боте и не отображаются здесь. Вопрос по заказу можно отправить из его карточки; ответ придёт в личный чат с ботом.</p><a id="support-link" class="source-link" hidden target="_blank" rel="noopener noreferrer">Связаться с поддержкой</a></footer>
+    </div>
+    <noscript><p class="notice">Для входа, бесплатной проверки VIN и покупки включите JavaScript. Пример PDF доступен по ссылке выше без JavaScript.</p></noscript>
+  </body>
+</html>

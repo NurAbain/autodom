@@ -1,4 +1,4 @@
-import { finikPaymentId, type PaymentOrder } from "@autodom/core/payments";
+import { finikPaymentId, isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
 import { normalizeVin, type VinCheckResult } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import { PaymentStore } from "@autodom/storage/payments";
@@ -8,11 +8,13 @@ import type { PreCheckoutQuery, Update } from "grammy/types";
 import {
   paymentAmountText,
   paymentOrderStatus,
+  VIN_REPORT_FINIK_MINOR,
   VIN_REPORT_MAX_BYTES,
   VIN_REPORT_OWNER,
   VIN_REPORT_SLA_MS,
   VIN_REPORT_STARS,
   VIN_REPORT_TERMS,
+  VIN_REPORT_WEB_TERMS,
 } from "./payment-text.js";
 import { hasKoreanVinRecord } from "./vin-text.js";
 
@@ -21,6 +23,13 @@ export function loadVinReportStarsEnabled(env: NodeJS.ProcessEnv = process.env):
   if (value === undefined || value === "false") return false;
   if (value === "true") return true;
   throw new Error("AUTODOM_VIN_REPORT_STARS_ENABLED must be true or false");
+}
+
+export function loadVinReportFinikEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.AUTODOM_VIN_REPORT_FINIK_ENABLED;
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new Error("AUTODOM_VIN_REPORT_FINIK_ENABLED must be true or false");
 }
 
 export class PaymentRequestError extends Error {
@@ -120,12 +129,16 @@ export class PaymentService {
     return this.starsEnabled && !!this.starsApi;
   }
 
-  forgetVinResult(userId: number, vin: string): number {
+  get webReportSalesEnabled(): boolean {
+    return this.finikEnabled && !!this.gateway && !!this.starsApi;
+  }
+
+  forgetVinResult(userId: number, vin: string, channel: "telegram" | "web" = "telegram"): number {
     const now = Date.now();
     for (const [id, result] of this.koreanResults) {
       if (result.expiresAt <= now) this.koreanResults.delete(id);
     }
-    const key = `${userId}:${vin}`;
+    const key = `${channel}:${userId}:${vin}`;
     this.koreanResults.delete(key);
     if (this.koreanResults.size >= 1000) {
       const oldest = this.koreanResults.keys().next().value;
@@ -136,30 +149,45 @@ export class PaymentService {
     return revision;
   }
 
-  rememberVinResult(userId: number, result: VinCheckResult, revision: number): void {
+  rememberVinResult(
+    userId: number,
+    result: VinCheckResult,
+    revision: number,
+    channel: "telegram" | "web" = "telegram",
+  ): void {
     const vin = normalizeVin(result.vin);
     if (!vin || vin !== result.vin) return;
-    const current = this.koreanResults.get(`${userId}:${vin}`);
+    const current = this.koreanResults.get(`${channel}:${userId}:${vin}`);
     if (!current || current.revision !== revision || current.expiresAt <= Date.now()) return;
     current.eligible = hasKoreanVinRecord(result);
   }
 
-  async reportOffer(userId: number, value: string): Promise<PaymentOrder> {
-    if (!this.reportSalesEnabled)
+  async reportOffer(
+    userId: number,
+    value: string,
+    channel: "telegram" | "web" = "telegram",
+  ): Promise<PaymentOrder> {
+    const web = channel === "web";
+    if (web ? !this.webReportSalesEnabled : !this.reportSalesEnabled)
       throw new PaymentRequestError(503, "Покупка PDF сейчас отключена.");
     const vin = normalizeVin(value);
-    const eligibility = vin ? this.koreanResults.get(`${userId}:${vin}`) : undefined;
+    const key = `${channel}:${userId}:${vin}`;
+    const eligibility = vin ? this.koreanResults.get(key) : undefined;
     if (!vin || !eligibility?.eligible || eligibility.expiresAt <= Date.now())
       throw new PaymentRequestError(
         409,
         "Сначала выполните свежую проверку этого VIN с корейской записью.",
       );
-    return this.store.withLock(`autodom:report:offer:${userId}:${vin}`, async () => {
-      const existing = await this.ledger.findOpenVinReport(userId, vin);
+    return this.store.withLock(`autodom:report:offer:${channel}:${userId}:${vin}`, async () => {
+      const existing = await this.ledger.findOpenVinReport(
+        userId,
+        vin,
+        web ? "finik" : "telegram_stars",
+      );
       if (existing) return existing;
       const me = await this.requireStarsApi().getMe();
       if (
-        this.koreanResults.get(`${userId}:${vin}`) !== eligibility ||
+        this.koreanResults.get(key) !== eligibility ||
         !eligibility.eligible ||
         eligibility.expiresAt <= Date.now()
       )
@@ -167,19 +195,20 @@ export class PaymentService {
           409,
           "Проверка VIN обновилась. Повторите проверку перед покупкой.",
         );
-      return this.ledger.createOffer({
+      const input = {
         userId,
         vin,
-        product: "vin_report",
-        amount: VIN_REPORT_STARS,
+        product: "vin_report" as const,
+        amount: web ? VIN_REPORT_FINIK_MINOR : VIN_REPORT_STARS,
         title: "Полный корейский PDF",
         description: `Полный корейский PDF по VIN ${vin}. Ручная выдача в течение ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты.`,
         seller: `Autodom · владелец ${VIN_REPORT_OWNER}`,
         executor: `Владелец Autodom · ${VIN_REPORT_OWNER}`,
         supportUrl: `https://t.me/${me.username}?start=paysupport`,
-        terms: VIN_REPORT_TERMS,
+        terms: web ? VIN_REPORT_WEB_TERMS : VIN_REPORT_TERMS,
         expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      });
+      };
+      return web ? this.ledger.createWebReportOffer(input) : this.ledger.createOffer(input);
     });
   }
 
@@ -244,9 +273,13 @@ export class PaymentService {
     }
   }
 
-  async downloadReport(userId: number, orderId: string): Promise<Uint8Array> {
+  async downloadReport(
+    userId: number,
+    orderId: string,
+    channel: "telegram" | "web" = "telegram",
+  ): Promise<Uint8Array> {
     return this.store.withLock(`autodom:report:operation:${orderId}`, async () => {
-      const order = await this.ownedOrder(userId, orderId);
+      const order = await this.ownedOrder(userId, orderId, channel);
       if (
         order.product !== "vin_report" ||
         order.paymentStatus !== "paid" ||
@@ -354,7 +387,7 @@ export class PaymentService {
         const canDeliver =
           !current.needsReview && !current.refundPending && current.fulfillmentStatus === "ready";
         const instructions = canDeliver
-          ? `Пришлите настоящий PDF документом с подписью:\n/deliver ${current.id} ${current.vin}\nЕсли выдать невозможно — полный возврат:\n/refund ${current.id}`
+          ? `Пришлите настоящий PDF документом с подписью:\n/deliver ${current.id} ${current.vin}\n${isWebVinReport(current) ? "Покупатель скачает PDF только на сайте. /refund блокирует выдачу и создаёт заявку: выполните полный возврат в кабинете Finik, затем /refundconfirm ORDER_ID РЕФЕРЕНС_ВОЗВРАТА." : "Если выдать невозможно — полный возврат:"}\n/refund ${current.id}`
           : `Выдача приостановлена. Сначала проверьте состояние:\n/report ${current.id}`;
         await api.sendMessage(
           VIN_REPORT_OWNER,
@@ -390,6 +423,7 @@ export class PaymentService {
           "Выдача требует подтверждённой оплаты без возврата и расхождений.",
         );
       await this.reportPdf(fileId);
+      if (isWebVinReport(current)) return this.ledger.finishWebReportDelivery(orderId, fileId);
       const order = await this.ledger.beginReportDelivery(orderId, fileId);
       let messageId: number;
       try {
@@ -419,7 +453,7 @@ export class PaymentService {
     const api = this.requireStarsApi();
     return this.store.withLock(`autodom:report:operation:${orderId}`, async () => {
       const order = await this.ledger.getOrder(orderId);
-      if (!order || order.product !== "vin_report" || order.provider !== "telegram_stars")
+      if (!order || order.product !== "vin_report")
         throw new PaymentRequestError(404, "PDF-заказ не найден.");
       if (order.paymentStatus === "refunded") return order;
       if (order.paymentStatus !== "paid" || !order.chargeId)
@@ -434,6 +468,7 @@ export class PaymentService {
         order.amount,
         "Полный возврат по решению владельца",
       );
+      if (isWebVinReport(order)) return this.ownedOrder(order.userId, orderId, "web");
       try {
         const confirmed = await api.refundStarPayment(order.userId, order.chargeId);
         if (confirmed !== true) throw new Error("Telegram did not confirm the refund");
@@ -446,6 +481,25 @@ export class PaymentService {
       }
       await this.ledger.markRefund(refund.id, "confirmed");
       return this.ownedOrder(order.userId, orderId);
+    });
+  }
+
+  async confirmWebRefund(
+    actorId: number,
+    orderId: string,
+    reference: string,
+  ): Promise<PaymentOrder> {
+    this.requireOwner(actorId);
+    requirePaymentOrderId(orderId);
+    if (!reference.trim() || reference.trim().length > 300)
+      throw new PaymentRequestError(
+        400,
+        "Укажите референс уже выполненного полного возврата в кабинете Finik (до 300 символов).",
+      );
+    return this.store.withLock(`autodom:report:operation:${orderId}`, async () => {
+      await this.ledger.confirmWebReportRefund(orderId, actorId, reference.trim());
+      const order = await this.ledger.getOrder(orderId);
+      return order!;
     });
   }
 
@@ -481,18 +535,29 @@ export class PaymentService {
     private readonly store: Store,
     private readonly gateway?: FinikGatewaySettings,
     private readonly fetcher: typeof fetch = fetch,
+    private readonly finikEnabled = false,
   ) {
     this.ledger = new PaymentStore(store);
   }
 
-  async ownedOrder(userId: number, id: string): Promise<PaymentOrder> {
+  async ownedOrder(
+    userId: number,
+    id: string,
+    channel: "telegram" | "web" = "telegram",
+  ): Promise<PaymentOrder> {
     requirePaymentOrderId(id);
     const order = await this.ledger.getOrder(id);
-    if (!order || order.userId !== userId) throw new PaymentRequestError(404, "Заказ не найден.");
+    if (!order || order.userId !== userId || isWebVinReport(order) !== (channel === "web"))
+      throw new PaymentRequestError(404, "Заказ не найден.");
     return order;
   }
 
-  async checkout(userId: number, id: string, acceptedTerms: boolean): Promise<PaymentOrder> {
+  async checkout(
+    userId: number,
+    id: string,
+    acceptedTerms: boolean,
+    channel: "telegram" | "web" = "telegram",
+  ): Promise<PaymentOrder> {
     requirePaymentOrderId(id);
     if (acceptedTerms !== true)
       throw new PaymentRequestError(
@@ -500,7 +565,7 @@ export class PaymentService {
         "Перед оплатой подтвердите состав заказа, цену и условия.",
       );
     return this.store.withLock(`autodom:payment:invoice:${id}`, async () => {
-      let order = await this.ownedOrder(userId, id);
+      let order = await this.ownedOrder(userId, id, channel);
       if (order.paymentStatus !== "unpaid")
         throw new PaymentRequestError(
           409,
@@ -516,7 +581,7 @@ export class PaymentService {
           409,
           "Предложение больше не действует. Свяжитесь с исполнителем.",
         );
-      if (order.product === "vin_report") {
+      if (order.product === "vin_report" && channel === "telegram") {
         if (!this.reportSalesEnabled)
           throw new PaymentRequestError(503, "Покупка PDF сейчас отключена.");
         if (
@@ -558,7 +623,16 @@ export class PaymentService {
           );
         }
       }
-      if (order.product !== "inspection" || order.currency !== "KGS" || order.provider !== "finik")
+      if (
+        isWebVinReport(order) &&
+        (!this.webReportSalesEnabled || order.amount !== VIN_REPORT_FINIK_MINOR)
+      )
+        throw new PaymentRequestError(503, "Покупка PDF через Finik сейчас отключена.");
+      if (
+        (order.product !== "inspection" && !isWebVinReport(order)) ||
+        order.currency !== "KGS" ||
+        order.provider !== "finik"
+      )
         throw new PaymentRequestError(409, "Этот заказ нельзя оплатить через Finik.");
       if (order.invoiceUrl) return order;
       if (!this.gateway)
@@ -570,7 +644,8 @@ export class PaymentService {
       // Commit the immutable expected payment before the external operation. The same
       // merchant PaymentId is reused after an ambiguous timeout, never a fresh charge.
       try {
-        const response = await this.fetcher(`${this.gateway.url}/v1/autodom/invoices`, {
+        const endpoint = isWebVinReport(order) ? "web-report-invoices" : "invoices";
+        const response = await this.fetcher(`${this.gateway.url}/v1/autodom/${endpoint}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${this.gateway.token}`,
@@ -611,7 +686,7 @@ export class PaymentService {
         )
           throw new Error("Unexpected Finik checkout origin");
         await this.ledger.setInvoice(id, url.href);
-        return await this.ownedOrder(userId, id);
+        return await this.ownedOrder(userId, id, channel);
       } catch {
         // Do not expose gateway responses, credentials, or claim that an ambiguous
         // provider request proves no payment exists. The receipt ledger remains authoritative.

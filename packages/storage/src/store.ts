@@ -330,6 +330,7 @@ export class Store {
         "0007_uae_market.sql",
         "0008_catalog_filters.sql",
         "0009_telegram_stars.sql",
+        "0010_web_report_payments.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {

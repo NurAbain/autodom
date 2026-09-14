@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { PaymentEvent } from "@autodom/core/payments";
+import { isWebVinReport, type PaymentEvent } from "@autodom/core/payments";
 import { z } from "zod";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
@@ -55,7 +55,7 @@ export async function handlePaymentRequest(
     );
   if (listing) {
     json(response, 200, {
-      orders: await payments.ledger.listOrders(userId),
+      orders: (await payments.ledger.listOrders(userId)).filter((order) => !isWebVinReport(order)),
       reportSalesEnabled: payments.reportSalesEnabled,
     });
     return;

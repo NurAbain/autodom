@@ -1,18 +1,34 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   finikPaymentId,
+  isWebVinReport,
   type PaymentEvent,
   type PaymentOfferInput,
   type PaymentOrder,
+  type PaymentProvider,
   type PaymentRefund,
   validatePaymentAmount,
   validatePaymentEvent,
   validatePaymentOffer,
   validatePaymentText,
+  validatePaymentTimestamp,
   validatePaymentUrl,
 } from "@autodom/core/payments";
-import { and, asc, desc, eq, getTableColumns, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { paymentEvents, paymentOrders, paymentRefunds } from "./schema.js";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  gt,
+  inArray,
+  isNull,
+  lte,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
+import { paymentEvents, paymentOrders, paymentRefunds, webReportSessions } from "./schema.js";
 import type { Store } from "./store.js";
 
 const orderColumns = {
@@ -68,6 +84,8 @@ function decodeRefund(row: typeof paymentRefunds.$inferSelect): PaymentRefund {
     reason: row.reason,
     status: row.status,
     createdAt: row.created_at,
+    confirmedBy: row.confirmed_by,
+    confirmationReference: row.confirmation_reference,
   };
 }
 /** Fixed field order makes receipt identity independent of JSON object key order. */
@@ -94,11 +112,24 @@ export class PaymentStore {
   constructor(private readonly store: Store) {}
 
   async createOffer(input: PaymentOfferInput): Promise<PaymentOrder> {
+    return this.insertOffer(input, input.product === "vin_report" ? "telegram_stars" : "finik");
+  }
+
+  async createWebReportOffer(input: PaymentOfferInput): Promise<PaymentOrder> {
+    if (input.product !== "vin_report" || input.amount % 100 !== 0)
+      throw new Error("Website reports require a whole-som Finik quote");
+    return this.insertOffer(input, "finik");
+  }
+
+  private async insertOffer(
+    input: PaymentOfferInput,
+    provider: PaymentProvider,
+  ): Promise<PaymentOrder> {
     validatePaymentOffer(input);
-    if (Date.parse(input.expiresAt) <= Date.now()) throw new Error("Inspection offer has expired");
+    if (Date.parse(input.expiresAt) <= Date.now()) throw new Error("Payment offer has expired");
     return this.store.transaction(async () => {
       if (input.product === "vin_report") {
-        const existing = await this.findOpenVinReport(input.userId, input.vin!);
+        const existing = await this.findOpenVinReport(input.userId, input.vin!, provider);
         if (existing) return existing;
       }
       const [row] = await this.store.database
@@ -107,8 +138,8 @@ export class PaymentStore {
           id: randomUUID(),
           user_id: input.userId,
           product: input.product,
-          provider: input.product === "vin_report" ? "telegram_stars" : "finik",
-          currency: input.product === "vin_report" ? "XTR" : "KGS",
+          provider,
+          currency: provider === "telegram_stars" ? "XTR" : "KGS",
           vin: input.vin ?? null,
           amount: input.amount,
           title: input.title,
@@ -387,15 +418,15 @@ export class PaymentStore {
       if (!order || order.paymentStatus !== "paid")
         throw new Error("Refund requires captured payment");
       if (
-        order.provider === "telegram_stars" &&
+        order.product === "vin_report" &&
         (amount !== order.amount || order.fulfillmentStatus === "delivering")
       )
-        throw new Error("Stars require full refund without an active delivery");
+        throw new Error("PDF reports require full refund without an active delivery");
       const refunds = await this.store.database
         .select()
         .from(paymentRefunds)
         .where(eq(paymentRefunds.order_id, orderId));
-      if (order.provider === "telegram_stars") {
+      if (order.product === "vin_report") {
         const pending = refunds.find(
           (refund) => refund.status === "requested" || refund.status === "submitted",
         );
@@ -487,7 +518,89 @@ export class PaymentStore {
     });
   }
 
-  async findOpenVinReport(userId: number, vin: string): Promise<PaymentOrder | null> {
+  async confirmWebReportRefund(orderId: string, actorId: number, reference: string): Promise<void> {
+    if (!Number.isSafeInteger(actorId) || actorId <= 0) throw new Error("Invalid refund operator");
+    validatePaymentText(reference, "Finik refund confirmation", 300);
+    await this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (!order || !isWebVinReport(order) || !order.chargeId)
+        throw new Error("Refund confirmation requires a captured website report");
+      const refunds = await this.listRefunds(orderId);
+      const confirmed = refunds.find((refund) => refund.status === "confirmed");
+      if (confirmed) {
+        if (confirmed.confirmationReference !== reference || confirmed.confirmedBy !== actorId)
+          throw new Error("Refund confirmation is immutable");
+        return;
+      }
+      const pending = refunds.find(
+        (refund) => refund.status === "requested" || refund.status === "submitted",
+      );
+      if (order.paymentStatus !== "paid" || !pending || pending.amount !== order.amount)
+        throw new Error("A full refund must be requested before recording its confirmation");
+      await this.store.database
+        .update(paymentOrders)
+        .set({
+          payment_status: "refunded",
+          fulfillment_status: order.fulfillmentStatus === "fulfilled" ? "fulfilled" : "cancelled",
+        })
+        .where(eq(paymentOrders.id, orderId));
+      await this.store.database
+        .update(paymentRefunds)
+        .set({
+          status: "confirmed",
+          confirmed_by: actorId,
+          confirmation_reference: reference,
+          updated_at: now(),
+        })
+        .where(eq(paymentRefunds.id, pending.id));
+    });
+  }
+
+  async createWebSession(tokenHash: string, userId: number, expiresAt: string): Promise<void> {
+    validatePaymentTimestamp(expiresAt);
+    if (
+      !/^[0-9a-f]{64}$/u.test(tokenHash) ||
+      !Number.isSafeInteger(userId) ||
+      userId <= 0 ||
+      Date.parse(expiresAt) <= Date.now()
+    )
+      throw new Error("Invalid website session");
+    await this.store.transaction(async () => {
+      await this.store.database
+        .delete(webReportSessions)
+        .where(lte(webReportSessions.expires_at, now()));
+      await this.store.database.insert(webReportSessions).values({
+        token_hash: tokenHash,
+        user_id: userId,
+        created_at: now(),
+        expires_at: expiresAt,
+      });
+    });
+  }
+
+  async getWebSessionUser(tokenHash: string): Promise<number | null> {
+    if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return null;
+    const [session] = await this.store.database
+      .select({ userId: webReportSessions.user_id })
+      .from(webReportSessions)
+      .where(
+        and(eq(webReportSessions.token_hash, tokenHash), gt(webReportSessions.expires_at, now())),
+      );
+    return session?.userId ?? null;
+  }
+
+  async deleteWebSession(tokenHash: string): Promise<void> {
+    if (!/^[0-9a-f]{64}$/u.test(tokenHash)) return;
+    await this.store.database
+      .delete(webReportSessions)
+      .where(eq(webReportSessions.token_hash, tokenHash));
+  }
+
+  async findOpenVinReport(
+    userId: number,
+    vin: string,
+    provider: PaymentProvider = "telegram_stars",
+  ): Promise<PaymentOrder | null> {
     if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(vin))
       throw new Error("Invalid report buyer or VIN");
     const rows = await this.store.database
@@ -498,6 +611,7 @@ export class PaymentStore {
           eq(paymentOrders.user_id, userId),
           eq(paymentOrders.vin, vin),
           eq(paymentOrders.product, "vin_report"),
+          eq(paymentOrders.provider, provider),
           ne(paymentOrders.payment_status, "refunded"),
           ne(paymentOrders.invoice_status, "cancelled"),
           ne(paymentOrders.fulfillment_status, "cancelled"),
@@ -603,6 +717,37 @@ export class PaymentStore {
     });
   }
 
+  async finishWebReportDelivery(orderId: string, fileId: string): Promise<PaymentOrder> {
+    validatePaymentText(fileId, "report file ID", 1024);
+    return this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (
+        !order ||
+        !isWebVinReport(order) ||
+        order.paymentStatus !== "paid" ||
+        order.needsReview ||
+        order.refundPending
+      )
+        throw new Error("Website report is not available for delivery");
+      if (order.fulfillmentStatus === "fulfilled") {
+        if (order.reportFileId !== fileId) throw new Error("Delivered PDF is immutable");
+        return order;
+      }
+      if (order.fulfillmentStatus !== "ready")
+        throw new Error("Website report delivery is not ready");
+      const [row] = await this.store.database
+        .update(paymentOrders)
+        .set({
+          fulfillment_status: "fulfilled",
+          report_file_id: fileId,
+          delivered_at: now(),
+        })
+        .where(eq(paymentOrders.id, orderId))
+        .returning();
+      return decodePaymentOrder(row!);
+    });
+  }
+
   async beginReportDelivery(orderId: string, fileId: string): Promise<PaymentOrder> {
     validatePaymentText(fileId, "report file ID", 1024);
     return this.store.transaction(async () => {
@@ -610,6 +755,7 @@ export class PaymentStore {
       if (
         !order ||
         order.product !== "vin_report" ||
+        order.provider !== "telegram_stars" ||
         order.paymentStatus !== "paid" ||
         order.needsReview ||
         order.fulfillmentStatus !== "ready"

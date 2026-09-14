@@ -16,20 +16,27 @@ export default defineConfig({
   async onSuccess() {
     await mkdir("apps/bot/dist/public", { recursive: true });
     await mkdir("apps/bot/dist/public/reports", { recursive: true });
+    await mkdir("apps/bot/dist/public/report-site", { recursive: true });
     await Promise.all([
       copyFile("apps/bot/web/index.html", "apps/bot/dist/public/index.html"),
       copyFile("apps/bot/web/app.css", "apps/bot/dist/public/app.css"),
+      copyFile(
+        "apps/bot/src/report-site/index.html",
+        "apps/bot/dist/public/report-site/index.html",
+      ),
+      copyFile("apps/bot/src/report-site/app.css", "apps/bot/dist/public/report-site/app.css"),
       copyFile(
         "apps/bot/src/public/reports/vin-korea-otchet-kr.pdf",
         "apps/bot/dist/public/reports/vin-korea-otchet-kr.pdf",
       ),
     ]);
     await build({
-      entry: { app: "apps/bot/web/app.ts" },
+      entry: { app: "apps/bot/web/app.ts", "report-site/app": "apps/bot/src/report-site/app.ts" },
       outDir: "apps/bot/dist/public",
       config: false,
       clean: false,
       bundle: true,
+      splitting: false,
       platform: "browser",
       format: ["esm"],
       target: "es2020",

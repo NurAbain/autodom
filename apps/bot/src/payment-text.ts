@@ -1,10 +1,12 @@
-import type { PaymentOrder } from "@autodom/core/payments";
+import { isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
 
 export const VIN_REPORT_STARS = 500;
+export const VIN_REPORT_FINIK_MINOR = 49900;
 export const VIN_REPORT_OWNER = 706854211;
 export const VIN_REPORT_SLA_MS = 60 * 60 * 1000;
 export const VIN_REPORT_MAX_BYTES = 20 * 1024 * 1024;
 export const VIN_REPORT_TERMS = `Полный корейский PDF по указанному VIN — ${VIN_REPORT_STARS} Telegram Stars (XTR), разовая покупка. Продавец и исполнитель: владелец Autodom (Telegram ID ${VIN_REPORT_OWNER}). Настоящий PDF вручную отправляется в этот бот в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если выдать отчёт невозможно, владелец возвращает все ${VIN_REPORT_STARS} Stars. Сведения исторические и могут быть неполными; отчёт не гарантирует состояние автомобиля. Образец — не отчёт по вашему VIN. Поддержка и запрос полного возврата: /paysupport текст. По покупке отвечает Autodom, не поддержка Telegram. Подтверждая условия перед оплатой, вы подтверждаете VIN, цену, срок и эти условия.`;
+export const VIN_REPORT_WEB_TERMS = `Полный корейский PDF по указанному VIN — ${VIN_REPORT_FINIK_MINOR / 100} сом (KGS), разовая покупка на сайте через Finik. Продавец и исполнитель: владелец Autodom (Telegram ID ${VIN_REPORT_OWNER}). Настоящий PDF вручную становится доступен в вашем заказе на этом сайте в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если выдать отчёт невозможно, владелец возвращает всю сумму через Finik. Возврат выполняется владельцем в кабинете Finik; заявка не означает, что деньги уже возвращены. Сведения исторические и могут быть неполными; отчёт не гарантирует состояние автомобиля. Образец — не отчёт по вашему VIN. Поддержка и запрос полного возврата — через форму заказа; ответ придёт в личный чат бота. По покупке отвечает Autodom. Подтверждая условия перед оплатой, вы подтверждаете VIN, цену, срок и эти условия.`;
 
 export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency">): string {
   return order.currency === "XTR"
@@ -13,19 +15,25 @@ export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency
 }
 
 export const PAYMENT_PRIVACY_NOTICE =
-  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание и сумму физического осмотра, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для ручной выдачи и поддержки. Переход на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
+  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание и сумму заказа на осмотр или PDF на обычном сайте, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для ручной выдачи и поддержки. PDF, купленный на сайте, выдаётся только на сайте. Переход на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
 
 export function paymentOrderStatus(order: PaymentOrder): string {
   if (order.paymentStatus === "refunded")
     return order.needsReview
       ? "Возврат подтверждён · другие платёжные расхождения требуют проверки"
-      : "Полный возврат Stars подтверждён";
+      : order.provider === "telegram_stars"
+        ? "Полный возврат Stars подтверждён"
+        : "Полный возврат Finik подтверждён владельцем";
   if (order.needsReview) return "Платёж требует проверки — не оплачивайте повторно";
   if (order.product === "vin_report" && order.refundPending)
-    return "Полный возврат запрошен · подтверждения Telegram пока нет · выдача PDF приостановлена";
+    return order.provider === "telegram_stars"
+      ? "Полный возврат запрошен · подтверждения Telegram пока нет · выдача PDF приостановлена"
+      : "Полный возврат запрошен · владелец ещё не подтвердил возврат через Finik · выдача PDF приостановлена";
   if (order.product === "vin_report" && order.paymentStatus === "paid") {
     if (order.fulfillmentStatus === "fulfilled")
-      return "Оплата подтверждена · PDF отправлен в Telegram";
+      return isWebVinReport(order)
+        ? "Оплата подтверждена · PDF доступен на сайте"
+        : "Оплата подтверждена · PDF отправлен в Telegram";
     if (order.fulfillmentStatus === "delivering")
       return "Оплата подтверждена · отправка PDF начата, результат ещё не подтверждён";
     if (order.fulfillmentStatus === "delivery_unknown")

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { isWebVinReport } from "@autodom/core/payments";
 import {
   ENCAR_HISTORY_MAX_LISTINGS,
   ENCAR_HISTORY_MAX_PHOTOS,
@@ -49,6 +50,7 @@ import {
   vinResultActions,
   vinResultPresentation,
 } from "./vin-text.js";
+import type { WebReportAuth } from "./web-report-auth.js";
 
 function replyKeyboard(
   buttons: Buttons,
@@ -186,7 +188,10 @@ export async function sendReplies(
   }
 }
 
-export type AutodomBot = Bot & { clearVinInput(userId: number): void };
+export type AutodomBot = Bot & {
+  clearVinInput(userId: number): void;
+  webReportAuth?: WebReportAuth;
+};
 
 export interface TelegramBotOptions {
   apiRoot?: string;
@@ -552,6 +557,24 @@ export function createTelegramBot(
     if (privateBuyer(context)) await context.reply(VIN_REPORT_TERMS);
   });
   bot.command("start", async (context, next) => {
+    if (context.match.startsWith("web_report_")) {
+      if (!privateBuyer(context)) return;
+      try {
+        const auth = (bot as AutodomBot).webReportAuth;
+        if (!auth) throw new PaymentRequestError(503, "Вход на сайт сейчас недоступен.");
+        const login = auth.issueCode(context.match.slice("web_report_".length), context.from!.id);
+        await context.reply(
+          `Код входа на сайт Autodom: ${login.code}\n\nВведите его только в том браузере, где вы начали вход. Не сообщайте код другим людям. Срок действия — 10 минут с начала входа. Если вы не открывали сайт, не передавайте код. Это только вход, не покупка и не согласие на оплату.`,
+        );
+      } catch (error) {
+        await context.reply(
+          error instanceof PaymentRequestError
+            ? error.message
+            : "Вход не подтверждён. Начните вход на сайте заново.",
+        );
+      }
+      return;
+    }
     if (context.match !== "paysupport") return next();
     if (privateBuyer(context))
       await context.reply(
@@ -575,7 +598,23 @@ export function createTelegramBot(
   bot.command("refund", (context) =>
     paymentAction(context, async (payments) => {
       const order = await payments.refundReport(context.from!.id, context.match.trim());
-      await context.reply(`${order.id}\n${paymentOrderStatus(order)}`);
+      await context.reply(
+        `${order.id}\n${paymentOrderStatus(order)}${isWebVinReport(order) && order.paymentStatus !== "refunded" ? `\n\nДеньги ещё не возвращены. Выполните полный возврат ${paymentAmountText(order)} в кабинете Finik по платежу ${order.chargeId}, затем подтвердите фактический результат:\n/refundconfirm ${order.id} РЕФЕРЕНС_ВОЗВРАТА` : ""}`,
+      );
+    }),
+  );
+  bot.command("refundconfirm", (context) =>
+    paymentAction(context, async (payments) => {
+      const match = /^([0-9a-f-]+)\s+([^\r\n]+)$/u.exec(context.match.trim());
+      if (!match)
+        throw new PaymentRequestError(
+          400,
+          "Только после полного возврата в кабинете Finik: /refundconfirm ORDER_ID РЕФЕРЕНС_ВОЗВРАТА.",
+        );
+      const order = await payments.confirmWebRefund(context.from!.id, match[1]!, match[2]!);
+      await context.reply(
+        `${order.id}\n${paymentOrderStatus(order)}\nЗаписано подтверждение владельца, не выполнен новый банковский перевод.`,
+      );
     }),
   );
   bot.command("report", (context) =>
@@ -585,8 +624,9 @@ export function createTelegramBot(
       const order = await payments.ledger.getOrder(context.match.trim());
       if (!order || order.product !== "vin_report")
         throw new PaymentRequestError(404, "PDF-заказ не найден.");
+      const refunds = await payments.ledger.listRefunds(order.id);
       await context.reply(
-        `${order.id}\nVIN ${order.vin}\nПокупатель ${order.userId}\n${paymentAmountText(order)}\n${paymentOrderStatus(order)}\nВыдан: ${order.deliveredAt ?? "нет"}\nСообщение: ${order.reportMessageId ?? "не подтверждено"}`,
+        `${order.id}\nVIN ${order.vin}\nПокупатель ${order.userId}\n${paymentAmountText(order)}\n${paymentOrderStatus(order)}\nВыдан: ${order.deliveredAt ?? "нет"}\n${isWebVinReport(order) ? "Выдача: только сайт" : `Сообщение: ${order.reportMessageId ?? "не подтверждено"}`}\n${refunds.map((refund) => `Возврат: ${refund.status}${refund.confirmationReference ? ` · ${refund.confirmationReference} · подтвердил ${refund.confirmedBy}` : ""}`).join("\n")}`,
       );
     }),
   );
@@ -629,7 +669,9 @@ export function createTelegramBot(
       await context.reply("Заказы сейчас недоступны. Поиск, уведомления и проверка VIN бесплатны.");
       return;
     }
-    const orders = await options.payments.ledger.listOrders(context.from.id);
+    const orders = (await options.payments.ledger.listOrders(context.from.id)).filter(
+      (order) => !isWebVinReport(order),
+    );
     const replies = packReplies(
       "<b>Мои заказы</b>\n\n" +
         (orders.length

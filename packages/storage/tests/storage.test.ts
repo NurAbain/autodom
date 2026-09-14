@@ -121,6 +121,18 @@ async function rewriteSnapshot(
           delete row[name];
     }
   }
+  if (Number(records[0]?.schema_version) < 8) {
+    records[0]!.tables = (records[0]!.tables as string[]).filter(
+      (table) => table !== "web_report_sessions",
+    );
+    delete (footer.counts as Record<string, number>).web_report_sessions;
+    for (const record of records) {
+      if (record.table === "payment_refunds") {
+        delete (record.row as Record<string, unknown>).confirmed_by;
+        delete (record.row as Record<string, unknown>).confirmation_reference;
+      }
+    }
+  }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
   await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
@@ -455,6 +467,72 @@ const starsReceipt = (orderId: string, userId = 1): PaymentEvent => ({
   currency: "XTR",
   amount: 500,
   userId,
+});
+
+describe("Independent Finik website reports", () => {
+  it("separates native Stars offers and refuses delivery before authenticated Finik capture", async () => {
+    const payments = new PaymentStore(db);
+    const native = await payments.createOffer(reportOffer());
+    const web = await payments.createWebReportOffer({ ...reportOffer(), amount: 49900 });
+    expect(native.id).not.toBe(web.id);
+    expect((await payments.findOpenVinReport(1, web.vin!))?.id).toBe(native.id);
+    expect((await payments.findOpenVinReport(1, web.vin!, "finik"))?.id).toBe(web.id);
+    await expect(payments.finishWebReportDelivery(web.id, "pdf")).rejects.toThrow();
+    await payments.acceptOrder(web.id, 1);
+    expect(await payments.reserveStarsCheckout(web.id, 1, "XTR", 49900, "wrong-channel")).toBe(
+      false,
+    );
+    const capture = { ...receipt(web.id), amount: 49900 };
+    expect(await payments.ingestEvent(capture)).toBe("applied");
+    expect(await payments.ingestEvent(capture)).toBe("duplicate");
+    await expect(payments.beginReportDelivery(web.id, "native-delivery")).rejects.toThrow();
+    expect(await payments.finishWebReportDelivery(web.id, "website-pdf")).toMatchObject({
+      paymentStatus: "paid",
+      fulfillmentStatus: "fulfilled",
+      reportMessageId: null,
+      reportFileId: "website-pdf",
+    });
+    await expect(payments.finishWebReportDelivery(web.id, "replacement")).rejects.toThrow();
+    await expect(payments.finishWebReportDelivery(native.id, "wrong-channel")).rejects.toThrow();
+  });
+
+  it("keeps requested refunds unpaid until operator proof and restores website sessions and financial evidence", async () => {
+    const payments = new PaymentStore(db);
+    const web = await payments.createWebReportOffer({ ...reportOffer(), amount: 49900 });
+    await payments.acceptOrder(web.id, 1);
+    await payments.ingestEvent({ ...receipt(web.id), amount: 49900 });
+    await expect(payments.requestRefund(web.id, 499, "Partial")).rejects.toThrow();
+    const refund = await payments.requestRefund(web.id, web.amount, "Unable to supply genuine PDF");
+    await expect(payments.markRefund(refund.id, "confirmed")).rejects.toThrow();
+    await expect(payments.finishWebReportDelivery(web.id, "blocked-pdf")).rejects.toThrow();
+    expect(await payments.getOrder(web.id)).toMatchObject({
+      paymentStatus: "paid",
+      refundPending: true,
+    });
+    await payments.confirmWebReportRefund(web.id, 706854211, "finik-return-42");
+    await payments.confirmWebReportRefund(web.id, 706854211, "finik-return-42");
+    await expect(
+      payments.confirmWebReportRefund(web.id, 706854211, "different-proof"),
+    ).rejects.toThrow();
+    const hash = createHash("sha256").update("website-session").digest("hex");
+    await payments.createWebSession(hash, 1, new Date((NOW + 3600) * 1000).toISOString());
+    const source = join(directory, "finik-web.ndjson");
+    await backup(db, source);
+    const targetUrl = await database();
+    await restore(source, targetUrl);
+    const restored = new PaymentStore(await open(targetUrl));
+    expect(await restored.getOrder(web.id)).toMatchObject({
+      paymentStatus: "refunded",
+      refundPending: false,
+      fulfillmentStatus: "cancelled",
+    });
+    expect(await restored.listRefunds(web.id)).toMatchObject([
+      { status: "confirmed", confirmedBy: 706854211, confirmationReference: "finik-return-42" },
+    ]);
+    expect(await restored.getWebSessionUser(hash)).toBe(1);
+    vi.setSystemTime((NOW + 3600) * 1000);
+    expect(await restored.getWebSessionUser(hash)).toBeNull();
+  });
 });
 
 describe("Telegram Stars financial and delivery boundaries", () => {

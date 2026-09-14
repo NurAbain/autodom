@@ -55,6 +55,13 @@ export interface PaymentRefund {
   reason: string;
   status: "requested" | "submitted" | "failed" | "confirmed";
   createdAt: string;
+  confirmedBy: number | null;
+  confirmationReference: string | null;
+}
+
+/** Digital Finik orders are website-only; they must not enter Telegram checkout. */
+export function isWebVinReport(order: Pick<PaymentOrder, "product" | "provider">): boolean {
+  return order.product === "vin_report" && order.provider === "finik";
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;

@@ -23,6 +23,7 @@ import { monitor } from "./monitor.js";
 import type { PaymentService } from "./payments.js";
 import { loadPaymentListenerSettings, startPaymentListener } from "./payments-http.js";
 import { type AutodomBot, configureTelegramBot, sendReplies } from "./telegram.js";
+import { WebReportAuth } from "./web-report-auth.js";
 
 export function startPolling(
   bot: Bot,
@@ -245,6 +246,8 @@ export async function runBotService(
     await configureTelegramBot(bot, abort.signal);
     abort.signal.throwIfAborted();
     if (miniAppUrl && listener) {
+      if (context.payments)
+        bot.webReportAuth = new WebReportAuth(context.payments.ledger, bot.botInfo.username);
       let probe: Promise<boolean> | undefined;
       const ready = async (): Promise<boolean> => {
         if (abort.signal.aborted) return false;
@@ -272,6 +275,7 @@ export async function runBotService(
         publicUrl: miniAppUrl,
         ...listener,
         ...(context.payments ? { payments: context.payments } : {}),
+        ...(bot.webReportAuth ? { webReportAuth: bot.webReportAuth } : {}),
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
         ...(context.checkVinArchive ? { checkVinArchive: context.checkVinArchive } : {}),

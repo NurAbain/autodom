@@ -32,6 +32,8 @@ import type { MiniAppCar } from "./miniapp-contract.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { handlePaymentRequest } from "./payments-http.js";
 import { VIN_NOT_ENABLED } from "./vin-text.js";
+import type { WebReportAuth } from "./web-report-auth.js";
+import { handleWebReportRequest } from "./web-report-http.js";
 
 async function readDialogueRequest(request: IncomingMessage): Promise<string> {
   const value = await readFlatJson(request, 8192);
@@ -99,6 +101,7 @@ export interface MiniAppServerOptions {
   /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
   dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
   payments?: PaymentService;
+  webReportAuth?: WebReportAuth;
 }
 
 export async function startMiniAppServer(options: MiniAppServerOptions): Promise<Server> {
@@ -115,6 +118,18 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       body: await readFile(join(directory, name)),
       type,
     });
+  }
+  if (options.webReportAuth) {
+    for (const [name, type] of [
+      ["index.html", "text/html; charset=utf-8"],
+      ["app.js", "text/javascript; charset=utf-8"],
+      ["app.css", "text/css; charset=utf-8"],
+    ]) {
+      assets.set(name === "index.html" ? "/reports/" : `/reports/${name}`, {
+        body: await readFile(join(directory, "report-site", name!)),
+        type: type!,
+      });
+    }
   }
   const apiRoutes = [
     "/miniapp/api/car",
@@ -175,6 +190,35 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
+        if (url.pathname === "/reports" || url.pathname.startsWith("/reports/")) {
+          response.setHeader(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-src 'none'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'none'",
+          );
+          response.setHeader("X-Frame-Options", "DENY");
+          if (
+            url.pathname === "/reports" &&
+            (request.method === "GET" || request.method === "HEAD")
+          ) {
+            response.writeHead(308, { Location: `/reports/${url.search}` }).end();
+            return;
+          }
+          if (url.pathname.startsWith("/reports/api/")) {
+            route = "/reports/api";
+            if (!options.webReportAuth || !options.payments)
+              throw new RequestError(503, "Сайт заказов сейчас недоступен.");
+            await handleWebReportRequest(
+              request,
+              response,
+              url,
+              origin,
+              options.webReportAuth,
+              options.payments,
+              options.checkVin,
+            );
+            return;
+          }
+        }
         route =
           url.pathname === "/health" ||
           url.pathname === "/ready" ||
