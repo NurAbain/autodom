@@ -16,7 +16,11 @@ import {
   type VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import type { Reply } from "../src/conversation.js";
-import { KOREAN_REPORT_EXAMPLE, KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
+import {
+  KOREAN_REPORT_EXAMPLE,
+  KOREAN_REPORT_EXAMPLE_PDF,
+  KOREAN_REPORT_PREVIEW,
+} from "../src/korean-report-example.js";
 import type { MiniAppCar } from "../src/miniapp-contract.js";
 import { PAYMENT_PRIVACY_NOTICE, paymentOrderStatus } from "../src/payment-text.js";
 import {
@@ -324,27 +328,25 @@ function samplePdfLink(): HTMLAnchorElement {
 }
 
 function premiumPanel(): HTMLElement {
+  const preview = KOREAN_REPORT_PREVIEW;
   const panel = element("section", "panel premium-panel");
+  const benefits = element("ul", "report-benefits");
+  for (const [title, detail] of preview.benefits) {
+    const item = element("li", "");
+    item.append(element("strong", "", title), element("span", "", detail));
+    benefits.append(item);
+  }
+  const pdf = samplePdfLink();
+  pdf.classList.add("button-quiet");
   panel.append(
-    element("p", "eyebrow", "Следующий уровень проверки"),
-    element("h2", "", "Как выглядит корейский отчёт"),
-    element(
-      "p",
-      "",
-      "Страховые события, известные ремонтные работы, пробег и смена владельцев — собраны в одном документе. Посмотрите, какие сведения доступны и как их читать.",
-    ),
-    element(
-      "p",
-      "footnote",
-      "Это готовый пример, не проверка вашего автомобиля. Заказ нового отчёта пока недоступен.",
-    ),
-    samplePdfLink(),
-    button("Разобрать пример на русском", () => navigate("report-example"), "button button-quiet"),
-    element(
-      "p",
-      "footnote",
-      "Пример относится к другому автомобилю. Это не результат проверки вашего VIN.",
-    ),
+    element("p", "eyebrow", preview.title),
+    element("h2", "", preview.heading),
+    benefits,
+    element("p", "footnote", preview.limitations),
+    element("p", "footnote", preview.exampleNotice),
+    element("p", "footnote", preview.orderNotice),
+    button(preview.explanationLabel, () => navigate("report-example")),
+    pdf,
   );
   return panel;
 }

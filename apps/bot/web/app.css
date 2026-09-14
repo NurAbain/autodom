@@ -121,6 +121,10 @@ p { line-height: 1.6; }
 .premium-panel { background: color-mix(in srgb, var(--accent) 5%, var(--panel)); }
 .premium-panel h2 { font-size: 21px; }
 .premium-panel .button { display: block; width: 100%; margin-bottom: 14px; }
+.report-benefits { list-style: none; padding: 0; margin: 0 0 18px; }
+.report-benefits li + li { margin-top: 12px; }
+.report-benefits strong { display: block; margin-bottom: 3px; font-size: 14px; }
+.report-benefits span { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .sample-pdf { display: flex; align-items: center; justify-content: center; width: 100%; text-decoration: none; }
 .disclosure { border-top: 1px solid var(--line); padding-top: 16px; }
 summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 14px; line-height: 1.5; }

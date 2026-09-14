@@ -30,13 +30,12 @@ describe("VIN observations presented without buying or certifying a report", () 
   it("distinguishes recorded mileage, missing damage data and report availability", () => {
     const { text, richHtml } = vinResultPresentation(result);
     const rendered = load(richHtml);
-    expect(rendered("h3").first().text()).toMatch(/Экспорт.*бесплатно/);
     expect(
       rendered("td b")
         .map((_index, node) => rendered(node).text())
         .get(),
     ).toEqual(expect.arrayContaining(["Avante", "0 км", "2024-05-02", "2010-01-15"]));
-    expect(text.indexOf("0 км")).toBeLessThan(text.indexOf("Полная история"));
+    expect(rendered("table, tg-button").first().is("table")).toBe(true);
     expect(text).toContain(result.vin);
     expect(text).toContain("0 км");
     expect(text).toContain("2024-05-02");

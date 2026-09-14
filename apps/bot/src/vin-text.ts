@@ -17,6 +17,7 @@ import {
   type VinArchiveStatus,
 } from "@autodom/core/vin-archive";
 import { escapeHtml } from "./html.js";
+import { KOREAN_REPORT_PREVIEW } from "./korean-report-example.js";
 
 export const VIN_ARCHIVE_LABEL = "Архивные фото США / ОАЭ";
 export const VIN_ARCHIVE_CARWAY_NOTICE =
@@ -295,15 +296,21 @@ type VinButton = { text: string; style?: "primary" } & (
 );
 
 export function vinResultActions(vin: string, miniAppUrl?: string) {
-  const report: VinButton[] = [
-    { text: "Посмотреть пример · PDF", callback_data: "vin-report-example", style: "primary" },
-  ];
+  const report: VinButton[] = [];
+  const pdf: VinButton = {
+    text: KOREAN_REPORT_PREVIEW.pdfLabel,
+    callback_data: "vin-report-example",
+  };
   if (miniAppUrl) {
     report.push({
-      text: "Разбор примера на русском",
+      text: KOREAN_REPORT_PREVIEW.explanationLabel,
       web_app: { url: new URL("?view=report-example", miniAppUrl).href },
+      style: "primary",
     });
+  } else {
+    pdf.style = "primary";
   }
+  report.push(pdf);
   const additional: { button: VinButton; notice: string }[] = [
     {
       button: { text: VIN_ARCHIVE_LABEL, callback_data: `vinarchive:${vin}` },
@@ -394,30 +401,30 @@ export function vinResultPresentation(
       checked: vinCheckedText(observation.checked_at),
     });
   }
-  const benefits = [
-    "Страховые повреждения и суммы ремонта",
-    "Смены собственника и регистрационные записи",
-    "История записанного пробега",
-  ];
-  const exampleNotice = "Это пример другого автомобиля, не результат проверки вашего VIN.";
+  const preview = KOREAN_REPORT_PREVIEW;
+  const benefits = preview.benefits.map(
+    ([title, detail]) => `<b>${escapeHtml(title)}</b> — ${escapeHtml(detail)}`,
+  );
+  const exampleNotice = escapeHtml(preview.exampleNotice);
   const reportStatus = escapeHtml(vinSourceDescription("carhistory", result));
-  const orderStatus = "<b>Заказ нового отчёта пока недоступен.</b>";
+  const orderStatus = escapeHtml(preview.orderNotice);
   sections.push({
-    title: "Полная история · Корея",
+    title: preview.title,
     body: [
       reportStatus,
       "",
-      "<b>Что есть в примере полного отчёта</b>",
+      `<b>${escapeHtml(preview.heading)}</b>`,
       ...benefits.map((benefit) => `• ${benefit}`),
+      escapeHtml(preview.limitations),
       "",
       exampleNotice,
       orderStatus,
     ].join("\n"),
     checked: vinCheckedText(result.carhistory.checked_at),
     richBody:
-      `<p>${reportStatus}</p><p><b>Что есть в примере полного отчёта</b></p>` +
+      `<p>${reportStatus}</p><p><b>${escapeHtml(preview.heading)}</b></p>` +
       `<ul>${benefits.map((benefit) => `<li>${benefit}</li>`).join("")}</ul>` +
-      `<p>${exampleNotice}</p><p>${orderStatus}</p>`,
+      `<p>${escapeHtml(preview.limitations)}</p><p>${exampleNotice}</p><p>${orderStatus}</p>`,
     buttons: actions.report,
   });
   const vin = escapeHtml(result.vin);
