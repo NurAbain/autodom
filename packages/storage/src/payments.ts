@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   finikPaymentId,
   isWebVinReport,
+  type PaymentChannel,
   type PaymentEvent,
   type PaymentOfferInput,
   type PaymentOrder,
@@ -48,6 +49,7 @@ export function decodePaymentOrder(
     userId: row.user_id,
     product: row.product,
     provider: row.provider,
+    channel: row.channel,
     currency: row.currency,
     amount: row.amount,
     title: row.title,
@@ -112,24 +114,33 @@ export class PaymentStore {
   constructor(private readonly store: Store) {}
 
   async createOffer(input: PaymentOfferInput): Promise<PaymentOrder> {
-    return this.insertOffer(input, input.product === "vin_report" ? "telegram_stars" : "finik");
+    return this.insertOffer(
+      input,
+      input.product === "vin_report" ? "telegram_stars" : "finik",
+      "telegram",
+    );
   }
 
-  async createWebReportOffer(input: PaymentOfferInput): Promise<PaymentOrder> {
+  async createFinikReportOffer(
+    input: PaymentOfferInput,
+    channel: PaymentChannel,
+  ): Promise<PaymentOrder> {
     if (input.product !== "vin_report" || input.amount % 100 !== 0)
-      throw new Error("Website reports require a whole-som Finik quote");
-    return this.insertOffer(input, "finik");
+      throw new Error("PDF reports require a whole-som Finik quote");
+    return this.insertOffer(input, "finik", channel);
   }
 
   private async insertOffer(
     input: PaymentOfferInput,
     provider: PaymentProvider,
+    channel: PaymentChannel,
   ): Promise<PaymentOrder> {
     validatePaymentOffer(input);
+    if (channel !== "telegram" && channel !== "web") throw new Error("Invalid payment channel");
     if (Date.parse(input.expiresAt) <= Date.now()) throw new Error("Payment offer has expired");
     return this.store.transaction(async () => {
       if (input.product === "vin_report") {
-        const existing = await this.findOpenVinReport(input.userId, input.vin!, provider);
+        const existing = await this.findOpenVinReport(input.userId, input.vin!, provider, channel);
         if (existing) return existing;
       }
       const [row] = await this.store.database
@@ -139,6 +150,7 @@ export class PaymentStore {
           user_id: input.userId,
           product: input.product,
           provider,
+          channel,
           currency: provider === "telegram_stars" ? "XTR" : "KGS",
           vin: input.vin ?? null,
           amount: input.amount,
@@ -518,13 +530,17 @@ export class PaymentStore {
     });
   }
 
-  async confirmWebReportRefund(orderId: string, actorId: number, reference: string): Promise<void> {
+  async confirmFinikReportRefund(
+    orderId: string,
+    actorId: number,
+    reference: string,
+  ): Promise<void> {
     if (!Number.isSafeInteger(actorId) || actorId <= 0) throw new Error("Invalid refund operator");
     validatePaymentText(reference, "Finik refund confirmation", 300);
     await this.store.transaction(async () => {
       const order = await this.getOrder(orderId);
-      if (!order || !isWebVinReport(order) || !order.chargeId)
-        throw new Error("Refund confirmation requires a captured website report");
+      if (!order || order.product !== "vin_report" || order.provider !== "finik" || !order.chargeId)
+        throw new Error("Refund confirmation requires a captured Finik report");
       const refunds = await this.listRefunds(orderId);
       const confirmed = refunds.find((refund) => refund.status === "confirmed");
       if (confirmed) {
@@ -535,7 +551,12 @@ export class PaymentStore {
       const pending = refunds.find(
         (refund) => refund.status === "requested" || refund.status === "submitted",
       );
-      if (order.paymentStatus !== "paid" || !pending || pending.amount !== order.amount)
+      if (
+        order.paymentStatus !== "paid" ||
+        order.fulfillmentStatus === "delivering" ||
+        !pending ||
+        pending.amount !== order.amount
+      )
         throw new Error("A full refund must be requested before recording its confirmation");
       await this.store.database
         .update(paymentOrders)
@@ -599,10 +620,16 @@ export class PaymentStore {
   async findOpenVinReport(
     userId: number,
     vin: string,
-    provider: PaymentProvider = "telegram_stars",
+    provider: PaymentProvider,
+    channel: PaymentChannel,
   ): Promise<PaymentOrder | null> {
     if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(vin))
       throw new Error("Invalid report buyer or VIN");
+    if (
+      (provider !== "finik" && provider !== "telegram_stars") ||
+      (channel !== "telegram" && channel !== "web")
+    )
+      throw new Error("Invalid report provider or channel");
     const rows = await this.store.database
       .select(orderColumns)
       .from(paymentOrders)
@@ -612,6 +639,7 @@ export class PaymentStore {
           eq(paymentOrders.vin, vin),
           eq(paymentOrders.product, "vin_report"),
           eq(paymentOrders.provider, provider),
+          eq(paymentOrders.channel, channel),
           ne(paymentOrders.payment_status, "refunded"),
           ne(paymentOrders.invoice_status, "cancelled"),
           ne(paymentOrders.fulfillment_status, "cancelled"),
@@ -755,7 +783,7 @@ export class PaymentStore {
       if (
         !order ||
         order.product !== "vin_report" ||
-        order.provider !== "telegram_stars" ||
+        order.channel !== "telegram" ||
         order.paymentStatus !== "paid" ||
         order.needsReview ||
         order.fulfillmentStatus !== "ready"
@@ -777,7 +805,12 @@ export class PaymentStore {
       throw new Error("Invalid report document message ID");
     await this.store.transaction(async () => {
       const order = await this.getOrder(orderId);
-      if (!order || order.product !== "vin_report" || !order.reportFileId)
+      if (
+        !order ||
+        order.product !== "vin_report" ||
+        order.channel !== "telegram" ||
+        !order.reportFileId
+      )
         throw new Error("Report delivery not reserved");
       if (order.fulfillmentStatus === "fulfilled" && order.reportMessageId === messageId) return;
       if (order.fulfillmentStatus !== "delivering")
@@ -797,7 +830,12 @@ export class PaymentStore {
     if (typeof uncertain !== "boolean") throw new Error("Invalid delivery failure");
     await this.store.transaction(async () => {
       const order = await this.getOrder(orderId);
-      if (!order || order.product !== "vin_report" || order.fulfillmentStatus !== "delivering")
+      if (
+        !order ||
+        order.product !== "vin_report" ||
+        order.channel !== "telegram" ||
+        order.fulfillmentStatus !== "delivering"
+      )
         throw new Error("Report delivery is not active");
       await this.store.database
         .update(paymentOrders)

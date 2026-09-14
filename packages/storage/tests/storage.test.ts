@@ -133,6 +133,10 @@ async function rewriteSnapshot(
       }
     }
   }
+  if (Number(records[0]?.schema_version) < 9) {
+    for (const record of records)
+      if (record.table === "payment_orders") delete (record.row as Record<string, unknown>).channel;
+  }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
   await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
@@ -473,10 +477,12 @@ describe("Independent Finik website reports", () => {
   it("separates native Stars offers and refuses delivery before authenticated Finik capture", async () => {
     const payments = new PaymentStore(db);
     const native = await payments.createOffer(reportOffer());
-    const web = await payments.createWebReportOffer({ ...reportOffer(), amount: 49900 });
+    const web = await payments.createFinikReportOffer({ ...reportOffer(), amount: 49900 }, "web");
     expect(native.id).not.toBe(web.id);
-    expect((await payments.findOpenVinReport(1, web.vin!))?.id).toBe(native.id);
-    expect((await payments.findOpenVinReport(1, web.vin!, "finik"))?.id).toBe(web.id);
+    expect((await payments.findOpenVinReport(1, web.vin!, "telegram_stars", "telegram"))?.id).toBe(
+      native.id,
+    );
+    expect((await payments.findOpenVinReport(1, web.vin!, "finik", "web"))?.id).toBe(web.id);
     await expect(payments.finishWebReportDelivery(web.id, "pdf")).rejects.toThrow();
     await payments.acceptOrder(web.id, 1);
     expect(await payments.reserveStarsCheckout(web.id, 1, "XTR", 49900, "wrong-channel")).toBe(
@@ -498,7 +504,7 @@ describe("Independent Finik website reports", () => {
 
   it("keeps requested refunds unpaid until operator proof and restores website sessions and financial evidence", async () => {
     const payments = new PaymentStore(db);
-    const web = await payments.createWebReportOffer({ ...reportOffer(), amount: 49900 });
+    const web = await payments.createFinikReportOffer({ ...reportOffer(), amount: 49900 }, "web");
     await payments.acceptOrder(web.id, 1);
     await payments.ingestEvent({ ...receipt(web.id), amount: 49900 });
     await expect(payments.requestRefund(web.id, 499, "Partial")).rejects.toThrow();
@@ -509,10 +515,10 @@ describe("Independent Finik website reports", () => {
       paymentStatus: "paid",
       refundPending: true,
     });
-    await payments.confirmWebReportRefund(web.id, 706854211, "finik-return-42");
-    await payments.confirmWebReportRefund(web.id, 706854211, "finik-return-42");
+    await payments.confirmFinikReportRefund(web.id, 706854211, "finik-return-42");
+    await payments.confirmFinikReportRefund(web.id, 706854211, "finik-return-42");
     await expect(
-      payments.confirmWebReportRefund(web.id, 706854211, "different-proof"),
+      payments.confirmFinikReportRefund(web.id, 706854211, "different-proof"),
     ).rejects.toThrow();
     const hash = createHash("sha256").update("website-session").digest("hex");
     await payments.createWebSession(hash, 1, new Date((NOW + 3600) * 1000).toISOString());
@@ -532,6 +538,228 @@ describe("Independent Finik website reports", () => {
     expect(await restored.getWebSessionUser(hash)).toBe(1);
     vi.setSystemTime((NOW + 3600) * 1000);
     expect(await restored.getWebSessionUser(hash)).toBeNull();
+  });
+});
+
+describe("Explicit Finik Telegram report channel", () => {
+  it("isolates simultaneous rail and channel offers and reserves exactly one native document send", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    const quote = { ...reportOffer(), amount: 49900 };
+    const [native, duplicate, web, stars] = await Promise.all([
+      payments.createFinikReportOffer(quote, "telegram"),
+      peer.createFinikReportOffer(quote, "telegram"),
+      payments.createFinikReportOffer(quote, "web"),
+      peer.createOffer(reportOffer()),
+    ]);
+    expect(duplicate.id).toBe(native.id);
+    expect(new Set([native.id, web.id, stars.id]).size).toBe(3);
+    expect((await payments.findOpenVinReport(1, native.vin!, "finik", "telegram"))?.id).toBe(
+      native.id,
+    );
+    expect((await payments.findOpenVinReport(1, web.vin!, "finik", "web"))?.id).toBe(web.id);
+    await expect(payments.beginReportDelivery(native.id, "unpaid")).rejects.toThrow();
+    await payments.acceptOrder(native.id, 1);
+    expect(
+      await payments.reserveStarsCheckout(native.id, 1, "XTR", native.amount, "finik-checkout"),
+    ).toBe(false);
+    const capture = { ...receipt(native.id), amount: native.amount };
+    expect(await payments.ingestEvent(capture)).toBe("applied");
+    expect(await payments.ingestEvent(capture)).toBe("duplicate");
+    await expect(payments.finishWebReportDelivery(native.id, "browser-delivery")).rejects.toThrow();
+    const attempts = await Promise.allSettled([
+      payments.beginReportDelivery(native.id, "genuine-pdf"),
+      peer.beginReportDelivery(native.id, "genuine-pdf"),
+    ]);
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    await expect(
+      payments.requestRefund(native.id, native.amount, "Racing delivery"),
+    ).rejects.toThrow();
+    await payments.finishReportDelivery(native.id, 42);
+    await payments.finishReportDelivery(native.id, 42);
+    await expect(payments.finishReportDelivery(native.id, 43)).rejects.toThrow();
+    await expect(payments.beginReportDelivery(native.id, "second-send")).rejects.toThrow();
+    const refund = await payments.requestRefund(
+      native.id,
+      native.amount,
+      "Full return after delivery",
+    );
+    await payments.markRefund(refund.id, "submitted");
+    expect((await payments.getOrder(native.id))?.paymentStatus).toBe("paid");
+    await payments.confirmFinikReportRefund(native.id, 706854211, "bank-return-delivered");
+    const source = join(directory, "native-delivered.ndjson");
+    await backup(db, source);
+    const restoredUrl = await database();
+    await restore(source, restoredUrl);
+    const restored = new PaymentStore(await open(restoredUrl));
+    expect(await restored.getOrder(native.id)).toMatchObject({
+      channel: "telegram",
+      provider: "finik",
+      paymentStatus: "refunded",
+      fulfillmentStatus: "fulfilled",
+      reportFileId: "genuine-pdf",
+      reportMessageId: 42,
+      preCheckoutId: null,
+    });
+    expect((await restored.getOrder(web.id))?.channel).toBe("web");
+    expect((await restored.getOrder(stars.id))?.channel).toBe("telegram");
+    expect(await restored.getRefund(refund.id)).toMatchObject({
+      confirmedBy: 706854211,
+      confirmationReference: "bank-return-delivered",
+    });
+    for (const damage of ["missing-channel", "web-message", "missing-proof", "partial-refund"]) {
+      const damaged = join(directory, `${damage}.ndjson`);
+      await rewriteSnapshot(source, damaged, (record) => {
+        const row = record.row as Record<string, unknown> | undefined;
+        if (!row) return;
+        if (record.table === "payment_orders" && row.id === native.id) {
+          if (damage === "missing-channel") delete row.channel;
+          if (damage === "web-message") row.channel = "web";
+        }
+        if (record.table === "payment_refunds" && row.id === refund.id) {
+          if (damage === "missing-proof") row.confirmation_reference = null;
+          if (damage === "partial-refund") row.amount = "100";
+        }
+      });
+      const damagedUrl = await database();
+      await expect(restore(damaged, damagedUrl)).rejects.toThrow();
+      expect(await new PaymentStore(await open(damagedUrl)).getOrder(native.id)).toBeNull();
+    }
+  });
+
+  it("keeps uncertain native delivery blocked until an explicit immutable manual refund", async () => {
+    const payments = new PaymentStore(db);
+    const native = await payments.createFinikReportOffer(
+      { ...reportOffer(), amount: 49900 },
+      "telegram",
+    );
+    await payments.acceptOrder(native.id, 1);
+    await payments.ingestEvent({ ...receipt(native.id), amount: native.amount });
+    await payments.beginReportDelivery(native.id, "rejected-pdf");
+    await payments.failReportDelivery(native.id, false);
+    expect((await payments.getOrder(native.id))?.reportFileId).toBeNull();
+    await payments.beginReportDelivery(native.id, "ambiguous-pdf");
+    await payments.failReportDelivery(native.id, true);
+    await expect(payments.beginReportDelivery(native.id, "unsafe-retry")).rejects.toThrow();
+    await expect(
+      payments.confirmFinikReportRefund(native.id, 706854211, "unrequested"),
+    ).rejects.toThrow();
+    await expect(payments.requestRefund(native.id, 499, "Partial")).rejects.toThrow();
+    const refund = await payments.requestRefund(native.id, native.amount, "Delivery unknown");
+    await expect(payments.markRefund(refund.id, "confirmed")).rejects.toThrow();
+    await payments.markRefund(refund.id, "submitted");
+    expect((await payments.requestRefund(native.id, native.amount, "Retry")).id).toBe(refund.id);
+    const source = join(directory, "native-unknown.ndjson");
+    await backup(db, source);
+    const restoredUrl = await database();
+    await restore(source, restoredUrl);
+    const restored = new PaymentStore(await open(restoredUrl));
+    expect(await restored.getOrder(native.id)).toMatchObject({
+      channel: "telegram",
+      paymentStatus: "paid",
+      fulfillmentStatus: "delivery_unknown",
+      reportFileId: "ambiguous-pdf",
+      reportMessageId: null,
+      refundPending: true,
+    });
+    await expect(restored.beginReportDelivery(native.id, "unsafe-retry")).rejects.toThrow();
+    await expect(restored.confirmFinikReportRefund(native.id, 706854211, " ")).rejects.toThrow();
+    await restored.confirmFinikReportRefund(native.id, 706854211, "bank-return-unknown");
+    await restored.confirmFinikReportRefund(native.id, 706854211, "bank-return-unknown");
+    await expect(
+      restored.confirmFinikReportRefund(native.id, 2, "bank-return-unknown"),
+    ).rejects.toThrow();
+    await expect(
+      restored.confirmFinikReportRefund(native.id, 706854211, "different"),
+    ).rejects.toThrow();
+    expect(await restored.getOrder(native.id)).toMatchObject({
+      paymentStatus: "refunded",
+      fulfillmentStatus: "cancelled",
+      refundPending: false,
+    });
+  });
+
+  it("migrates populated pre-channel journals and snapshots without changing historical financial terms", async () => {
+    const payments = new PaymentStore(db);
+    const inspection = await payments.createOffer(inspectionOffer());
+    const stars = await payments.createOffer(reportOffer(2));
+    const web = await payments.createFinikReportOffer(
+      { ...reportOffer(3), amount: 35000, terms: "Historical website terms" },
+      "web",
+    );
+    await payments.acceptOrder(inspection.id, 1);
+    await payments.ingestEvent(receipt(inspection.id));
+    await payments.acceptOrder(stars.id, 2);
+    await payments.reserveStarsCheckout(stars.id, 2, "XTR", stars.amount, "historical-checkout");
+    const starsCapture = starsReceipt(stars.id, 2);
+    await payments.ingestEvent(starsCapture);
+    await payments.acceptOrder(web.id, 3);
+    await payments.ingestEvent({ ...receipt(web.id), amount: web.amount });
+    await payments.finishWebReportDelivery(web.id, "historical-web-pdf");
+    await payments.requestRefund(web.id, web.amount, "Historical full refund");
+    await payments.confirmFinikReportRefund(web.id, 706854211, "historical-bank-return");
+    const source = join(directory, "current-channels.ndjson");
+    const historical = join(directory, "pre-channel.ndjson");
+    await backup(db, source);
+    await rewriteSnapshot(source, historical, (record) => {
+      if (Object.hasOwn(record, "schema_version")) record.schema_version = 8;
+    });
+    const restoredUrl = await database();
+    await restore(historical, restoredUrl);
+    const restored = new PaymentStore(await open(restoredUrl));
+    for (const order of [inspection, stars, web])
+      expect(await restored.getOrder(order.id)).toEqual(await payments.getOrder(order.id));
+    const previousUrl = await database();
+    const previous = new pg.Client({ connectionString: previousUrl });
+    const current = new pg.Client({ connectionString: url });
+    await previous.connect();
+    await current.connect();
+    try {
+      await previous.query(
+        "CREATE TABLE autodom_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
+      );
+      for (const [index, name] of [
+        "0001_initial.sql",
+        "0002_mileage_bigint.sql",
+        "0003_advertising_consent.sql",
+        "0004_remove_advertising_consent.sql",
+        "0005_owner_vehicles.sql",
+        "0006_payments.sql",
+        "0007_uae_market.sql",
+        "0008_catalog_filters.sql",
+        "0009_telegram_stars.sql",
+        "0010_web_report_payments.sql",
+      ].entries()) {
+        const statement = await readFile(join("packages/storage/migrations", name), "utf8");
+        await previous.query(statement);
+        await previous.query("INSERT INTO autodom_migrations(version, checksum) VALUES ($1,$2)", [
+          index + 1,
+          createHash("sha256").update(statement).digest("hex"),
+        ]);
+      }
+      await previous.query("BEGIN");
+      for (const table of ["payment_orders", "payment_events", "payment_refunds"]) {
+        const saved = await current.query(`SELECT * FROM ${table}`);
+        for (const row of saved.rows)
+          await previous.query(
+            `INSERT INTO ${table} SELECT * FROM json_populate_record(NULL::${table}, $1::json)`,
+            [JSON.stringify(row)],
+          );
+      }
+      await previous.query("COMMIT");
+    } finally {
+      await previous.end();
+      await current.end();
+    }
+    const upgraded = new PaymentStore(await open(previousUrl));
+    for (const order of [inspection, stars, web])
+      expect(await upgraded.getOrder(order.id)).toEqual(await payments.getOrder(order.id));
+    expect(await upgraded.listRefunds(web.id)).toEqual(await payments.listRefunds(web.id));
+    expect(await upgraded.ingestEvent(starsCapture)).toBe("duplicate");
+    await expect(upgraded.beginReportDelivery(web.id, "native-send")).rejects.toThrow();
+    await upgraded.beginReportDelivery(stars.id, "legacy-stars-pdf");
+    await upgraded.finishReportDelivery(stars.id, 99);
+    expect((await upgraded.getOrder(stars.id))?.reportMessageId).toBe(99);
   });
 });
 
@@ -560,7 +788,9 @@ describe("Telegram Stars financial and delivery boundaries", () => {
     const query = attempts[0] ? "query-a" : "query-b";
     expect(await peer.reserveStarsCheckout(first.id, 1, "XTR", 500, query)).toBe(true);
     vi.setSystemTime((NOW + 3601) * 1000);
-    expect((await payments.findOpenVinReport(1, first.vin!))?.id).toBe(first.id);
+    expect(
+      (await payments.findOpenVinReport(1, first.vin!, "telegram_stars", "telegram"))?.id,
+    ).toBe(first.id);
     expect(await payments.reserveStarsCheckout(first.id, 1, "XTR", 500, query)).toBe(false);
     expect(
       (
@@ -575,7 +805,9 @@ describe("Telegram Stars financial and delivery boundaries", () => {
       expiresAt: new Date((NOW + 7200) * 1000).toISOString(),
     });
     vi.setSystemTime((NOW + 7201) * 1000);
-    expect(await payments.findOpenVinReport(2, unreserved.vin!)).toBeNull();
+    expect(
+      await payments.findOpenVinReport(2, unreserved.vin!, "telegram_stars", "telegram"),
+    ).toBeNull();
   });
   it("releases only a definitively declined matching checkout, never a captured reservation", async () => {
     const payments = new PaymentStore(db);

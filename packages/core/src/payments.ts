@@ -1,4 +1,5 @@
 export type PaymentProvider = "finik" | "telegram_stars";
+export type PaymentChannel = "telegram" | "web";
 export type PaymentProduct = "inspection" | "vin_report";
 export type PaymentCurrency = "KGS" | "XTR";
 
@@ -26,6 +27,7 @@ export interface PaymentOrder extends PaymentOfferInput {
   preCheckoutId: string | null;
   refundPending: boolean;
   provider: PaymentProvider;
+  channel: PaymentChannel;
   currency: PaymentCurrency;
   createdAt: string;
   acceptedAt: string | null;
@@ -59,9 +61,9 @@ export interface PaymentRefund {
   confirmationReference: string | null;
 }
 
-/** Digital Finik orders are website-only; they must not enter Telegram checkout. */
-export function isWebVinReport(order: Pick<PaymentOrder, "product" | "provider">): boolean {
-  return order.product === "vin_report" && order.provider === "finik";
+/** Website reports retain browser delivery regardless of the payment rail. */
+export function isWebVinReport(order: Pick<PaymentOrder, "product" | "channel">): boolean {
+  return order.product === "vin_report" && order.channel === "web";
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;

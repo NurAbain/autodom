@@ -1,10 +1,5 @@
 import type { PaymentOrder } from "@autodom/core/payments";
-import {
-  isEncarPhotoUrl,
-  normalizeVin,
-  type VinCheckResult,
-  vinGoogleSearchUrl,
-} from "@autodom/core/vin";
+import { isEncarPhotoUrl, normalizeVin, vinGoogleSearchUrl } from "@autodom/core/vin";
 import {
   groupVinArchiveLots,
   isVinArchivePhotoUrl,
@@ -16,13 +11,12 @@ import {
 } from "@autodom/core/vin-archive";
 import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE_PDF, KOREAN_REPORT_PREVIEW } from "../src/korean-report-example.js";
-import type { MiniAppCar } from "../src/miniapp-contract.js";
+import type { MiniAppCar, MiniAppFinikMethods, MiniAppVinResult } from "../src/miniapp-contract.js";
 import {
   PAYMENT_PRIVACY_NOTICE,
   paymentAmountText,
   paymentOrderStatus,
   VIN_REPORT_SLA_MS,
-  VIN_REPORT_STARS,
 } from "../src/payment-text.js";
 import {
   confirmedEncarListings,
@@ -337,7 +331,7 @@ function samplePdfLink(): HTMLAnchorElement {
   return link;
 }
 
-function premiumPanel(result: VinCheckResult, salesEnabled: boolean): HTMLElement {
+function premiumPanel(result: MiniAppVinResult): HTMLElement {
   const started = generation;
   const preview = KOREAN_REPORT_PREVIEW;
   const panel = element("section", "panel premium-panel");
@@ -345,8 +339,8 @@ function premiumPanel(result: VinCheckResult, salesEnabled: boolean): HTMLElemen
   actions.append(button(preview.pdfLabel, () => navigate("report-example"), "button button-quiet"));
   const notice = element("p", "footnote");
   notice.setAttribute("role", "status");
-  if (salesEnabled) {
-    const buy = button(`Купить полный отчёт · ${VIN_REPORT_STARS} Stars`, () => {
+  if (result.reportSalesEnabled && result.reportPrice) {
+    const buy = button(`Купить полный отчёт · ${paymentAmountText(result.reportPrice)}`, () => {
       if (buy.disabled) return;
       buy.disabled = true;
       notice.textContent = "Открываем состав заказа и условия. Оплата ещё не производится.";
@@ -364,7 +358,7 @@ function premiumPanel(result: VinCheckResult, salesEnabled: boolean): HTMLElemen
     actions.append(buy);
     notice.textContent =
       `PDF по вашему VIN вручную, до ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты. ` +
-      "Полный возврат Stars, если отчёт получить невозможно. Условия — перед оплатой.";
+      "Полный возврат, если отчёт получить невозможно. Условия — перед оплатой.";
   } else {
     notice.textContent = "Заказ нового отчёта пока недоступен.";
   }
@@ -1122,7 +1116,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     submit.textContent = "Проверяем…";
     results.replaceChildren(element("p", "", `Проверяем VIN ${vin} у подключённых провайдеров…`));
     try {
-      const result = await request<VinCheckResult & { reportSalesEnabled: boolean }>(
+      const result = await request<MiniAppVinResult>(
         "/miniapp/api/vin",
         { vin },
         controller.signal,
@@ -1241,7 +1235,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         results.append(section);
       }
       if (korean) {
-        results.append(premiumPanel(result, result.reportSalesEnabled === true));
+        results.append(premiumPanel(result));
       } else {
         classifiedVin = vin;
         const url = vinGoogleSearchUrl(vin);
@@ -1328,6 +1322,114 @@ function showCar(car: MiniAppCar): void {
   );
 }
 
+function finikMethods(order: PaymentOrder): HTMLElement {
+  const started = generation;
+  const panel = element("section", "payment-methods");
+  const list = element("div", "payment-method-list");
+  const notice = element("p", "footnote");
+  notice.setAttribute("role", "status");
+  const current = () => started === generation && panel.isConnected;
+  const card = button(
+    "Visa / Mastercard",
+    () => {
+      if (card.disabled) return;
+      card.disabled = true;
+      notice.textContent = "Открываем защищённую форму оплаты картой…";
+      void request<{ cardUrl: string }>("/miniapp/api/orders/card-payment", { orderId: order.id })
+        .then(({ cardUrl }) => {
+          if (!current()) return;
+          const url = safeUrl(cardUrl);
+          if (!url) throw new Error("Форма оплаты не подтверждена. Откройте Finik ниже.");
+          const link = sourceLink(url, "Открыть форму оплаты картой");
+          notice.replaceChildren(link);
+          if (telegram?.openLink) telegram.openLink(url);
+          else link.click();
+        })
+        .catch((error: unknown) => {
+          if (current()) notice.textContent = errorText(error);
+        })
+        .finally(() => {
+          if (current()) card.disabled = false;
+        });
+    },
+    "button button-quiet payment-card",
+  );
+  const refresh = button("Обновить список банков", () => void loadBanks(), "back-link");
+  async function loadBanks(): Promise<void> {
+    if (refresh.disabled) return;
+    refresh.disabled = true;
+    notice.textContent = "Загружаем банки для этого счёта…";
+    list.replaceChildren();
+    try {
+      const { banks } = await request<MiniAppFinikMethods>("/miniapp/api/orders/payment-methods", {
+        orderId: order.id,
+      });
+      if (!current()) return;
+      for (const bank of banks) {
+        const url = safeUrl(bank.url);
+        if (!url) continue;
+        const link = sourceLink(url, "");
+        link.className = "payment-method";
+        const badge = element("span", "payment-method-badge", bank.name.slice(0, 1));
+        badge.setAttribute("aria-hidden", "true");
+        if (bank.logoUrl?.startsWith("https://images.averspay.kg/")) {
+          const image = element("img");
+          image.alt = "";
+          image.decoding = "async";
+          image.referrerPolicy = "no-referrer";
+          image.addEventListener("load", () => badge.replaceChildren(image), { once: true });
+          image.src = bank.logoUrl;
+        }
+        const copy = element("span", "payment-method-copy");
+        copy.append(
+          element("strong", "", bank.name),
+          element("span", "footnote", "Открыть приложение банка"),
+        );
+        const arrow = element("span", "payment-method-arrow", "›");
+        arrow.setAttribute("aria-hidden", "true");
+        link.append(badge, copy, arrow);
+        list.append(link);
+      }
+      notice.textContent = list.childElementCount
+        ? ""
+        : "Банки сейчас не доступны в списке. Можно выбрать карту или открыть Finik.";
+    } catch (error) {
+      if (current())
+        notice.textContent = `${errorText(error)} Можно открыть официальную страницу Finik ниже.`;
+    } finally {
+      if (current()) refresh.disabled = false;
+    }
+  }
+  const fallback = sourceLink(safeUrl(order.invoiceUrl), "Другой банк / открыть Finik");
+  fallback.className = "button button-quiet";
+  panel.append(
+    element("h3", "", "Выберите банк или способ оплаты"),
+    element(
+      "p",
+      "footnote",
+      "Приложение банка или защищённая форма карты откроется отдельно. Сумма счёта — " +
+        paymentAmountText(order) +
+        ".",
+    ),
+    list,
+    card,
+    fallback,
+    notice,
+    refresh,
+    element(
+      "p",
+      "footnote",
+      "Уже оплатили? Не оплачивайте повторно. Вернитесь в бот или обновите статус — нужна серверная квитанция Finik.",
+    ),
+    button("Проверить оплату", () => void load()),
+  );
+  // Loading methods reuses the accepted invoice; it never creates another invoice.
+  queueMicrotask(() => {
+    if (current()) void loadBanks();
+  });
+  return panel;
+}
+
 async function showOrders(): Promise<void> {
   const started = generation;
   showState("Мои заказы", "Загружаем подтверждённые сервером статусы…");
@@ -1372,7 +1474,7 @@ async function showOrders(): Promise<void> {
         ),
       );
       const terms = element("details", "disclosure");
-      if (order.product === "vin_report") terms.open = true;
+      if (order.product === "vin_report") terms.open = !order.acceptedAt;
       terms.append(
         element("summary", "", "Условия услуги и возврата"),
         element("p", "reply-text", order.terms),
@@ -1445,7 +1547,15 @@ async function showOrders(): Promise<void> {
         !order.preCheckoutId &&
         order.invoiceStatus !== "cancelled" &&
         Date.parse(order.expiresAt) > Date.now();
-      if (active) {
+      if (
+        active &&
+        order.product === "vin_report" &&
+        order.provider === "finik" &&
+        order.acceptedAt &&
+        order.invoiceUrl
+      ) {
+        panel.append(finikMethods(order));
+      } else if (active) {
         const form = element("form", "vin-form");
         const consent = element("label", "payment-consent");
         const checkbox = element("input");
@@ -1460,7 +1570,11 @@ async function showOrders(): Promise<void> {
         const submit = element(
           "button",
           "button",
-          order.currency === "XTR" ? `Оплатить ${price}` : "Перейти к оплате Finik",
+          order.currency === "XTR"
+            ? `Оплатить ${price}`
+            : order.product === "vin_report"
+              ? `Выбрать банк · ${price}`
+              : "Перейти к оплате Finik",
         );
         submit.type = "submit";
         const notice = element("p", "footnote");
@@ -1483,6 +1597,11 @@ async function showOrders(): Promise<void> {
                 throw new Error("Платёжная ссылка не подтверждена. Обновите статус заказа.");
               status.textContent = paymentOrderStatus(latest);
               if (latest.acceptedAt) cancelButton?.remove();
+              if (latest.product === "vin_report" && latest.provider === "finik") {
+                terms.open = false;
+                form.replaceWith(finikMethods(latest));
+                return;
+              }
               const stars = latest.currency === "XTR";
               const link = sourceLink(
                 url,

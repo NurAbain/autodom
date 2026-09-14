@@ -180,6 +180,7 @@ export const paymentOrders = pgTable(
     user_id: money("user_id").notNull(),
     product: text("product").$type<PaymentOrder["product"]>().notNull(),
     provider: text("provider").$type<PaymentOrder["provider"]>().notNull(),
+    channel: text("channel").$type<PaymentOrder["channel"]>().notNull(),
     currency: text("currency").$type<PaymentOrder["currency"]>().notNull(),
     amount: money("amount").notNull(),
     title: text("title").notNull(),
@@ -210,6 +211,16 @@ export const paymentOrders = pgTable(
   (table) => [
     index("payment_orders_buyer").on(table.user_id, table.created_at),
     uniqueIndex("payment_orders_charge").on(table.provider, table.charge_id),
+    index("payment_orders_report_lookup").on(
+      table.user_id,
+      table.vin,
+      table.provider,
+      table.channel,
+    ),
+    check(
+      "payment_orders_channel",
+      sql`${table.channel} IN ('telegram','web') AND (${table.channel} = 'telegram' OR (${table.provider} = 'finik' AND ${table.product} = 'vin_report'))`,
+    ),
     check(
       "payment_orders_kind",
       sql`(${table.provider} = 'finik' AND ${table.currency} = 'KGS' AND ((${table.product} = 'inspection' AND ${table.vin} IS NULL) OR (${table.product} = 'vin_report' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'))) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
@@ -240,16 +251,19 @@ export const paymentOrders = pgTable(
         AND ${table.report_file_id} IS NULL AND ${table.report_message_id} IS NULL
         AND ${table.delivered_at} IS NULL AND ${table.admin_notified_at} IS NULL
         AND ${table.pre_checkout_id} IS NULL)
-      OR (${table.provider} = 'telegram_stars'
-        AND (${table.pre_checkout_id} IS NULL OR ${table.accepted_at} IS NOT NULL)
-        AND (${table.payment_status} = 'unpaid' OR ${table.pre_checkout_id} IS NOT NULL)
+      OR (${table.product} = 'vin_report' AND ${table.channel} = 'telegram'
+        AND ((${table.provider} = 'telegram_stars'
+          AND (${table.pre_checkout_id} IS NULL OR ${table.accepted_at} IS NOT NULL)
+          AND (${table.payment_status} = 'unpaid' OR ${table.pre_checkout_id} IS NOT NULL))
+          OR (${table.provider} = 'finik' AND ${table.pre_checkout_id} IS NULL
+            AND (${table.payment_status} = 'unpaid' OR ${table.paid_at} IS NOT NULL)))
         AND (${table.fulfillment_status} NOT IN ('delivering','delivery_unknown','fulfilled') OR ${table.report_file_id} IS NOT NULL)
         AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.report_message_id} BETWEEN 1 AND 9007199254740991
           AND ${table.report_message_id} IS NOT NULL AND ${table.delivered_at} IS NOT NULL)
           OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.report_message_id} IS NULL AND ${table.delivered_at} IS NULL))
         AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid')
         AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))
-      OR (${table.provider} = 'finik' AND ${table.product} = 'vin_report'
+      OR (${table.provider} = 'finik' AND ${table.product} = 'vin_report' AND ${table.channel} = 'web'
         AND ${table.pre_checkout_id} IS NULL AND ${table.report_message_id} IS NULL
         AND ${table.fulfillment_status} NOT IN ('delivering','delivery_unknown')
         AND (${table.payment_status} = 'unpaid' OR ${table.paid_at} IS NOT NULL)

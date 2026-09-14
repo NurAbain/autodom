@@ -188,3 +188,16 @@ details[open] > summary { margin-bottom: 14px; }
 
 .payment-consent { display: flex; align-items: flex-start; gap: 10px; }
 .payment-consent input { flex: none; width: 18px; height: 18px; margin: 2px 0 0; }
+.payment-methods { display: grid; gap: 12px; margin-top: 24px; min-width: 0; }
+.payment-methods h3, .payment-methods p { margin-bottom: 0; }
+.payment-methods > .button { text-decoration: none; width: 100%; }
+.payment-methods > .back-link { margin-bottom: 0; }
+.payment-method-list { display: grid; gap: 10px; min-width: 0; }
+.payment-method { display: flex; align-items: center; gap: 12px; min-height: 72px; padding: 14px; border: 1px solid var(--line); border-radius: 14px; color: inherit; text-decoration: none; background: var(--panel); }
+.payment-method:hover { border-color: var(--accent); }
+.payment-method-badge { display: grid; place-items: center; flex: 0 0 42px; width: 42px; height: 42px; border-radius: 10px; overflow: hidden; background: color-mix(in srgb, var(--accent) 10%, var(--panel)); font-size: 20px; font-weight: 700; }
+.payment-method-badge img { width: 100%; height: 100%; object-fit: contain; }
+.payment-method-copy { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.payment-method-copy strong { font-size: 15px; overflow-wrap: anywhere; }
+.payment-method-arrow { flex: none; font-size: 24px; color: var(--muted); }
+.payment-card { min-height: 56px; }

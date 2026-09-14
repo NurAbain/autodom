@@ -16,6 +16,7 @@ import {
   loadFinikGatewaySettings,
   loadVinReportFinikEnabled,
   loadVinReportStarsEnabled,
+  loadVinReportTelegramFinikEnabled,
   PaymentService,
 } from "./payments.js";
 import { runPaymentsCommand } from "./payments-cli.js";
@@ -118,6 +119,7 @@ export async function main(
           loadFinikGatewaySettings(env),
           fetch,
           loadVinReportFinikEnabled(env),
+          loadVinReportTelegramFinikEnabled(env),
         );
         const bot = createTelegramBot(store, token, {
           conversation,

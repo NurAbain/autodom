@@ -57,6 +57,7 @@ export async function handlePaymentRequest(
     json(response, 200, {
       orders: (await payments.ledger.listOrders(userId)).filter((order) => !isWebVinReport(order)),
       reportSalesEnabled: payments.reportSalesEnabled,
+      reportPrice: payments.reportPrice,
     });
     return;
   }
@@ -94,6 +95,16 @@ export async function handlePaymentRequest(
   }
   const parsed = cancellationBody.safeParse(raw);
   if (!parsed.success) throw new RequestError(400, "Нужен только идентификатор orderId.");
+  if (url.pathname === "/miniapp/api/orders/payment-methods") {
+    const methods = await payments.paymentMethods(userId, parsed.data.orderId);
+    if (!response.destroyed) json(response, 200, methods);
+    return;
+  }
+  if (url.pathname === "/miniapp/api/orders/card-payment") {
+    const cardUrl = await payments.cardPaymentUrl(userId, parsed.data.orderId);
+    if (!response.destroyed) json(response, 200, { cardUrl });
+    return;
+  }
   await payments.ownedOrder(userId, parsed.data.orderId);
   if (!(await payments.ledger.cancelOffer(parsed.data.orderId, userId)))
     throw new PaymentRequestError(

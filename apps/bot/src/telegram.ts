@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { isWebVinReport } from "@autodom/core/payments";
+import { isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
 import {
   ENCAR_HISTORY_MAX_LISTINGS,
   ENCAR_HISTORY_MAX_PHOTOS,
@@ -32,7 +32,7 @@ import {
   paymentOrderStatus,
   VIN_REPORT_MAX_BYTES,
   VIN_REPORT_OWNER,
-  VIN_REPORT_STARS,
+  VIN_REPORT_TELEGRAM_FINIK_TERMS,
   VIN_REPORT_TERMS,
 } from "./payment-text.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
@@ -297,7 +297,7 @@ export function createTelegramBot(
         if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
         if (options.payments?.reportSalesEnabled && hasKoreanVinRecord(checked)) {
           actions.report.push({
-            text: `Купить PDF · ${VIN_REPORT_STARS} Stars`,
+            text: `Купить PDF · ${paymentAmountText(options.payments.reportPrice)}`,
             callback_data: `vin-report-buy:${vin}`,
           });
           actions.keyboard.inline_keyboard.push([actions.report[actions.report.length - 1]!]);
@@ -553,8 +553,34 @@ export function createTelegramBot(
       );
     }
   }
+  function paymentKeyboard(order: PaymentOrder): InlineKeyboard {
+    const keyboard = new InlineKeyboard();
+    const active =
+      order.paymentStatus === "unpaid" &&
+      !order.needsReview &&
+      !order.refundPending &&
+      order.invoiceStatus !== "cancelled" &&
+      Date.parse(order.expiresAt) > Date.now();
+    if (active && order.invoiceUrl) {
+      if (order.provider === "finik" && options.miniAppUrl) {
+        const url = new URL("?view=orders", options.miniAppUrl);
+        url.searchParams.set("order_id", order.id);
+        keyboard.webApp("Выбрать банк или карту", url.href).row();
+      }
+      keyboard
+        .url(order.provider === "finik" ? "Открыть Finik" : "Оплатить Stars", order.invoiceUrl)
+        .row();
+    }
+    return keyboard.text("Проверить оплату", `vin-report-status:${order.id}`);
+  }
+
   bot.command("terms", async (context) => {
-    if (privateBuyer(context)) await context.reply(VIN_REPORT_TERMS);
+    if (privateBuyer(context))
+      await context.reply(
+        options.payments?.reportPrice.currency === "KGS"
+          ? VIN_REPORT_TELEGRAM_FINIK_TERMS
+          : VIN_REPORT_TERMS,
+      );
   });
   bot.command("start", async (context, next) => {
     if (context.match.startsWith("web_report_")) {
@@ -599,7 +625,7 @@ export function createTelegramBot(
     paymentAction(context, async (payments) => {
       const order = await payments.refundReport(context.from!.id, context.match.trim());
       await context.reply(
-        `${order.id}\n${paymentOrderStatus(order)}${isWebVinReport(order) && order.paymentStatus !== "refunded" ? `\n\nДеньги ещё не возвращены. Выполните полный возврат ${paymentAmountText(order)} в кабинете Finik по платежу ${order.chargeId}, затем подтвердите фактический результат:\n/refundconfirm ${order.id} РЕФЕРЕНС_ВОЗВРАТА` : ""}`,
+        `${order.id}\n${paymentOrderStatus(order)}${order.provider === "finik" && order.paymentStatus !== "refunded" ? `\n\nДеньги ещё не возвращены. Выполните полный возврат ${paymentAmountText(order)} в кабинете Finik по платежу ${order.chargeId}, затем подтвердите фактический результат:\n/refundconfirm ${order.id} РЕФЕРЕНС_ВОЗВРАТА` : ""}`,
       );
     }),
   );
@@ -611,7 +637,7 @@ export function createTelegramBot(
           400,
           "Только после полного возврата в кабинете Finik: /refundconfirm ORDER_ID РЕФЕРЕНС_ВОЗВРАТА.",
         );
-      const order = await payments.confirmWebRefund(context.from!.id, match[1]!, match[2]!);
+      const order = await payments.confirmFinikRefund(context.from!.id, match[1]!, match[2]!);
       await context.reply(
         `${order.id}\n${paymentOrderStatus(order)}\nЗаписано подтверждение владельца, не выполнен новый банковский перевод.`,
       );
@@ -833,10 +859,18 @@ export function createTelegramBot(
           const order = await payments.checkout(userId, data.slice("vin-report-pay:".length), true);
           if (!order.invoiceUrl) throw new PaymentRequestError(503, "Счёт ещё не подтверждён.");
           await context.reply(
-            `VIN ${order.vin} · ${paymentAmountText(order)}\nОплата подтверждается только сервером Telegram. Статус: /orders.`,
-            {
-              reply_markup: new InlineKeyboard().url("Оплатить Stars", order.invoiceUrl),
-            },
+            `VIN ${order.vin} · ${paymentAmountText(order)}\n${order.provider === "finik" ? "Выберите банк или карту. Оплата подтверждается только серверной квитанцией Finik." : "Оплата подтверждается только сервером Telegram."}\nПосле оплаты вернитесь сюда и нажмите «Проверить оплату». Повторно не платите.`,
+            { reply_markup: paymentKeyboard(order) },
+          );
+        });
+        return;
+      }
+      if (data.startsWith("vin-report-status:")) {
+        await paymentAction(context, async (payments) => {
+          const order = await payments.ownedOrder(userId, data.slice("vin-report-status:".length));
+          await context.reply(
+            `${order.title}\nVIN ${order.vin}\n${paymentAmountText(order)}\nЗаказ ${order.id}\n${paymentOrderStatus(order)}\n\nПоддержка: /paysupport текст`,
+            { reply_markup: paymentKeyboard(order) },
           );
         });
         return;

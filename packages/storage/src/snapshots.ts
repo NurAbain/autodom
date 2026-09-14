@@ -31,7 +31,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -304,10 +304,10 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
-          header.schema_version === SCHEMA_VERSION
+          (header.schema_version as number) >= 8
             ? DATA_TABLES
             : (header.schema_version as number) >= 5
               ? PAYMENT_DATA_TABLES
@@ -318,7 +318,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
     )
       throw new Error("Unsupported Autodom snapshot format");
     const snapshotTables: readonly DataTable[] =
-      header.schema_version === SCHEMA_VERSION
+      (header.schema_version as number) >= 8
         ? DATA_TABLES
         : (header.schema_version as number) >= 5
           ? PAYMENT_DATA_TABLES
@@ -432,6 +432,14 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
             throw new Error("Unexpected refund confirmation in historical snapshot");
           row = { ...row, confirmed_by: null, confirmation_reference: null };
         }
+        if ((header.schema_version as number) < 9 && table === "payment_orders") {
+          if (Object.hasOwn(row, "channel"))
+            throw new Error("Unexpected payment channel in historical snapshot");
+          row = {
+            ...row,
+            channel: row.provider === "finik" && row.product === "vin_report" ? "web" : "telegram",
+          };
+        }
         await insertSnapshotRow(target, table, row);
         counts[table]++;
       }
@@ -461,7 +469,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         ) OR EXISTS (
           SELECT 1 FROM payment_refunds r WHERE r.order_id = o.id AND (
             r.provider <> o.provider OR (r.status = 'confirmed' AND o.payment_status <> 'refunded')
-            OR (o.provider = 'telegram_stars' AND (
+            OR ((o.provider = 'telegram_stars' OR (o.provider = 'finik' AND o.product = 'vin_report' AND o.channel = 'telegram')) AND (
               r.amount <> o.amount OR (r.status IN ('requested','submitted')
                 AND (o.payment_status = 'refunded' OR o.fulfillment_status = 'delivering'))
             ))
