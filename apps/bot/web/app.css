@@ -68,6 +68,17 @@ p { line-height: 1.6; }
 .vin-input { width: 100%; min-width: 0; min-height: 46px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: inherit; font: 16px ui-monospace, "SFMono-Regular", Consolas, monospace; text-transform: uppercase; }
 .vin-input:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .vin-results { overflow-wrap: anywhere; }
+.vin-photo-help { margin-top: -6px; margin-bottom: 24px; }
+.vin-navigation { display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr)); gap: 4px; flex-basis: 100%; padding: 4px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+.vin-nav-item { min-width: 0; min-height: 44px; border: 0; border-radius: 10px; padding: 9px 5px; font-size: 13px; font-weight: 600; background: transparent; color: var(--muted); cursor: pointer; }
+.vin-nav-item[aria-current="page"] { background: var(--accent); color: var(--accent-text); }
+[data-bot-mode="vin"] #app { max-width: 640px; }
+[data-bot-mode="vin"] .vin-panel { padding-inline: 0; border: 0; background: transparent; }
+[data-bot-mode="vin"] .vin-panel > h1 { font-size: clamp(34px, 9vw, 46px); }
+[data-bot-mode="vin"] .vin-input { min-height: 56px; letter-spacing: 0.025em; }
+[data-bot-mode="vin"] .vin-form > .button { min-height: 52px; font-size: 16px; }
+[data-bot-mode="vin"] .vin-results > .vin { font-size: clamp(15px, 4vw, 19px); }
+[data-bot-mode="vin"] .export-facts { gap: 0 14px; }
 .vin-source { padding: 20px 0; border-top: 1px solid var(--line); }
 .vin-source h3 { font-size: 17px; margin-bottom: 10px; }
 .vin-source[data-status="unavailable"] .badge { background: color-mix(in srgb, #b66b11 16%, var(--panel)); }
@@ -124,6 +135,9 @@ p { line-height: 1.6; }
 .premium-panel .button-row { margin-bottom: 14px; }
 .premium-panel .button-row > .button { width: auto; min-width: 0; flex: 1 1 140px; margin-bottom: 0; }
 .sample-pdf { display: flex; align-items: center; justify-content: center; width: 100%; text-decoration: none; }
+.report-actions { display: grid; gap: 10px; }
+.report-actions > .button { min-height: 54px; display: flex; align-items: center; justify-content: center; text-decoration: none; font-size: 16px; }
+.report-price { margin: -4px 0 18px; font-size: 34px; line-height: 1.2; font-weight: 750; letter-spacing: -0.035em; }
 .disclosure { border-top: 1px solid var(--line); padding-top: 16px; }
 summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 14px; line-height: 1.5; }
 details[open] > summary { margin-bottom: 14px; }

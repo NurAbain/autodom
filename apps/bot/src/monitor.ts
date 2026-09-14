@@ -38,11 +38,13 @@ export async function notifyOnce(
   send: SendReplies,
   signal?: AbortSignal,
   metrics?: Pick<Metrics, "recordNotificationDelivery">,
+  canNotify?: (userId: number) => Promise<boolean>,
 ): Promise<number> {
   let delivered = 0;
   for (const candidate of await store.monitoringProfiles()) {
     signal?.throwIfAborted();
     await store.withLock(`autodom:user:${candidate.user_id}`, async () => {
+      if (canNotify && !(await canNotify(candidate.user_id))) return;
       const profile = await store.getProfile(candidate.user_id);
       if (!profile?.monitoring || quietNow(profile)) return;
       const events = await store.eventsAfter(profile.cursor, 10_000);
@@ -146,6 +148,7 @@ export async function monitor(
   interval: number,
   signal: AbortSignal,
   metrics?: Pick<Metrics, "recordMonitorIteration" | "recordNotificationDelivery">,
+  canNotify?: (userId: number) => Promise<boolean>,
 ): Promise<void> {
   while (!signal.aborted) {
     const started = performance.now();
@@ -153,7 +156,7 @@ export async function monitor(
     try {
       await store.setMeta("last_monitor_at", String(Date.now() / 1000));
       await store.setMeta("telegram_error", "");
-      await notifyOnce(store, send, signal, metrics);
+      await notifyOnce(store, send, signal, metrics, canNotify);
     } catch (error) {
       outcome = signal.aborted ? "aborted" : "error";
       throw error;

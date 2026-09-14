@@ -36,10 +36,10 @@ export function miniAppUrl(env: Environment = process.env): string | undefined {
       url.password ||
       url.search ||
       url.hash ||
-      !["/miniapp", "/miniapp/"].includes(url.pathname)
+      !["/miniapp", "/miniapp/", "/full/miniapp", "/full/miniapp/"].includes(url.pathname)
     )
       throw new Error();
-    url.pathname = "/miniapp/";
+    if (!url.pathname.endsWith("/")) url.pathname += "/";
     return url.href;
   } catch {
     throw new Error("AUTODOM_MINI_APP_URL must be an HTTPS URL ending in /miniapp/");

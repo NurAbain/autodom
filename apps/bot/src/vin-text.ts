@@ -92,11 +92,11 @@ export function vinArchiveSourceUrl(
 }
 
 export const VIN_DISCLOSURE =
-  "VIN передаётся подключённым сервисам для бесплатной проверки корейских записей и, при отсутствии данных, расшифровки характеристик. Платные отчёты не покупаем. Поиск в Google и аукционных архивах — только по отдельному нажатию. VIN не сохраняется в вашем поиске или профиле.";
+  "VIN передаётся подключённым сервисам: сначала проверяем корейские записи, если их нет — характеристики. Бесплатная проверка не покупает платный отчёт. Google и аукционные архивы — только по отдельному нажатию. VIN не сохраняется в поиске или профиле.";
 export const VIN_NOT_ENABLED = "Бесплатная проверка VIN пока не подключена. Запрос не отправлен.";
-export const VIN_HELP = `Отправьте /vin и VIN: 17 латинских букв и цифр, без I, O, Q. Например: /vin KMHDU41DBAU123456.\n\n${VIN_DISCLOSURE}`;
+export const VIN_HELP = `Пришлите VIN: 17 латинских букв и цифр, без I, O, Q.\nМожно без команды или так: /vin KMHDU41DBAU123456.\n\n${VIN_DISCLOSURE}`;
 export const VIN_CAUTION =
-  "Отсутствие записей не означает отсутствие ДТП или ограничений. Записанный пробег — не текущий реальный пробег. Сверьте VIN с автомобилем и документами.";
+  "Нет записей ≠ нет ДТП или ограничений. Пробег в записи — не текущий пробег. Сверьте VIN с авто и документами.";
 export const VIN_GOOGLE_SEARCH_LABEL = "Искать VIN в Google";
 export const VIN_GOOGLE_SEARCH_NOTICE =
   "Поиск точного VIN в Google для любого рынка. VIN передаётся Google только при нажатии. Отсутствие результатов не означает чистую историю.";
@@ -337,7 +337,6 @@ export function vinResultActions(result: VinCheckResult) {
         {
           text: KOREAN_REPORT_PREVIEW.pdfLabel,
           callback_data: "vin-report-example",
-          style: "primary",
         },
       ]
     : [];
@@ -355,13 +354,15 @@ export function vinResultActions(result: VinCheckResult) {
       });
     }
   }
+  const navigation: VinButton[] = [{ text: "Новая проверка", callback_data: "/vin" }];
   return {
     report,
     additional,
+    navigation,
     keyboard: {
-      inline_keyboard: [...report, ...additional.map(({ button }) => button)].map((button) => [
-        button,
-      ]),
+      inline_keyboard: [...report, ...additional.map(({ button }) => button), ...navigation].map(
+        (button) => [button],
+      ),
     },
   };
 }
@@ -429,11 +430,10 @@ export function vinResultPresentation(
       title: preview.title,
       body: [
         ...(result.carhistory.status === "available"
-          ? [escapeHtml(vinSourceDescription("carhistory", result))]
+          ? [`<b>${escapeHtml(vinSourceDescription("carhistory", result))}</b>`]
           : []),
         escapeHtml(preview.limitations),
         escapeHtml(preview.exampleNotice),
-        escapeHtml(preview.orderNotice),
       ].join("\n\n"),
       ...(result.carhistory.status === "available"
         ? { checked: vinCheckedText(result.carhistory.checked_at) }
@@ -476,6 +476,7 @@ export function vinResultPresentation(
             .join("") +
           "</details>"
         : "") +
-      `<details><summary>Как понимать результат</summary><p>${caution}</p></details><footer>${received}</footer>`,
+      `<details><summary>Как понимать результат</summary><p>${caution}</p></details><footer>${received}</footer>` +
+      richVinButtons(actions.navigation),
   };
 }

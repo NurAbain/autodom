@@ -1,4 +1,4 @@
-# ONE Coolify resource: Telegram bot + Mini App HTTP/UI + notifications/backups.
+# One independent Coolify resource per Telegram identity: bot + its Mini App.
 # Select this file, not compose.yaml; deploy/rollback it independently of the parser.
 # Use existing Autodom PostgreSQL and the bot token. No Redis/scraper-proxy dependency.
 # Route the Mini App HTTPS domain to bot:8080, preserving /miniapp/ paths.
@@ -29,6 +29,9 @@ services:
     environment:
       AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:-}
       AUTODOM_BOT_TOKEN: ${AUTODOM_BOT_TOKEN:-}
+      AUTODOM_BOT_MODE: ${AUTODOM_BOT_MODE:-full}
+      AUTODOM_REPORT_BOT_URL: ${AUTODOM_REPORT_BOT_URL:-}
+      AUTODOM_FULL_BOT_URL: ${AUTODOM_FULL_BOT_URL:-}
       AUTODOM_BACKUP_DIR: /backups
       AUTODOM_METRICS_PORT: "9901"
       AUTODOM_LOG_LEVEL: ${AUTODOM_LOG_LEVEL:-info}
@@ -57,7 +60,9 @@ services:
       default: {}
       proxy:
         # Coolify replaces aliases on its resource-owned network, but preserves these.
-        aliases: [autodom-payment-events, autodom-bot-metrics]
+        aliases:
+          - ${AUTODOM_PAYMENT_EVENTS_ALIAS:-autodom-payment-events}
+          - ${AUTODOM_BOT_METRICS_ALIAS:-autodom-bot-metrics}
     volumes: [snapshots:/backups]
     healthcheck:
       test: [CMD, node, apps/bot/dist/cli.js, health]

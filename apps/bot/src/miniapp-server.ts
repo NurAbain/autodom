@@ -23,12 +23,14 @@ import {
   VinRequestError,
 } from "@autodom/core/vin-request";
 import type { Store } from "@autodom/storage";
+import type { BotMode } from "./bot-mode.js";
 import { listingText, type Reply } from "./conversation.js";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
+import { forwardFullMiniApp } from "./miniapp-proxy.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { handlePaymentRequest } from "./payments-http.js";
 import { VIN_NOT_ENABLED } from "./vin-text.js";
@@ -86,6 +88,9 @@ export interface MiniAppServerOptions {
   publicUrl: string;
   host: string;
   port: number;
+  mode?: BotMode;
+  reportBotUrl?: string;
+  fullBotUrl?: string;
   assetsDirectory?: string;
   ready: () => Promise<boolean>;
   onError?: (error: unknown) => void;
@@ -105,6 +110,9 @@ export interface MiniAppServerOptions {
 }
 
 export async function startMiniAppServer(options: MiniAppServerOptions): Promise<Server> {
+  const mode = options.mode ?? "full";
+  const reportBotUrl = mode === "full" ? options.reportBotUrl : undefined;
+  const payments = reportBotUrl ? undefined : options.payments;
   const origin = new URL(options.publicUrl).origin;
   const directory = options.assetsDirectory ?? fileURLToPath(new URL("./public/", import.meta.url));
   const assets = new Map<string, { body: Buffer; type: string }>();
@@ -132,6 +140,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     }
   }
   const apiRoutes = [
+    "/miniapp/api/config",
     "/miniapp/api/car",
     "/miniapp/api/vin",
     "/miniapp/api/vin/archive-photos",
@@ -192,6 +201,18 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
+        if (
+          options.fullBotUrl &&
+          (url.pathname === "/full/miniapp" || url.pathname.startsWith("/full/miniapp/"))
+        ) {
+          await forwardFullMiniApp(
+            request,
+            response,
+            options.fullBotUrl,
+            `${url.pathname}${url.search}`,
+          );
+          return;
+        }
         if (url.pathname === "/reports" || url.pathname.startsWith("/reports/")) {
           response.setHeader(
             "Content-Security-Policy",
@@ -260,6 +281,14 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           response.end(request.method === "HEAD" ? undefined : asset.body);
           return;
         }
+        if (url.pathname === "/miniapp/api/config") {
+          if (request.method !== "GET") {
+            response.setHeader("Allow", "GET");
+            throw new RequestError(405, "Настройки доступны только через GET.");
+          }
+          respond(response, 200, { mode, ...(reportBotUrl ? { reportBotUrl } : {}) });
+          return;
+        }
         if (!apiRoutes.includes(url.pathname)) throw new RequestError(404, "Страница не найдена.");
         if (
           (request.headers.origin && request.headers.origin !== origin) ||
@@ -275,8 +304,20 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             401,
             "Сессия истекла. Закройте карточку и откройте её заново в Telegram.",
           );
+        if (
+          mode === "vin" &&
+          (url.pathname === "/miniapp/api/car" || url.pathname === "/miniapp/api/dialogue")
+        )
+          throw new RequestError(404, "В этом боте доступна только проверка VIN и отчёты.");
         if (url.pathname.startsWith("/miniapp/api/orders")) {
-          await handlePaymentRequest(request, response, url, user.id, options.payments);
+          if (reportBotUrl) {
+            respond(response, 409, {
+              error: "Заказы и оплата доступны в VIN-боте.",
+              reportBotUrl,
+            });
+            return;
+          }
+          await handlePaymentRequest(request, response, url, user.id, payments);
           return;
         }
         if (url.pathname === "/miniapp/api/dialogue") {
@@ -364,9 +405,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               "Передайте один VIN только в теле запроса.",
             );
           const vin = await readVinRequest(request);
-          const reportRevision = archive
-            ? undefined
-            : options.payments?.forgetVinResult(user.id, vin);
+          const reportRevision = archive ? undefined : payments?.forgetVinResult(user.id, vin);
           if (archive && !options.checkVinArchive) {
             respond(response, 200, disabledVinArchiveResult(vin));
             return;
@@ -384,7 +423,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             const result = await lookup(vin, controller.signal);
             if (result.vin !== vin) throw new Error("VIN result does not match the request");
             if (reportRevision !== undefined && "carhistory" in result)
-              options.payments?.rememberVinResult(user.id, result, reportRevision);
+              payments?.rememberVinResult(user.id, result, reportRevision);
             if (!response.destroyed)
               respond(
                 response,
@@ -393,8 +432,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
                   ? result
                   : {
                       ...result,
-                      reportSalesEnabled: options.payments?.reportSalesEnabled ?? false,
-                      reportPrice: options.payments?.reportPrice ?? null,
+                      reportSalesEnabled: payments?.reportSalesEnabled ?? false,
+                      reportPrice: payments?.reportPrice ?? null,
                     },
               );
           } catch {

@@ -130,6 +130,20 @@ it("does not deliver an event after the current listing changes price kind", asy
   expect(fixture.profile()?.cursor).toBe(1);
 });
 
+it("preserves an existing search until its owner starts the new bot", async () => {
+  const fixture = state();
+  const send = vi.fn(async () => undefined);
+  let startedNewBot = false;
+  const canNotify = async () => startedNewBot;
+  expect(await notifyOnce(fixture.store, send, undefined, undefined, canNotify)).toBe(0);
+  expect(send).not.toHaveBeenCalled();
+  expect(fixture.profile()?.monitoring).toBe(true);
+  expect(fixture.profile()?.cursor).toBe(0);
+  startedNewBot = true;
+  expect(await notifyOnce(fixture.store, send, undefined, undefined, canNotify)).toBe(1);
+  expect(fixture.profile()?.cursor).toBe(1);
+});
+
 it.each([
   [16, 59, false],
   [17, 0, true],

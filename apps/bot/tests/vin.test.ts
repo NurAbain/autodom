@@ -54,16 +54,11 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).not.toContain("NHTSA");
     expect(text).not.toContain("vpic.nhtsa.dot.gov");
     expect(vinVisibleProviders(result)).toEqual(["car365", "carhistory"]);
-    expect(vinResultActions(result).keyboard.inline_keyboard).toEqual([
-      [
-        expect.objectContaining({
-          callback_data: "vin-report-example",
-          style: "primary",
-        }),
-      ],
-    ]);
-    expect(rendered("tg-button")).toHaveLength(1);
-    expect(rendered("tg-button").attr("data")).toBe("vin-report-example");
+    expect(vinResultActions(result).keyboard.inline_keyboard.flat()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ callback_data: "vin-report-example" })]),
+    );
+    expect(rendered('tg-button[data="vin-report-example"]')).toHaveLength(1);
+    expect(rendered('tg-button[data^="vin-report-buy:"]')).toHaveLength(0);
     for (const html of [text, richHtml]) {
       expect(html).not.toMatch(/vinarchive:|Google|США \/ ОАЭ|Фото и поиск в интернете|web_app/);
     }
@@ -127,10 +122,12 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinResultNotice(decoded)).toBeNull();
     const actions = vinResultActions(decoded);
     expect(actions.report).toEqual([]);
-    expect(actions.keyboard.inline_keyboard.flat()).toEqual([
-      expect.objectContaining({ callback_data: `vinarchive:${result.vin}` }),
-      expect.objectContaining({ url: expect.stringContaining("google.com/search") }),
-    ]);
+    expect(actions.keyboard.inline_keyboard.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ callback_data: `vinarchive:${result.vin}` }),
+        expect.objectContaining({ url: expect.stringContaining("google.com/search") }),
+      ]),
+    );
     const { text, richHtml } = vinResultPresentation(decoded);
     expect(load(richHtml)("h3")).toHaveLength(1);
     for (const html of [text, richHtml]) {

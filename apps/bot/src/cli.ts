@@ -11,6 +11,12 @@ import {
 import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
+import {
+  loadBotMode,
+  loadReportBotUrl,
+  telegramIdentity,
+  telegramRecipientKey,
+} from "./bot-mode.js";
 import { Conversation } from "./conversation.js";
 import {
   loadFinikGatewaySettings,
@@ -38,6 +44,8 @@ Set AUTODOM_MINI_APP_URL to enable the Mini App in this same bot process.
 AUTODOM_MINI_APP_HOST defaults to 127.0.0.1; AUTODOM_MINI_APP_PORT defaults to 8080.
 Set AUTODOM_VIN_API_URL and AUTODOM_VIN_API_TOKEN to enable remote VIN checks.
 Set AUTODOM_OCR_API_URL and AUTODOM_OCR_API_TOKEN to enable GPU photo recognition.
+AUTODOM_BOT_MODE=vin limits the bot to VIN and reports (default: full).
+AUTODOM_REPORT_BOT_URL delegates full-bot purchases to the separate VIN bot.
 No parser, worker or proxy configuration is loaded by this command.
 Stop the old Telegram poller before cutover; an existing webhook is never replaced.
 `;
@@ -47,7 +55,13 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<number> {
   process.umask(0o077);
-  if (argv[0] === "payments") return runPaymentsCommand(argv.slice(1), env);
+  if (argv[0] === "payments") {
+    if (loadReportBotUrl(env)) {
+      process.stderr.write("Manage payments in the VIN bot container.\n");
+      return 2;
+    }
+    return runPaymentsCommand(argv.slice(1), env);
+  }
   let logger: Logger | undefined;
   let store: Store | undefined;
   let code = 0;
@@ -104,6 +118,8 @@ export async function main(
     process.once("SIGTERM", stop);
     const settings = loadBotSettings(env);
     const publicUrl = miniAppUrl(env);
+    const mode = loadBotMode(env);
+    const reportBotUrl = loadReportBotUrl(env);
     const checkVin = createVinApiLookup(env, abort.signal);
     const checkVinArchive = createVinArchiveApiLookup(env, abort.signal);
     const getVinArchivePhoto = createVinArchivePhotoApiLookup(env, abort.signal);
@@ -114,16 +130,28 @@ export async function main(
       store = await Store.open(settings.database_url);
       if (!abort.signal.aborted) {
         const conversation = new Conversation(store, { seller: new SellerConversation(store) });
-        const payments = new PaymentService(
-          store,
-          loadFinikGatewaySettings(env),
-          fetch,
-          loadVinReportFinikEnabled(env),
-          loadVinReportTelegramFinikEnabled(env),
-        );
+        const payments = reportBotUrl
+          ? undefined
+          : new PaymentService(
+              store,
+              loadFinikGatewaySettings(env),
+              fetch,
+              loadVinReportFinikEnabled(env),
+              loadVinReportTelegramFinikEnabled(env),
+            );
+        const botId = telegramIdentity(token);
+        const registerRecipient = reportBotUrl
+          ? async (userId: number) => {
+              const key = telegramRecipientKey(botId, userId);
+              if ((await store!.getMeta(key)) !== "1") await store!.setMeta(key, "1");
+            }
+          : undefined;
         const bot = createTelegramBot(store, token, {
           conversation,
-          payments,
+          mode,
+          ...(reportBotUrl ? { reportBotUrl } : {}),
+          ...(payments ? { payments } : {}),
+          ...(registerRecipient ? { onPrivateInteraction: registerRecipient } : {}),
           starsEnabled: loadVinReportStarsEnabled(env),
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
           ...(checkVin ? { checkVin } : {}),
@@ -138,7 +166,9 @@ export async function main(
             bot,
             token,
             conversation,
-            payments,
+            mode,
+            ...(reportBotUrl ? { reportBotUrl } : {}),
+            ...(payments ? { payments } : {}),
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
             ...(checkVin ? { checkVin } : {}),
             ...(checkVinArchive ? { checkVinArchive } : {}),

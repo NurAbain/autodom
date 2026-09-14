@@ -46,6 +46,7 @@ import {
   gte,
   inArray,
   isNull,
+  like,
   lte,
   or,
   type SQL,
@@ -787,6 +788,9 @@ export class Store {
       await this.database.delete(drafts).where(eq(drafts.user_id, userId));
       await this.database.delete(profiles).where(eq(profiles.user_id, userId));
       await this.database.delete(ownerVehicles).where(eq(ownerVehicles.user_id, userId));
+      await this.database
+        .delete(metadata)
+        .where(like(metadata.key, `autodom:telegram:%:user:${userId}`));
     });
   }
   async getMeta(key: string, defaultValue: string | null = null): Promise<string | null> {

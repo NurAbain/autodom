@@ -4,7 +4,6 @@ import type { VinLookup } from "@autodom/core/vin";
 import type { VinArchiveLookup, VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import { maintain } from "@autodom/runtime/maintenance";
 import { Metrics } from "@autodom/runtime/metrics";
-import { runtimeStatus } from "@autodom/runtime/status";
 import type { Store } from "@autodom/storage";
 import {
   createConcurrentSink,
@@ -17,6 +16,12 @@ import { type Bot, type BotError, type Context, GrammyError, HttpError } from "g
 import type { Update } from "grammy/types";
 import pg from "pg";
 import type { Logger } from "pino";
+import {
+  type BotMode,
+  loadFullBotUrl,
+  telegramIdentity,
+  telegramRecipientKey,
+} from "./bot-mode.js";
 import type { Conversation } from "./conversation.js";
 import { startMiniAppServer } from "./miniapp-server.js";
 import { monitor } from "./monitor.js";
@@ -130,6 +135,8 @@ export function startPolling(
 export interface BotServiceContext {
   bot: AutodomBot;
   token: string;
+  mode?: BotMode;
+  reportBotUrl?: string;
   miniAppUrl?: string;
   assetsDirectory?: string;
   signal?: AbortSignal;
@@ -179,10 +186,11 @@ export async function runBotService(
   logger: Logger,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const { bot, token, miniAppUrl } = context;
+  const { bot, token, miniAppUrl, mode = "full", reportBotUrl } = context;
   const port = metricsPort(env);
   const listener = miniAppUrl ? miniAppListener(env) : undefined;
-  const paymentListener = loadPaymentListenerSettings(env);
+  const paymentListener = reportBotUrl ? undefined : loadPaymentListenerSettings(env);
+  const fullBotUrl = loadFullBotUrl(env);
   if (paymentListener && !context.payments)
     throw new Error("Payment callback listener requires the payment service");
   const abort = new AbortController();
@@ -203,6 +211,27 @@ export async function runBotService(
   let failure: unknown;
   let failed = false;
   const tasks: Promise<void>[] = [];
+  let probe: Promise<boolean> | undefined;
+  const ready = async (): Promise<boolean> => {
+    if (abort.signal.aborted) return false;
+    // Repeated probes must not fill the pool while a database query is stalled.
+    probe ??= store.database
+      .execute(sql`SELECT 1`)
+      .then(
+        () => !abort.signal.aborted,
+        () => false,
+      )
+      .finally(() => {
+        probe = undefined;
+      });
+    const { promise: timedOut, resolve } = Promise.withResolvers<boolean>();
+    const timer = setTimeout(() => resolve(false), 1_500);
+    try {
+      return await Promise.race([probe, timedOut]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const metrics = new Metrics("bot", store, settings);
   const watchServer = (server: Server, name: string) => {
     server.on("error", () => abort.abort(new Error(`${name} HTTP listener failed`)));
@@ -226,8 +255,8 @@ export async function runBotService(
     });
     await lease.connect();
     const ownership = await lease.query<{ acquired: boolean }>(
-      "SELECT pg_try_advisory_lock($1,$2) AS acquired",
-      [0x4155544f, 0x42544c50],
+      "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
+      [`autodom:telegram:${telegramIdentity(token)}`],
     );
     if (!ownership.rows[0]?.acquired)
       throw new Error("Another Autodom Telegram poller is already running");
@@ -243,36 +272,21 @@ export async function runBotService(
     bot.catch(({ error }) => {
       logger.warn({ err: error }, "Telegram update could not be handled");
     });
-    await configureTelegramBot(bot, abort.signal);
+    await configureTelegramBot(bot, abort.signal, {
+      mode,
+      ...(reportBotUrl ? { reportBotUrl } : {}),
+    });
     abort.signal.throwIfAborted();
     if (miniAppUrl && listener) {
       if (context.payments)
         bot.webReportAuth = new WebReportAuth(context.payments.ledger, bot.botInfo.username);
-      let probe: Promise<boolean> | undefined;
-      const ready = async (): Promise<boolean> => {
-        if (abort.signal.aborted) return false;
-        // Keep a stalled query in flight: repeated checks must not fill the Store pool.
-        probe ??= store.database
-          .execute(sql`SELECT 1`)
-          .then(
-            () => !abort.signal.aborted,
-            () => false,
-          )
-          .finally(() => {
-            probe = undefined;
-          });
-        const { promise: timedOut, resolve } = Promise.withResolvers<boolean>();
-        const timer = setTimeout(() => resolve(false), 1_500);
-        try {
-          return await Promise.race([probe, timedOut]);
-        } finally {
-          clearTimeout(timer);
-        }
-      };
       miniAppServer = await startMiniAppServer({
         store,
         token,
         publicUrl: miniAppUrl,
+        mode,
+        ...(reportBotUrl ? { reportBotUrl } : {}),
+        ...(fullBotUrl ? { fullBotUrl } : {}),
         ...listener,
         ...(context.payments ? { payments: context.payments } : {}),
         ...(bot.webReportAuth ? { webReportAuth: bot.webReportAuth } : {}),
@@ -280,7 +294,7 @@ export async function runBotService(
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
         ...(context.checkVinArchive ? { checkVinArchive: context.checkVinArchive } : {}),
         ...(context.getVinArchivePhoto ? { getVinArchivePhoto: context.getVinArchivePhoto } : {}),
-        ...(context.conversation
+        ...(mode === "full" && context.conversation
           ? {
               dialogue: (userId: number, text: string) =>
                 store.tryWithLock(`autodom:user:${userId}`, () => {
@@ -309,7 +323,7 @@ export async function runBotService(
         !!runner?.isRunning() &&
         (!listener || !!miniAppServer?.listening) &&
         (!paymentListener || !!paymentServer?.listening) &&
-        (await runtimeStatus(store, settings, "bot")).healthy,
+        (await ready()),
     );
     watchServer(metricsServer, "Metrics");
     abort.signal.throwIfAborted();
@@ -320,15 +334,24 @@ export async function runBotService(
       polling.then(() => {
         if (!abort.signal.aborted) throw new Error("Telegram polling stopped unexpectedly");
       }),
-      monitor(
-        store,
-        (chatId, replies) => sendReplies(bot, chatId, replies, miniAppUrl ? { miniAppUrl } : {}),
-        settings.monitor_seconds,
-        abort.signal,
-        metrics,
-      ),
-      maintain(store, settings, "bot", abort.signal),
     );
+    if (mode === "full") {
+      const botId = telegramIdentity(token);
+      tasks.push(
+        monitor(
+          store,
+          (chatId, replies) => sendReplies(bot, chatId, replies, miniAppUrl ? { miniAppUrl } : {}),
+          settings.monitor_seconds,
+          abort.signal,
+          metrics,
+          reportBotUrl
+            ? async (userId) => (await store.getMeta(telegramRecipientKey(botId, userId))) === "1"
+            : undefined,
+        ),
+      );
+    }
+    // One owner retains snapshots and financial notifications for the shared database.
+    if (!reportBotUrl) tasks.push(maintain(store, settings, "bot", abort.signal));
     if (context.payments) {
       const payments = context.payments;
       tasks.push(
