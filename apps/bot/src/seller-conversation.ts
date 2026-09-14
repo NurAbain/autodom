@@ -11,7 +11,8 @@ import {
   validateOwnerVehicle,
 } from "@autodom/core/owner-vehicle";
 import type { Store } from "@autodom/storage";
-import { type Button, type Buttons, escapeHtml, type Reply } from "./conversation.js";
+import type { Button, Buttons, Reply } from "./conversation.js";
+import { escapeHtml } from "./html.js";
 
 const TTL_MS = 30 * 60 * 1000;
 const MAX_DRAFTS = 2048;

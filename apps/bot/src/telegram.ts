@@ -8,7 +8,6 @@ import {
   normalizeVin,
   type VinCheckResult,
   type VinLookup,
-  vinGoogleSearchUrl,
 } from "@autodom/core/vin";
 import {
   disabledVinArchiveResult,
@@ -24,7 +23,9 @@ import type { Store } from "@autodom/storage";
 import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
-import { type Buttons, Conversation, escapeHtml, packReplies, type Reply } from "./conversation.js";
+import type { InlineKeyboardMarkup } from "grammy/types";
+import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
+import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import { paymentOrderStatus } from "./payment-text.js";
 import type { PaymentService } from "./payments.js";
@@ -32,17 +33,14 @@ import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-
 import {
   confirmedEncarListings,
   VIN_ARCHIVE_CARWAY_NOTICE,
-  VIN_ARCHIVE_DISCLOSURE,
   VIN_ARCHIVE_LABEL,
   VIN_ARCHIVE_STATUS_TEXT,
-  VIN_GOOGLE_SEARCH_LABEL,
-  VIN_GOOGLE_SEARCH_NOTICE,
   VIN_HELP,
   VIN_NOT_ENABLED,
-  VIN_REPORT_EXAMPLE_LABEL,
   vinArchiveLotText,
   vinArchiveTime,
-  vinResultText,
+  vinResultActions,
+  vinResultPresentation,
 } from "./vin-text.js";
 
 function replyKeyboard(
@@ -87,7 +85,7 @@ export async function sendReplies(
   bot: Bot,
   chatId: number,
   replies: readonly Reply[],
-  options: { miniAppUrl?: string } = {},
+  options: { miniAppUrl?: string; fallbackReplyMarkup?: InlineKeyboardMarkup } = {},
 ): Promise<void> {
   for (const reply of replies) {
     const detailUrl =
@@ -96,12 +94,17 @@ export async function sendReplies(
         : reply.miniAppView && options.miniAppUrl
           ? new URL(`?view=${encodeURIComponent(reply.miniAppView)}`, options.miniAppUrl).href
           : undefined;
-    const keyboard = replyKeyboard(
-      reply.buttons,
-      detailUrl,
-      reply.miniAppView ? "Открыть в приложении" : undefined,
-    );
-    const hasKeyboard = reply.buttons.length > 0 || detailUrl !== undefined;
+    const keyboard =
+      options.fallbackReplyMarkup ??
+      replyKeyboard(
+        reply.buttons,
+        detailUrl,
+        reply.miniAppView ? "Открыть в приложении" : undefined,
+      );
+    const hasKeyboard =
+      options.fallbackReplyMarkup !== undefined ||
+      reply.buttons.length > 0 ||
+      detailUrl !== undefined;
     const photos = [...new Set(reply.photos ?? [])].slice(0, 10);
     // Source-generated rich HTML is bounded conservatively by its serialized UTF-8
     // size; larger cards retain their entire content via the ordinary HTML splitter.
@@ -146,7 +149,7 @@ export async function sendReplies(
             html: (photoRejected ? `<p>${photoNote.trim()}</p>` : "") + richHtml,
             skip_entity_detection: true,
           },
-          hasKeyboard ? { reply_markup: keyboard } : {},
+          hasKeyboard && !options.fallbackReplyMarkup ? { reply_markup: keyboard } : {},
         );
         continue;
       } catch (error) {
@@ -255,43 +258,35 @@ export function createTelegramBot(
     );
   }
   async function checkVin(chatId: number, vin: string): Promise<void> {
-    const searchUrl = vinGoogleSearchUrl(vin);
-    if (!searchUrl) return;
-    let text = VIN_NOT_ENABLED;
+    if (normalizeVin(vin) !== vin) return;
+    const actions = vinResultActions(vin, options.miniAppUrl);
+    let presentation = { text: escapeHtml(VIN_NOT_ENABLED), richHtml: "" };
     let result: VinCheckResult | undefined;
     if (options.checkVin) {
       try {
         const checked = await options.checkVin(vin);
         if (checked.vin !== vin) throw new Error("VIN result does not match the request");
-        text = vinResultText(checked);
+        presentation = vinResultPresentation(checked, actions);
         result = checked;
       } catch {
-        text =
+        presentation.text =
           "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
       }
     }
-    const replies = packReplies(
-      escapeHtml(`${text}\n\n${VIN_GOOGLE_SEARCH_NOTICE}\n\n${VIN_ARCHIVE_DISCLOSURE}`),
-      [],
+    await sendReplies(
+      bot,
+      chatId,
+      [
+        {
+          text: result
+            ? presentation.text
+            : `${presentation.text}\n\n${actions.additional.map(({ notice }) => escapeHtml(notice)).join("\n\n")}`,
+          ...(presentation.richHtml ? { richHtml: presentation.richHtml } : {}),
+          buttons: [],
+        },
+      ],
+      { fallbackReplyMarkup: actions.keyboard },
     );
-    const keyboard = new InlineKeyboard()
-      .url(VIN_GOOGLE_SEARCH_LABEL, searchUrl)
-      .row()
-      .text(VIN_ARCHIVE_LABEL, `vinarchive:${vin}`)
-      .row()
-      .text("Пример отчёта · PDF на корейском", "vin-report-example");
-    if (options.miniAppUrl) {
-      keyboard
-        .row()
-        .webApp(VIN_REPORT_EXAMPLE_LABEL, new URL("?view=report-example", options.miniAppUrl).href);
-    }
-    for (const [index, reply] of replies.entries()) {
-      await bot.api.sendMessage(chatId, reply.text, {
-        parse_mode: "HTML",
-        link_preview_options: { is_disabled: true },
-        ...(index === replies.length - 1 ? { reply_markup: keyboard } : {}),
-      });
-    }
     if (!result) return;
     const sentListings = new Set<string>();
     for (const listing of confirmedEncarListings(result).slice(0, ENCAR_HISTORY_MAX_LISTINGS)) {

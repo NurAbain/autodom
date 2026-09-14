@@ -15,6 +15,7 @@ import type {
   VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
+import { load } from "cheerio";
 import { InputFile } from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -1420,15 +1421,10 @@ describe("grammY transport boundaries", () => {
     expect(checkVin).toHaveBeenCalledExactlyOnceWith("KMHDU41DBAU123456");
     expect(await store.getProfile(1)).toBeNull();
     expect(await store.getDraft(1)).toEqual(draft);
-    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        expect.arrayContaining([
-          expect.objectContaining({
-            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-          }),
-        ]),
-      ]),
-    });
+    const rich = calls.at(-1)?.payload.rich_message as { html: string };
+    expect(load(rich.html)('tg-button[type="url"]').attr("url")).toBe(
+      "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+    );
     await bot.handleUpdate({ update_id: 5, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
     expect(checkVin).toHaveBeenCalledTimes(1);
@@ -1499,90 +1495,131 @@ describe("grammY transport boundaries", () => {
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
   });
-  it("delivers long decoder and Encar results within Telegram limits without losing ads or parsing source markup", async () => {
-    const literal = "<literal & data>".repeat(32);
-    const { bot, calls } = telegram(async (vin) => ({
-      vin,
-      checked_at: 1_789_000_000,
-      carhistory: { status: "disabled", source_url: "", checked_at: null },
-      car365: { status: "disabled", source_url: "", checked_at: null, data: null },
-      encar: {
-        status: "available",
-        source_url: "https://fem.encar.com",
+  it.each(["rich", "legacy"] as const)(
+    "delivers long VIN results in %s mode without losing ads, controls or literal data",
+    async (mode) => {
+      const literal = "<literal & data>".repeat(32);
+      const { bot, calls } = telegram(async (vin) => ({
+        vin,
         checked_at: 1_789_000_000,
-        data: {
-          vin,
-          discovery_url: `https://carcheck.by/auto/${vin}`,
-          partial: true,
-          listings: Array.from({ length: 5 }, (_, index) => ({
-            id: String(39720103 + index),
+        carhistory: { status: "disabled", source_url: "", checked_at: null },
+        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+        encar: {
+          status: "available",
+          source_url: "https://fem.encar.com",
+          checked_at: 1_789_000_000,
+          data: {
             vin,
-            source_url: `https://fem.encar.com/cars/detail/${39720103 + index}`,
-            model: `Ad ${index}: ${"<Encar & record>".repeat(20)}`,
-            mileage_km: 10000 + index,
-            advertisement_status: "SOLD" as const,
-            created_at: `2024-05-0${index + 1}T11:12:13`,
-            first_advertised_at: null,
-            modified_at: null,
-            re_registered: false,
-            photo_urls: [
-              `https://ci.encar.com/carpicture/carpicture07/pic3972/${39720103 + index}_001.jpg`,
-            ],
-          })),
+            discovery_url: `https://carcheck.by/auto/${vin}`,
+            partial: true,
+            listings: Array.from({ length: 5 }, (_, index) => ({
+              id: String(39720103 + index),
+              vin,
+              source_url: `https://fem.encar.com/cars/detail/${39720103 + index}`,
+              model: `Ad ${index}: ${"<Encar & record>".repeat(20)}`,
+              mileage_km: 10000 + index,
+              advertisement_status: "SOLD" as const,
+              created_at: `2024-05-0${index + 1}T11:12:13`,
+              first_advertised_at: null,
+              modified_at: null,
+              re_registered: false,
+              photo_urls: [
+                `https://ci.encar.com/carpicture/carpicture07/pic3972/${39720103 + index}_001.jpg`,
+              ],
+            })),
+          },
         },
-      },
-      autodev: {
-        status: "available",
-        source_url: "https://docs.auto.dev/v2/products/vin-decode",
-        checked_at: 1_789_000_000,
-        data: {
-          vin,
-          make: literal,
-          model: literal,
-          model_year: 2010,
-          trim: literal,
-          body_class: literal,
-          engine: literal,
-          drive: literal,
-          transmission: literal,
-          origin_country: literal,
-          ambiguous: false,
+        autodev: {
+          status: "available",
+          source_url: "https://docs.auto.dev/v2/products/vin-decode",
+          checked_at: 1_789_000_000,
+          data: {
+            vin,
+            make: literal,
+            model: literal,
+            model_year: 2010,
+            trim: literal,
+            body_class: literal,
+            engine: literal,
+            drive: literal,
+            transmission: literal,
+            origin_country: literal,
+            ambiguous: false,
+          },
         },
-      },
-    }));
-    await bot.init();
-    await bot.handleUpdate({
-      update_id: 1,
-      message: {
-        message_id: 1,
-        date: 1,
-        from: { id: 1, is_bot: false, first_name: "Buyer" },
-        chat: { id: 1, type: "private", first_name: "Buyer" },
-        text: "/vin KMHDU41DBAU123456",
-      },
-    });
-    const sent = calls.filter((call) => call.method === "sendMessage");
-    expect(sent.every((call) => String(call.payload.text).length <= 4096)).toBe(true);
-    expect(sent.every((call) => call.payload.parse_mode === "HTML")).toBe(true);
-    const html = sent.map((call) => String(call.payload.text)).join("");
-    expect(html).not.toContain("<literal");
-    expect(html.match(/&lt;literal &amp; data&gt;/g)).toHaveLength(32 * 8);
-    expect(html.match(/&lt;Encar &amp; record&gt;/g)).toHaveLength(5 * 20);
-    for (let index = 0; index < 5; index += 1) {
-      expect(html).toContain(String(39720103 + index));
-      expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
-    }
-    expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
-    expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        expect.arrayContaining([
-          expect.objectContaining({
-            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-          }),
-        ]),
-      ]),
-    });
-  });
+      }));
+      if (mode === "legacy") {
+        bot.api.config.use(async (previous, method, payload, signal) =>
+          method === "sendRichMessage"
+            ? { ok: false, error_code: 404, description: "Not Found" }
+            : previous(method, payload, signal),
+        );
+      }
+      await bot.init();
+      await bot.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: 1,
+          from: { id: 1, is_bot: false, first_name: "Buyer" },
+          chat: { id: 1, type: "private", first_name: "Buyer" },
+          text: "/vin KMHDU41DBAU123456",
+        },
+      });
+      const sent = calls.filter(
+        (call) => call.method === "sendMessage" || call.method === "sendRichMessage",
+      );
+      const html = sent
+        .map((call) => {
+          if (call.method === "sendRichMessage") {
+            const rich = call.payload.rich_message as { html: string };
+            expect(Buffer.byteLength(rich.html, "utf8")).toBeLessThanOrEqual(32768);
+            return rich.html;
+          }
+          expect(String(call.payload.text).length).toBeLessThanOrEqual(4096);
+          expect(call.payload.parse_mode).toBe("HTML");
+          return String(call.payload.text);
+        })
+        .join("");
+      const rendered = load(html);
+      expect(rendered("literal, encar")).toHaveLength(0);
+      expect(
+        rendered
+          .root()
+          .text()
+          .match(/<literal & data>/g),
+      ).toHaveLength(32 * 8);
+      expect(
+        rendered
+          .root()
+          .text()
+          .match(/<Encar & record>/g),
+      ).toHaveLength(5 * 20);
+      for (let index = 0; index < 5; index += 1) {
+        expect(html).toContain(String(39720103 + index));
+        expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
+      }
+      if (mode === "rich") {
+        expect(rendered('tg-button[type="url"]').attr("url")).toBe(
+          "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+        );
+        expect(sent.every((call) => call.payload.reply_markup === undefined)).toBe(true);
+      } else {
+        expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(
+          true,
+        );
+        expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
+          inline_keyboard: expect.arrayContaining([
+            expect.arrayContaining([
+              expect.objectContaining({
+                url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+              }),
+            ]),
+          ]),
+        });
+      }
+    },
+  );
   it("keeps VIN photo albums bound to their verified advertisements across Telegram batch boundaries", async () => {
     const photo = (id: string, index: number) =>
       `https://ci.encar.com/carpicture/carpicture02/pic3972/${id}_${String(index).padStart(3, "0")}.jpg`;

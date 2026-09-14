@@ -1,6 +1,7 @@
 import type { EncarListing, VinCheckResult } from "@autodom/core/vin";
+import { load } from "cheerio";
 import { describe, expect, it } from "vitest";
-import { vinResultText, vinSourceText } from "../src/vin-text.js";
+import { vinResultPresentation, vinSourceText } from "../src/vin-text.js";
 
 const result: VinCheckResult = {
   vin: "KMHDU41DBAU123456",
@@ -27,7 +28,15 @@ const result: VinCheckResult = {
 
 describe("VIN observations presented without buying or certifying a report", () => {
   it("distinguishes recorded mileage, missing damage data and report availability", () => {
-    const text = vinResultText(result);
+    const { text, richHtml } = vinResultPresentation(result);
+    const rendered = load(richHtml);
+    expect(rendered("h3").first().text()).toMatch(/Экспорт.*бесплатно/);
+    expect(
+      rendered("td b")
+        .map((_index, node) => rendered(node).text())
+        .get(),
+    ).toEqual(expect.arrayContaining(["Avante", "0 км", "2024-05-02", "2010-01-15"]));
+    expect(text.indexOf("0 км")).toBeLessThan(text.indexOf("Полная история"));
     expect(text).toContain(result.vin);
     expect(text).toContain("0 км");
     expect(text).toContain("2024-05-02");
@@ -69,7 +78,7 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(section).toMatch(/не означает страну регистрации/);
     expect(section).not.toContain("0 км");
     expect(section).not.toContain("2024-05-02");
-    const text = vinResultText(decoded);
+    const { text } = vinResultPresentation(decoded);
     expect(text).not.toContain("attacker.invalid");
   });
 
@@ -126,7 +135,7 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(section).toMatch(/не история ДТП/);
     expect(section).toMatch(/происхождени.*South Korea/);
     expect(section).not.toMatch(/0 км|2024-05-02|null|undefined|Двигатель:/);
-    const text = vinResultText(decoded);
+    const { text } = vinResultPresentation(decoded);
     expect(text).not.toContain("attacker.invalid");
   });
 
@@ -163,7 +172,7 @@ describe("VIN observations presented without buying or certifying a report", () 
         },
       },
     } satisfies VinCheckResult;
-    const text = vinResultText(history);
+    const { text } = vinResultPresentation(history);
     expect(text).toContain("39720103");
     expect(text).toContain("2024-05-02T11:12:13");
     expect(text).not.toMatch(
@@ -176,5 +185,53 @@ describe("VIN observations presented without buying or certifying a report", () 
     }
     history.encar.data.vin = "WBA51AG03NCK98884";
     expect(vinSourceText("encar", history)).not.toContain("39720103");
+  });
+
+  it("keeps provider markup as visible text rather than links or purchase buttons in either format", () => {
+    const model =
+      '<tg-button type="url" url="https://attacker.invalid">Купить</tg-button> & <b>GT</b>';
+    const presentation = vinResultPresentation({
+      ...result,
+      car365: { ...result.car365, data: { ...result.car365.data!, model } },
+    });
+    for (const html of [presentation.text, presentation.richHtml]) {
+      const rendered = load(html);
+      expect(rendered('a, script, [url*="attacker.invalid"]')).toHaveLength(0);
+      expect(rendered.root().text()).toContain(model);
+      expect(
+        rendered("b")
+          .map((_index, node) => rendered(node).text())
+          .get(),
+      ).toContain(model);
+    }
+  });
+
+  it("never presents unknown or stale export mileage as zero or as a successful check", () => {
+    const unknown = vinResultPresentation({
+      ...result,
+      car365: {
+        ...result.car365,
+        data: { ...result.car365.data!, last_mileage_km: null },
+      },
+    });
+    const rendered = load(unknown.richHtml);
+    expect(
+      rendered("td b")
+        .map((_index, node) => rendered(node).text())
+        .get(),
+    ).toContain("неизвестен");
+    expect(unknown.text).not.toContain("0 км");
+    for (const status of ["not_found", "unavailable", "disabled"] as const) {
+      const presentation = vinResultPresentation({
+        ...result,
+        carhistory: { ...result.carhistory, status },
+        car365: { ...result.car365, status },
+      });
+      for (const html of [presentation.text, presentation.richHtml]) {
+        expect(html).not.toMatch(/Avante|0 км|2024-05-02|Найдена экспортная декларация/);
+        expect(html).not.toContain("Наличие отчёта подтверждено");
+        expect(load(html).root().text()).toMatch(/Заказ.*недоступен/);
+      }
+    }
   });
 });

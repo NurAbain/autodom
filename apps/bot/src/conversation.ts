@@ -27,6 +27,7 @@ import {
   renderCatalog,
   updateCatalog,
 } from "./catalog-dialogue.js";
+import { escapeHtml } from "./html.js";
 import { listingPhotoUrls } from "./media.js";
 import type { SellerConversation } from "./seller-conversation.js";
 import { vehicleCatalog } from "./vehicle-catalog.js";
@@ -115,12 +116,6 @@ const USE_CASE_TIPS: Record<string, string> = {
   travel:
     "Для дальних поездок проверьте запасное колесо, тормоза и историю обслуживания перед выездом.",
 };
-export function escapeHtml(text: string): string {
-  return text.replace(
-    /[&<>"']/g,
-    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" })[char]!,
-  );
-}
 function bishkekTime(timestamp: number): string {
   const date = new Date((timestamp + 6 * 3600) * 1000);
   const pad = (number: number) => String(number).padStart(2, "0");

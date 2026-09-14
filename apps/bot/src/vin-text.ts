@@ -1,4 +1,5 @@
 import {
+  type Car365Record,
   type EncarListing,
   encarListingUrl,
   isEncarPhotoUrl,
@@ -6,6 +7,7 @@ import {
   VIN_PROVIDERS,
   type VinCheckResult,
   type VinProvider,
+  vinGoogleSearchUrl,
 } from "@autodom/core/vin";
 import {
   isVinArchiveLotUrl,
@@ -14,6 +16,7 @@ import {
   type VinArchiveProvider,
   type VinArchiveStatus,
 } from "@autodom/core/vin-archive";
+import { escapeHtml } from "./html.js";
 
 export const VIN_ARCHIVE_LABEL = "Архивные фото США / ОАЭ";
 export const VIN_ARCHIVE_CARWAY_NOTICE =
@@ -96,9 +99,6 @@ export const VIN_CAUTION =
 export const VIN_GOOGLE_SEARCH_LABEL = "Искать VIN в Google";
 export const VIN_GOOGLE_SEARCH_NOTICE =
   "Поиск точного VIN в Google для любого рынка. VIN передаётся Google только при нажатии. Отсутствие результатов не означает чистую историю.";
-export const VIN_REPORT_EXAMPLE_LABEL = "Пример полного отчёта";
-export const VIN_PREMIUM_DESCRIPTION =
-  "В примере полного корейского отчёта — страховые ремонты, смены собственника и записи пробега. Это документ другого автомобиля, не проверка вашего VIN. Заказ нового отчёта пока недоступен.";
 
 export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
   carhistory: "Полный отчёт · Корея",
@@ -159,10 +159,35 @@ export function encarListingFacts(listing: EncarListing): [string, string][] {
   return facts;
 }
 
-export function vinSourceText(provider: VinProvider, result: VinCheckResult): string {
+function car365Facts(record: Car365Record | null): [string, string][] {
+  return [
+    ["Модель в записи", record?.model ?? "неизвестна"],
+    [
+      "Записанный пробег",
+      record?.last_mileage_km == null
+        ? "неизвестен"
+        : `${record.last_mileage_km.toLocaleString("ru-RU")} км`,
+    ],
+    ["Дата декларации", record?.export_date ?? "неизвестна"],
+    ["Первая регистрация", record?.first_registration_date ?? "неизвестна"],
+  ];
+}
+
+function car365Notes(record: Car365Record | null): string[] {
+  return [
+    "Найдена экспортная декларация. Она не подтверждает фактическую отправку автомобиля.",
+    "Записанный пробег — не текущий реальный пробег. Дата декларации — не дата замера пробега.",
+    record?.total_loss == null
+      ? "Данные о полной гибели неизвестны; отсутствие повреждений не подтверждено."
+      : record.total_loss
+        ? "В записи указана полная гибель автомобиля."
+        : "Полная гибель в записи не указана; это не означает отсутствие ДТП или повреждений.",
+  ];
+}
+
+function vinSourceDescription(provider: VinProvider, result: VinCheckResult): string {
   const observation = result[provider];
   if (!observation) return "";
-  const name = VIN_SOURCE_NAMES[provider];
   let description: string;
   switch (observation.status) {
     case "disabled":
@@ -233,25 +258,10 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
         break;
       }
       const record = result.car365.data;
-      const lines = [
-        "Найдена экспортная декларация. Она не подтверждает фактическую отправку автомобиля.",
-        record?.last_mileage_km == null
-          ? "Пробег в записи неизвестен."
-          : `Последний записанный пробег: ${record.last_mileage_km.toLocaleString("ru-RU")} км (не текущий реальный пробег).`,
-      ];
-      if (record?.model) lines.push(`Модель в записи: ${record.model}`);
-      if (record?.export_date)
-        lines.push(`Дата декларации: ${record.export_date} (не дата замера пробега)`);
-      if (record?.first_registration_date)
-        lines.push(`Первая регистрация: ${record.first_registration_date}`);
-      lines.push(
-        record?.total_loss == null
-          ? "Данные о полной гибели неизвестны; отсутствие повреждений не подтверждено."
-          : record.total_loss
-            ? "В записи указана полная гибель автомобиля."
-            : "Полная гибель в записи не указана; это не означает отсутствие ДТП или повреждений.",
-      );
-      description = lines.join("\n");
+      description = [
+        ...car365Facts(record).map(([label, value]) => `${label}: ${value}`),
+        ...car365Notes(record),
+      ].join("\n");
       break;
     }
   }
@@ -263,22 +273,180 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
     description +=
       "\nЭто не история ДТП, пробега или владельцев. Страна происхождения не означает страну регистрации или эксплуатации.";
   }
-  const checked =
-    observation.checked_at === null
-      ? "Проверка не выполнялась."
-      : `Проверено: ${vinArchiveTime(observation.checked_at)}.`;
-  return `${name}\n${description}\n${checked}`;
+  return description;
 }
 
-export function vinResultText(result: VinCheckResult): string {
-  return [
-    `Бесплатная проверка VIN: ${result.vin}`,
-    `Результат получен: ${vinArchiveTime(result.checked_at)}`,
-    ...VIN_PROVIDERS.flatMap((provider) => {
-      const observation = result[provider];
-      return observation ? [vinSourceText(provider, result)] : [];
-    }),
-    VIN_CAUTION,
-    VIN_PREMIUM_DESCRIPTION,
-  ].join("\n\n");
+function vinCheckedText(checkedAt: number | null): string {
+  return checkedAt === null
+    ? "Проверка не выполнялась."
+    : `Проверено: ${vinArchiveTime(checkedAt)}.`;
+}
+
+export function vinSourceText(provider: VinProvider, result: VinCheckResult): string {
+  const observation = result[provider];
+  if (!observation) return "";
+  return `${VIN_SOURCE_NAMES[provider]}\n${vinSourceDescription(provider, result)}\n${vinCheckedText(observation.checked_at)}`;
+}
+
+type VinButton = { text: string; style?: "primary" } & (
+  | { callback_data: string }
+  | { url: string }
+  | { web_app: { url: string } }
+);
+
+export function vinResultActions(vin: string, miniAppUrl?: string) {
+  const report: VinButton[] = [
+    { text: "Посмотреть пример · PDF", callback_data: "vin-report-example", style: "primary" },
+  ];
+  if (miniAppUrl) {
+    report.push({
+      text: "Разбор примера на русском",
+      web_app: { url: new URL("?view=report-example", miniAppUrl).href },
+    });
+  }
+  const additional: { button: VinButton; notice: string }[] = [
+    {
+      button: { text: VIN_ARCHIVE_LABEL, callback_data: `vinarchive:${vin}` },
+      notice: VIN_ARCHIVE_DISCLOSURE,
+    },
+  ];
+  const searchUrl = vinGoogleSearchUrl(vin);
+  if (searchUrl) {
+    additional.push({
+      button: { text: VIN_GOOGLE_SEARCH_LABEL, url: searchUrl },
+      notice: VIN_GOOGLE_SEARCH_NOTICE,
+    });
+  }
+  return {
+    report,
+    additional,
+    keyboard: {
+      inline_keyboard: [...report, ...additional.map(({ button }) => button)].map((button) => [
+        button,
+      ]),
+    },
+  };
+}
+
+function richVinButtons(buttons: readonly VinButton[]): string {
+  return buttons
+    .map((button) => {
+      const action =
+        "callback_data" in button
+          ? `type="callback_data" data="${escapeHtml(button.callback_data)}"`
+          : "web_app" in button
+            ? `type="web_app" url="${escapeHtml(button.web_app.url)}"`
+            : `type="url" url="${escapeHtml(button.url)}"`;
+      return `<tg-button-row><tg-button ${action}${button.style ? ` style="${button.style}"` : ""}>${escapeHtml(button.text)}</tg-button></tg-button-row>`;
+    })
+    .join("");
+}
+
+/** Both Telegram formats share the same facts and order; neither offers an unavailable purchase. */
+export function vinResultPresentation(
+  result: VinCheckResult,
+  actions = vinResultActions(result.vin),
+): { text: string; richHtml: string } {
+  const sections: {
+    title: string;
+    body: string;
+    checked: string;
+    richBody?: string;
+    buttons?: readonly VinButton[];
+  }[] = [];
+  const record = result.car365.data;
+  const exportAvailable = result.car365.status === "available";
+  const facts = exportAvailable ? car365Facts(record) : [];
+  const notes = exportAvailable ? car365Notes(record) : [];
+  const exportBody = exportAvailable
+    ? [
+        ...facts.map(([label, value]) => `${label}: <b>${escapeHtml(value)}</b>`),
+        "",
+        ...notes.map((note) => escapeHtml(note)),
+      ].join("\n")
+    : escapeHtml(vinSourceDescription("car365", result));
+  sections.push({
+    title: "Экспорт и пробег · бесплатно",
+    body: exportBody,
+    checked: vinCheckedText(result.car365.checked_at),
+    ...(exportAvailable
+      ? {
+          richBody:
+            "<table compact striped>" +
+            facts
+              .map(
+                ([label, value]) =>
+                  `<tr><td>${label}</td><td><b>${escapeHtml(value)}</b></td></tr>`,
+              )
+              .join("") +
+            "</table>" +
+            `<p>${notes.map((note) => escapeHtml(note)).join("<br>")}</p>`,
+        }
+      : {}),
+  });
+  for (const provider of VIN_PROVIDERS) {
+    if (provider === "car365" || provider === "carhistory") continue;
+    const observation = result[provider];
+    if (!observation) continue;
+    sections.push({
+      title: VIN_SOURCE_NAMES[provider],
+      body: escapeHtml(vinSourceDescription(provider, result)),
+      checked: vinCheckedText(observation.checked_at),
+    });
+  }
+  const benefits = [
+    "Страховые повреждения и суммы ремонта",
+    "Смены собственника и регистрационные записи",
+    "История записанного пробега",
+  ];
+  const exampleNotice = "Это пример другого автомобиля, не результат проверки вашего VIN.";
+  const reportStatus = escapeHtml(vinSourceDescription("carhistory", result));
+  const orderStatus = "<b>Заказ нового отчёта пока недоступен.</b>";
+  sections.push({
+    title: "Полная история · Корея",
+    body: [
+      reportStatus,
+      "",
+      "<b>Что есть в примере полного отчёта</b>",
+      ...benefits.map((benefit) => `• ${benefit}`),
+      "",
+      exampleNotice,
+      orderStatus,
+    ].join("\n"),
+    checked: vinCheckedText(result.carhistory.checked_at),
+    richBody:
+      `<p>${reportStatus}</p><p><b>Что есть в примере полного отчёта</b></p>` +
+      `<ul>${benefits.map((benefit) => `<li>${benefit}</li>`).join("")}</ul>` +
+      `<p>${exampleNotice}</p><p>${orderStatus}</p>`,
+    buttons: actions.report,
+  });
+  const vin = escapeHtml(result.vin);
+  const received = escapeHtml(`Результат получен: ${vinArchiveTime(result.checked_at)}`);
+  const caution = escapeHtml(VIN_CAUTION);
+  return {
+    text: [
+      `<b>Бесплатная проверка VIN</b>\n<code>${vin}</code>`,
+      ...sections.map(({ title, body, checked }) => `<b>${title}</b>\n${body}\n<i>${checked}</i>`),
+      `<b>Важно</b>\n${caution}`,
+      ...actions.additional.map(({ notice }) => escapeHtml(notice)),
+      received,
+    ].join("\n\n"),
+    richHtml:
+      `<h2>Бесплатная проверка VIN</h2><p><code>${vin}</code></p>` +
+      sections
+        .map(
+          ({ title, body, richBody, checked, buttons }, index) =>
+            `${index ? "<hr>" : ""}<h3>${title}</h3>` +
+            (richBody ?? `<p>${body.replaceAll("\n", "<br>")}</p>`) +
+            (buttons ? richVinButtons(buttons) : "") +
+            `<footer>${checked}</footer>`,
+        )
+        .join("") +
+      "<details><summary>Фото и поиск в интернете</summary>" +
+      actions.additional
+        .map(({ button, notice }) => `<p>${escapeHtml(notice)}</p>${richVinButtons([button])}`)
+        .join("") +
+      "</details>" +
+      `<details><summary>Как понимать результат</summary><p>${caution}</p></details><footer>${received}</footer>`,
+  };
 }
