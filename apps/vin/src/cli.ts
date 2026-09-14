@@ -28,6 +28,15 @@ uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
 not vehicle history. Auto.dev Free is capped at 1,000 calls/month; no paid upgrades.
 encar discovers public advertisement IDs through Carcheck and confirms full VIN,
 metadata and retained photos from official Encar pages; no complete history or sale is implied.
+encar requires RISKBYPASS_API_KEY for a reusable private Carcheck ISP session.
+Startup prepares the route without buying a capture. An observed VIN challenge starts
+one shared background clearance; a cold request can expire and need a later retry.
+The 40-second lookup budget is unchanged; captures have a five-minute failure cooldown.
+AUTODOM_CARCHECK_PROXY_ENDPOINT optionally pins Carcheck alone to a host:port using
+the existing residential credentials. Other providers retain their original routes.
+AUTODOM_ENCAR_CACHE_PATH optionally persists confirmed Encar IDs for 24-hour discovery
+freshness (up to 1,000 VINs); official data is rechecked on each lookup.
+Cached discovery is marked partial. Cookies/photos are not persisted; errors are not absence.
 Configured Korean providers run first. Decoders run only after all return not_found,
 or directly if no Korean provider is configured. Korean hits/errors skip both decoders.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
@@ -103,11 +112,24 @@ export async function main(
       )
         ? loadProxyRoutes(env)
         : [];
+    const carcheckEndpoint = env.AUTODOM_CARCHECK_PROXY_ENDPOINT?.trim();
+    const carcheckRoutes =
+      providers.includes("encar") && carcheckEndpoint
+        ? loadProxyRoutes({
+            ...env,
+            SMARTPROXY_RESIDENTIAL_ENDPOINT: carcheckEndpoint,
+            SMARTPROXY_RESIDENTIAL_PORT_START: "0",
+            SMARTPROXY_RESIDENTIAL_PORT_COUNT: "0",
+          })
+        : undefined;
     service = new VinCheckService({
       providers,
       routes,
       requestDelaySeconds,
       autoDevApiKey: env.AUTODOM_AUTODEV_API_KEY,
+      riskBypassApiKey: env.RISKBYPASS_API_KEY,
+      encarCachePath: env.AUTODOM_ENCAR_CACHE_PATH,
+      carcheckRoutes,
       signal: shutdown.signal,
     });
     if (archiveProviders.length)
@@ -119,6 +141,7 @@ export async function main(
       });
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
+    await service.start();
     const server = await startVinApiServer({
       ...options,
       checkVin: service.check,

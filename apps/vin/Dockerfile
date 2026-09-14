@@ -35,7 +35,8 @@ COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /app/apps/vin/dist ./apps/vin/dist
 COPY package.json ./package.json
 RUN groupadd --gid 10001 autodom \
-    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin autodom
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin autodom \
+    && install -d -m 0700 -o 10001 -g 10001 /var/lib/autodom-vin
 USER 10001:10001
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=6s --start-period=15s --retries=3 CMD ["node", "apps/vin/dist/cli.js", "health"]

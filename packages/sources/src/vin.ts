@@ -1,5 +1,7 @@
 import {
+  type EncarHistory,
   normalizeVin,
+  type ProxyRoute,
   SourceError,
   VIN_SOURCE_URLS,
   type VinCheckResult,
@@ -8,8 +10,10 @@ import {
 } from "@autodom/core";
 import { checkAutoDev } from "./autodev.js";
 import { checkCar365 } from "./car365.js";
+import { CarcheckSession } from "./carcheck-session.js";
 import { checkCarHistory } from "./carhistory.js";
-import { checkEncarHistory } from "./encar-history.js";
+import { EncarHistoryLookup } from "./encar-cache.js";
+import { abortable } from "./http-response.js";
 import { checkNhtsaVpic } from "./nhtsa-vpic.js";
 import { VinTransport, type VinTransportOptions } from "./vin-session.js";
 
@@ -27,13 +31,22 @@ export class VinCheckService {
   readonly #timeoutMs: number;
   readonly #autoDevApiKey: string | undefined;
   readonly #active = new Set<Promise<unknown>>();
+  readonly #carcheck: CarcheckSession | undefined;
+  readonly #encarLookup: EncarHistoryLookup | undefined;
+  readonly #encarRequests = new Map<string, Promise<EncarHistory | null>>();
 
   constructor(
     options: VinTransportOptions & {
       providers: readonly VinProvider[];
       autoDevApiKey?: string | undefined;
+      riskBypassApiKey?: string | undefined;
+      encarCachePath?: string | undefined;
+      carcheckRoutes?: readonly ProxyRoute[] | undefined;
     },
   ) {
+    this.#signal = options.signal
+      ? AbortSignal.any([this.#abort.signal, options.signal])
+      : this.#abort.signal;
     for (const provider of options.providers) this.#enabled[provider] = true;
     this.#autoDevApiKey = this.#enabled.autodev ? options.autoDevApiKey?.trim() : undefined;
     if (
@@ -46,8 +59,28 @@ export class VinCheckService {
         "Auto.dev requires AUTODOM_AUTODEV_API_KEY as a private API credential",
       );
     }
+    let encarDiscovery = options.encarDiscovery;
+    if (this.#enabled.encar) {
+      if (!encarDiscovery) {
+        this.#carcheck = new CarcheckSession({
+          routes: options.carcheckRoutes ?? options.routes,
+          apiKey: options.riskBypassApiKey ?? "",
+          signal: this.#signal,
+          ...(options.requestDelaySeconds === undefined
+            ? {}
+            : { requestDelaySeconds: options.requestDelaySeconds }),
+        });
+        encarDiscovery = this.#carcheck;
+      }
+      this.#encarLookup = new EncarHistoryLookup({
+        ...(options.encarCachePath === undefined ? {} : { cachePath: options.encarCachePath }),
+      });
+    }
     if (this.#enabled.carhistory || this.#enabled.car365 || this.#enabled.encar) {
-      this.#transport = new VinTransport(options);
+      this.#transport = new VinTransport({
+        ...options,
+        ...(encarDiscovery ? { encarDiscovery } : {}),
+      });
     }
     this.#timeoutMs = options.timeoutMs ?? 40_000;
     if (
@@ -56,9 +89,27 @@ export class VinCheckService {
     ) {
       throw new SourceError("Direct VIN request timeout must be a positive integer");
     }
-    this.#signal = options.signal
-      ? AbortSignal.any([this.#abort.signal, options.signal])
-      : this.#abort.signal;
+  }
+
+  async start(): Promise<void> {
+    await this.#encarLookup?.initialize();
+    this.#signal.throwIfAborted();
+    this.#carcheck?.start();
+  }
+
+  #checkEncar(vin: string, signal?: AbortSignal): Promise<EncarHistory | null> {
+    let task = this.#encarRequests.get(vin);
+    if (!task) {
+      const transport = this.#transport;
+      const lookup = this.#encarLookup;
+      if (!transport || !lookup) throw new SourceError("Encar is not configured");
+      // One bounded lookup may serve several callers; one caller cannot cancel the others.
+      task = transport
+        .run("encar", (session) => lookup.check(vin, session), this.#signal)
+        .finally(() => this.#encarRequests.delete(vin));
+      this.#encarRequests.set(vin, task);
+    }
+    return abortable(task, signal ?? this.#signal);
   }
 
   readonly check: VinLookup = async (value, signal): Promise<VinCheckResult> => {
@@ -126,11 +177,7 @@ export class VinCheckService {
         };
         result.encar = observation;
         try {
-          observation.data = await transport.run(
-            "encar",
-            (session) => checkEncarHistory(vin, session),
-            signal,
-          );
+          observation.data = await this.#checkEncar(vin, signal);
           observation.status = observation.data ? "available" : "not_found";
         } catch {
           signal?.throwIfAborted();
@@ -198,6 +245,11 @@ export class VinCheckService {
 
   async close(): Promise<void> {
     this.#abort.abort();
-    await Promise.all([this.#transport?.close(), Promise.allSettled(this.#active)]);
+    await Promise.all([
+      this.#transport?.close(),
+      this.#carcheck?.close(),
+      Promise.allSettled(this.#active),
+    ]);
+    await this.#encarLookup?.close();
   }
 }

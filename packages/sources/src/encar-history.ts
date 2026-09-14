@@ -9,9 +9,13 @@ import {
   isEncarPhotoUrl,
   normalizeVin,
   SourceError,
+  SourceRateLimited,
 } from "@autodom/core";
 import { load } from "cheerio";
 import { VinRequestError, type VinSession } from "./vin-session.js";
+
+/** Positive evidence that a candidate was removed or belongs to a different full VIN. */
+export class EncarIdentityError extends SourceError {}
 
 const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
@@ -121,6 +125,9 @@ function parseListing(
   const id = listingId(base?.vehicleId);
   const manage = record(base?.manage);
   const alias = listingId(manage?.dummyVehicleId);
+  const observedVin = typeof base?.vin === "string" ? normalizeVin(base.vin) : null;
+  if (observedVin && observedVin !== vin)
+    throw new EncarIdentityError("Encar advertisement belongs to a different VIN");
   if (
     !base ||
     !id ||
@@ -178,31 +185,46 @@ function parseListing(
 export async function checkEncarHistory(
   vin: string,
   session: VinSession,
+  candidateIds?: readonly string[],
 ): Promise<EncarHistory | null> {
   const normalizedVin = normalizeVin(vin);
   const discoveryUrl = encarHistoryDiscoveryUrl(vin);
   if (!normalizedVin || !discoveryUrl) throw new SourceError("Encar history requires a valid VIN");
-  const discovery = await session.request(discoveryUrl);
-  // The transport only surfaces the exact /auto/VIN -> /vin/VIN absence redirect, unfollowed.
-  if (discovery.status === 301) return null;
-  if (discovery.status !== 200) throw new SourceError("Encar discovery unavailable");
-  const candidates = discover(discovery.body, normalizedVin);
+  let candidates: readonly string[];
+  if (candidateIds === undefined) {
+    const discovery = await session.request(discoveryUrl);
+    // The transport only surfaces the exact /auto/VIN -> /vin/VIN absence redirect, unfollowed.
+    if (discovery.status === 301) return null;
+    if (discovery.status !== 200) throw new SourceError("Encar discovery unavailable");
+    candidates = discover(discovery.body, normalizedVin);
+  } else {
+    if (candidateIds.some((id) => typeof id !== "string" || listingId(id) !== id)) {
+      throw new SourceError("Invalid Encar advertisement candidates");
+    }
+    candidates = candidateIds;
+  }
   if (candidates.length === 0) return null;
 
   const listings = new Map<string, EncarListing>();
   const confirmed = new Set<string>();
   let requests = 0;
-  let partial = false;
+  let partial = candidateIds !== undefined;
   let retryableFailure: VinRequestError | undefined;
+  let unavailableFailure: SourceError | undefined;
   for (const candidate of candidates) {
     if (confirmed.has(candidate)) continue;
-    if (requests === ENCAR_HISTORY_MAX_LISTINGS) {
+    if (
+      requests === ENCAR_HISTORY_MAX_LISTINGS ||
+      // Reserve one official request (15s) and admission delay (2s), without renewing the deadline.
+      (listings.size > 0 && (session.remainingMs?.() ?? Infinity) < 17_000)
+    ) {
       partial = true;
       break;
     }
     requests += 1;
     try {
       const response = await session.request(encarListingUrl(candidate) as string);
+      if (response.status === 404) throw new EncarIdentityError("Encar advertisement was removed");
       if (response.status !== 200) throw new SourceError("Encar advertisement unavailable");
       const { listing, alias } = parseListing(response.body, candidate, normalizedVin);
       if (!listings.has(listing.id)) listings.set(listing.id, listing);
@@ -215,13 +237,25 @@ export async function checkEncarHistory(
       ) {
         throw error;
       }
+      if (error instanceof SourceRateLimited) {
+        if (listings.size === 0) throw error;
+        partial = true;
+        break;
+      }
       if (error instanceof VinRequestError) retryableFailure = error;
+      else if (!(error instanceof EncarIdentityError))
+        unavailableFailure =
+          error instanceof SourceError
+            ? error
+            : new SourceError("Encar advertisement evidence is unavailable");
       partial = true;
     }
   }
   if (listings.size === 0)
     throw (
-      retryableFailure ?? new SourceError("No discovered Encar advertisement could be verified")
+      retryableFailure ??
+      unavailableFailure ??
+      new EncarIdentityError("No discovered Encar advertisement could be verified")
     );
   return {
     vin: normalizedVin,

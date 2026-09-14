@@ -1,9 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
-import { MockAgent } from "undici";
+import { MockAgent, Response } from "undici";
 import { afterEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { checkEncarHistory } from "../src/encar-history.js";
-import { VinTransport } from "../src/vin-session.js";
+import { VinTransport, type VinTransportOptions } from "../src/vin-session.js";
 
 const ORIGIN = "https://www.carhistory.or.kr";
 const ENTRY = "/search/carhistory/search.car";
@@ -15,7 +15,7 @@ const routes = [
 const transports: VinTransport[] = [];
 const agents = new Set<MockAgent>();
 
-function setup() {
+function setup(encarDiscovery?: VinTransportOptions["encarDiscovery"]) {
   const mocks = routes.map(() => {
     const mock = new MockAgent();
     mock.disableNetConnect();
@@ -25,6 +25,7 @@ function setup() {
   const transport = new VinTransport({
     routes,
     requestDelaySeconds: 0,
+    ...(encarDiscovery ? { encarDiscovery } : {}),
     dispatcherFactory: (_route, _page, index) => {
       const mock = mocks[index] as MockAgent;
       agents.delete(mock); // VinTransport now owns closing this dispatcher.
@@ -144,6 +145,88 @@ describe("proxy-only VIN sessions", () => {
       SourceError,
     );
     expect(requests).toBe(0);
+  });
+
+  it("rejects unsafe paths and credential headers before calling the discovery hook", async () => {
+    const fetch = vi.fn(async () => new Response("unused"));
+    const unsafe = [
+      "https://carcheck.by/vin/WBA51AG03NCK98884",
+      "https://user:secret@carcheck.by/auto/WBA51AG03NCK98884",
+      "https://carcheck.by/auto/WBA51AG03NCK98884?report=1",
+    ];
+    for (const target of unsafe) {
+      const { transport } = setup({ fetch });
+      await expect(transport.run("encar", (session) => session.request(target))).rejects.toThrow(
+        SourceError,
+      );
+    }
+    const { transport } = setup({ fetch });
+    await expect(
+      transport.run("encar", (session) =>
+        session.request("https://carcheck.by/auto/WBA51AG03NCK98884", {
+          headers: { Cookie: "private=1" },
+        }),
+      ),
+    ).rejects.toThrow(SourceError);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not restart failed shared discovery on another ordinary proxy tier", async () => {
+    const fetch = vi.fn(async () => new Response("gateway unavailable", { status: 504 }));
+    const { transport } = setup({ fetch });
+    await expect(
+      transport.run("encar", (session) =>
+        session.request("https://carcheck.by/auto/WBA51AG03NCK98884"),
+      ),
+    ).rejects.toThrow(SourceRateLimited);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not mistake a challenged hook redirect for a missing archive", async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            location: "https://carcheck.by/vin/WBA51AG03NCK98884",
+            "cf-mitigated": "challenge",
+          },
+        }),
+    );
+    const { transport } = setup({ fetch });
+    await expect(
+      transport.run("encar", (session) =>
+        session.request("https://carcheck.by/auto/WBA51AG03NCK98884"),
+      ),
+    ).rejects.toThrow(SourceError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses discovery when official Encar needs another proxy without sharing discovery cookies", async () => {
+    const fetch = vi.fn(
+      async () =>
+        new Response("archive", {
+          headers: { "set-cookie": "carcheck=private; Path=/" },
+        }),
+    );
+    const { transport, mocks } = setup({ fetch });
+    mocks[0]
+      ?.get("https://fem.encar.com")
+      .intercept({ path: "/cars/detail/39720103" })
+      .reply(403, "");
+    mocks[1]
+      ?.get("https://fem.encar.com")
+      .intercept({
+        path: "/cars/detail/39720103",
+        headers: (headers) => !JSON.stringify(headers).toLowerCase().includes("cookie"),
+      })
+      .reply(200, "official");
+    const result = await transport.run("encar", async (session) => {
+      await session.request("https://carcheck.by/auto/WBA51AG03NCK98884");
+      return session.request("https://fem.encar.com/cars/detail/39720103");
+    });
+    expect(result).toEqual({ body: "official", status: 200 });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("recovers an Encar candidate blocked on datacenter through the residential route", async () => {

@@ -45,6 +45,12 @@ describe("VIN CLI", () => {
     { AUTODOM_VIN_API_TOKEN: "" },
     { AUTODOM_VIN_PROVIDERS: "" },
     { AUTODOM_VIN_PROVIDERS: "typo" },
+    { AUTODOM_VIN_PROVIDERS: "encar" },
+    {
+      AUTODOM_VIN_PROVIDERS: "encar",
+      RISKBYPASS_API_KEY: "test",
+      AUTODOM_CARCHECK_PROXY_ENDPOINT: "http://user:password@proxy.invalid:10010",
+    },
     { AUTODOM_VIN_API_PORT: "NaN" },
     { AUTODOM_VIN_API_MAX_IN_FLIGHT: "0" },
     { AUTODOM_CRAWL_DELAY: "Infinity" },

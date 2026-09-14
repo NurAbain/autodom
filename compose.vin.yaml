@@ -30,6 +30,9 @@ services:
       # Separate, user-triggered lookup. Empty keeps auction sources disabled.
       AUTODOM_VIN_ARCHIVE_PROVIDERS: ${AUTODOM_VIN_ARCHIVE_PROVIDERS:-}
       AUTODOM_AUTODEV_API_KEY: ${AUTODOM_AUTODEV_API_KEY:-}
+      RISKBYPASS_API_KEY: ${RISKBYPASS_API_KEY:-}
+      AUTODOM_ENCAR_CACHE_PATH: /var/lib/autodom-vin/encar-history.json
+      AUTODOM_CARCHECK_PROXY_ENDPOINT: ${AUTODOM_CARCHECK_PROXY_ENDPOINT:-}
       AUTODOM_VIN_API_MAX_IN_FLIGHT: ${AUTODOM_VIN_API_MAX_IN_FLIGHT:-10}
       AUTODOM_CRAWL_DELAY: ${AUTODOM_CRAWL_DELAY:-2}
       SMARTPROXY_USERNAME: ${SMARTPROXY_USERNAME:-}
@@ -43,6 +46,8 @@ services:
       SMARTPROXY_RESIDENTIAL_PORT_START: ${SMARTPROXY_RESIDENTIAL_PORT_START:-0}
       SMARTPROXY_RESIDENTIAL_PORT_COUNT: ${SMARTPROXY_RESIDENTIAL_PORT_COUNT:-0}
     expose: ["8080"]
+    volumes:
+      - encar-cache:/var/lib/autodom-vin
     networks:
       default:
         aliases: [autodom-vin-api]
@@ -60,3 +65,6 @@ networks:
   default:
     name: ${AUTODOM_NETWORK:-autodom}
     external: true
+
+volumes:
+  encar-cache:
