@@ -121,21 +121,16 @@ p { line-height: 1.6; }
 .premium-panel { background: color-mix(in srgb, var(--accent) 5%, var(--panel)); }
 .premium-panel h2 { font-size: 21px; }
 .premium-panel .button { display: block; width: 100%; margin-bottom: 14px; }
-.report-benefits { list-style: none; padding: 0; margin: 0 0 18px; }
-.report-benefits li + li { margin-top: 12px; }
-.report-benefits strong { display: block; margin-bottom: 3px; font-size: 14px; }
-.report-benefits span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.premium-panel .button-row { margin-bottom: 14px; }
+.premium-panel .button-row > .button { width: auto; min-width: 0; flex: 1 1 140px; margin-bottom: 0; }
 .sample-pdf { display: flex; align-items: center; justify-content: center; width: 100%; text-decoration: none; }
 .disclosure { border-top: 1px solid var(--line); padding-top: 16px; }
 summary { cursor: pointer; min-height: 44px; padding: 10px 0; font-size: 14px; line-height: 1.5; }
 details[open] > summary { margin-bottom: 14px; }
 .example-heading { margin-bottom: 24px; }
 .example-heading h1 { font-size: 30px; }
-.example-section > summary { font-size: 17px; font-weight: 650; }
-.example-section p, .report-rows { overflow-wrap: anywhere; }
-.report-rows { margin: 0; }
-.report-rows .fact:first-child { padding-top: 0; }
-.report-rows .footnote, .facts .footnote { margin: 7px 0 0; }
+.report-pdf-viewer { display: block; width: 100%; height: 75vh; height: 75dvh; min-height: 360px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 24px; background: var(--panel); }
+.facts .footnote { margin: 7px 0 0; }
 .export-facts { margin-bottom: 16px; }
 .export-facts .fact:nth-child(-n+2) dd { font-size: 19px; }
 .dialogue-content { scroll-margin-top: 20px; }

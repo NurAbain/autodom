@@ -30,7 +30,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -121,6 +121,7 @@ export async function insertSnapshotRow(
       ...row,
       user_id: safeNumber(row.user_id),
       amount: safeNumber(row.amount),
+      report_message_id: row.report_message_id === null ? null : safeNumber(row.report_message_id),
     } as typeof paymentOrders.$inferSelect);
     finikPaymentId(order.id);
     validatePaymentOffer(order);
@@ -138,6 +139,22 @@ export async function insertSnapshotRow(
       if (!order.acceptedAt) throw new Error("Invoice requires accepted order");
     }
     if (order.chargeId !== null) validatePaymentText(order.chargeId, "charge ID", 300);
+    for (const timestamp of [order.paidAt, order.deliveredAt, order.adminNotifiedAt])
+      if (timestamp !== null) validatePaymentTimestamp(timestamp);
+    if (order.reportFileId !== null)
+      validatePaymentText(order.reportFileId, "report file ID", 1024);
+    if (order.preCheckoutId !== null)
+      validatePaymentText(order.preCheckoutId, "precheckout ID", 300);
+    if (
+      order.deliveredAt !== null &&
+      (!order.paidAt || Date.parse(order.deliveredAt) < Date.parse(order.paidAt))
+    )
+      throw new Error("Report delivery precedes payment");
+    if (
+      order.adminNotifiedAt !== null &&
+      (!order.paidAt || Date.parse(order.adminNotifiedAt) < Date.parse(order.paidAt))
+    )
+      throw new Error("Report notification precedes payment");
     if (
       (order.invoiceStatus === "offered" && order.acceptedAt !== null) ||
       (order.invoiceStatus === "pending" && order.acceptedAt === null)
@@ -275,7 +292,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, 6, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
           (header.schema_version as number) >= 5
@@ -368,16 +385,30 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
           const { ads_consent: _removed, ...current } = row;
           row = current;
         }
-        if ((header.schema_version as number) < SCHEMA_VERSION && table === "profiles") {
+        if ((header.schema_version as number) < 6 && table === "profiles") {
           if (Object.hasOwn(row, "catalog_filter"))
             throw new Error("Unexpected catalog filter in historical snapshot");
           row = { ...row, catalog_filter: emptyCatalogFilter() };
         }
-        if ((header.schema_version as number) < SCHEMA_VERSION && table === "listings") {
+        if ((header.schema_version as number) < 6 && table === "listings") {
           if (Object.hasOwn(row, "normalized_title"))
             throw new Error("Unexpected normalized title in historical snapshot");
           const listing = makeListing(row.data as Parameters<typeof makeListing>[0]);
           row = { ...row, normalized_title: ` ${normalize(listing.title)} ` };
+        }
+        if ((header.schema_version as number) < 7 && table === "payment_orders") {
+          const added = [
+            "vin",
+            "paid_at",
+            "report_file_id",
+            "report_message_id",
+            "delivered_at",
+            "admin_notified_at",
+            "pre_checkout_id",
+          ];
+          if (added.some((name) => Object.hasOwn(row, name)))
+            throw new Error("Unexpected report columns in historical snapshot");
+          row = { ...row, ...Object.fromEntries(added.map((name) => [name, null])) };
         }
         await insertSnapshotRow(target, table, row);
         counts[table]++;
@@ -385,19 +416,38 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       if (!finished || !sequences) throw new Error("Truncated Autodom snapshot");
       const invalidFinancialState = await target.database.execute(sql`
         SELECT id FROM payment_orders o
-        WHERE (o.payment_status = 'paid' AND NOT EXISTS (
+        WHERE (o.payment_status IN ('paid','refunded') AND NOT EXISTS (
           SELECT 1 FROM payment_events e WHERE e.order_id = o.id AND e.charge_id = o.charge_id
+            AND e.provider = o.provider AND e.data->>'kind' = 'paid'
             AND e.data->>'currency' = o.currency AND (e.data->>'amount')::numeric = o.amount
+            AND (o.provider = 'finik' OR (e.data->>'userId')::numeric = o.user_id)
+            AND (o.paid_at IS NULL OR (e.data->>'occurredAt')::timestamptz = o.paid_at::timestamptz)
             AND (e.outcome = 'applied' OR e.review_reason = 'late_or_cancelled_payment')
+        )) OR (o.payment_status = 'refunded' AND NOT EXISTS (
+          SELECT 1 FROM payment_events e WHERE e.order_id = o.id AND e.charge_id = o.charge_id
+            AND e.provider = o.provider AND e.data->>'kind' = 'refunded' AND e.outcome = 'applied'
+            AND e.data->>'currency' = o.currency AND (e.data->>'amount')::numeric = o.amount
+            AND (e.data->>'userId')::numeric = o.user_id
+        ) AND NOT EXISTS (
+          SELECT 1 FROM payment_refunds r WHERE r.order_id = o.id AND r.provider = o.provider
+            AND r.status = 'confirmed' AND r.amount = o.amount
         )) OR EXISTS (
           SELECT 1 FROM payment_refunds r WHERE r.order_id = o.id
-          GROUP BY r.order_id HAVING o.payment_status <> 'paid'
+          GROUP BY r.order_id HAVING o.payment_status NOT IN ('paid','refunded')
             OR sum(CASE WHEN r.status <> 'failed' THEN r.amount ELSE 0 END) > o.amount
             OR max(r.amount) > o.amount
+        ) OR EXISTS (
+          SELECT 1 FROM payment_refunds r WHERE r.order_id = o.id AND (
+            r.provider <> o.provider OR (r.status = 'confirmed' AND o.payment_status <> 'refunded')
+            OR (o.provider = 'telegram_stars' AND (
+              r.amount <> o.amount OR (r.status IN ('requested','submitted')
+                AND (o.payment_status = 'refunded' OR o.fulfillment_status = 'delivering'))
+            ))
+          )
         )
         OR (NOT o.needs_review AND EXISTS (
           SELECT 1 FROM payment_events e WHERE e.outcome = 'review' AND (
-            e.order_id = o.id OR e.charge_id = o.charge_id OR EXISTS (
+            e.order_id = o.id OR (e.provider = o.provider AND e.charge_id = o.charge_id) OR EXISTS (
               SELECT 1 FROM payment_events related
               WHERE related.order_id = o.id AND related.provider = e.provider
                 AND (related.event_id = e.event_id OR related.charge_id = e.charge_id)
@@ -408,7 +458,12 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         SELECT e.id FROM payment_events e
         WHERE (e.outcome = 'applied' OR e.review_reason = 'late_or_cancelled_payment') AND NOT EXISTS (
           SELECT 1 FROM payment_orders o WHERE o.id = e.order_id AND o.charge_id = e.charge_id
-            AND o.payment_status = 'paid'
+            AND o.provider = e.provider AND o.payment_status IN ('paid','refunded')
+            AND e.data->>'currency' = o.currency AND (e.data->>'amount')::numeric = o.amount
+            AND (o.provider = 'finik' OR (e.data->>'userId')::numeric = o.user_id)
+            AND ((e.data->>'kind' = 'paid'
+              AND (o.paid_at IS NULL OR (e.data->>'occurredAt')::timestamptz = o.paid_at::timestamptz))
+              OR (e.data->>'kind' = 'refunded' AND o.payment_status = 'refunded'))
         )
         LIMIT 1
       `);

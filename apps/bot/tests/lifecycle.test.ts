@@ -93,6 +93,57 @@ it("drains accepted updates before shutdown returns to the resource owner", asyn
   expect(completed).toBe(2);
 });
 
+it("does not acknowledge financial updates before commit and retries a failed commit", async () => {
+  const bot = readyBot();
+  const { promise: retrying, resolve: enteredRetry } = Promise.withResolvers<void>();
+  const { promise: commit, resolve: finishCommit } = Promise.withResolvers<void>();
+  const { promise: acknowledged, resolve: sawAcknowledgement } = Promise.withResolvers<void>();
+  const offsets: number[] = [];
+  let attempts = 0;
+  const update: Update = {
+    update_id: 700,
+    message: {
+      message_id: 700,
+      date: 1,
+      from: { id: 42, is_bot: false, first_name: "Buyer" },
+      chat: { id: 42, type: "private", first_name: "Buyer" },
+      successful_payment: {
+        currency: "XTR",
+        total_amount: 500,
+        invoice_payload: "00000000-0000-4000-8000-000000000042",
+        telegram_payment_charge_id: "fixture-charge",
+        provider_payment_charge_id: "",
+      },
+    },
+  };
+  vi.spyOn(bot.api, "getUpdates").mockImplementation(async (options, signal) => {
+    offsets.push(options?.offset ?? 0);
+    if ((options?.offset ?? 0) > update.update_id) {
+      sawAcknowledgement();
+      return aborted(signal);
+    }
+    return [update];
+  });
+  const runner = startPolling(bot, undefined, {
+    async ingestTelegramPayment() {
+      if (++attempts === 1) throw new Error("Storage unavailable");
+      enteredRetry();
+      await commit;
+    },
+  });
+  try {
+    await retrying;
+    expect(offsets.every((offset) => offset <= update.update_id)).toBe(true);
+    finishCommit();
+    await acknowledged;
+    expect(offsets.at(-1)).toBe(701);
+    expect(attempts).toBe(2);
+  } finally {
+    finishCommit();
+    await runner.stop();
+  }
+});
+
 it("interrupts a Telegram Retry-After wait rather than holding shutdown open", async () => {
   const bot = readyBot();
   const { promise: started, resolve: entered } = Promise.withResolvers<void>();

@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -293,6 +293,7 @@ it("has no catalog or mutation endpoints and rejects ambiguous car IDs", async (
 it("serves the detail shell and assets only at the public Mini App base", async () => {
   for (const [path, contentType] of [
     ["/miniapp/?car=mashina%3Aold-notification", "text/html"],
+    ["/miniapp/?view=report-example", "text/html"],
     ["/miniapp/app.js", "text/javascript"],
     ["/miniapp/app.css", "text/css"],
   ]) {
@@ -306,6 +307,28 @@ it("serves the detail shell and assets only at the public Mini App base", async 
   }
   for (const path of ["/", "/app.js", "/app.css", "/miniapp/index.html"])
     expect((await fetch(`${base}${path}`)).status).toBe(404);
+});
+
+it("serves the unchanged original report inline with matching GET and HEAD metadata", async () => {
+  const original = await readFile(
+    new URL("../src/public/reports/vin-korea-otchet-kr.pdf", import.meta.url),
+  );
+  const path = `${base}/miniapp/reports/vin-korea-otchet-kr.pdf`;
+  const response = await fetch(path);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("application/pdf");
+  expect(response.headers.get("content-disposition")).toBe(
+    'inline; filename="vin-korea-otchet-kr.pdf"',
+  );
+  expect(response.headers.get("content-length")).toBe(String(original.length));
+  expect(Buffer.from(await response.arrayBuffer())).toEqual(original);
+  expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+  const metadata = await fetch(path, { method: "HEAD" });
+  expect(metadata.status).toBe(200);
+  for (const header of ["content-type", "content-disposition", "content-length"])
+    expect(metadata.headers.get(header)).toBe(response.headers.get(header));
+  expect(await metadata.arrayBuffer()).toHaveProperty("byteLength", 0);
 });
 
 it("canonicalizes the Mini App URL without losing the car deep link or changing origin", async () => {
@@ -359,7 +382,11 @@ it("checks VIN without a buyer profile and preserves partial provider failures",
     body: JSON.stringify({ vin: ` ${vinResult.vin.toLowerCase()} ` }),
   });
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual(vinResult);
+  expect(await response.json()).toMatchObject({
+    vin: vinResult.vin,
+    carhistory: { status: "available" },
+    car365: { status: "unavailable" },
+  });
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(checkVinArchive).not.toHaveBeenCalled();
   expect(getVinArchivePhoto).not.toHaveBeenCalled();

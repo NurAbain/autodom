@@ -8,6 +8,7 @@ import { PaymentRequestError, type PaymentService } from "./payments.js";
 const orderId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
 const checkoutBody = z.object({ orderId, acceptTerms: z.literal(true) }).strict();
 const cancellationBody = z.object({ orderId }).strict();
+const reportBody = z.object({ vin: z.string().regex(/^[A-HJ-NPR-Z0-9]{17}$/u) }).strict();
 const eventBody = z
   .object({
     provider: z.literal("finik"),
@@ -37,11 +38,14 @@ export async function handlePaymentRequest(
   userId: number,
   payments: PaymentService | undefined,
 ): Promise<void> {
-  if (url.search) throw new RequestError(400, "Параметры заказа передаются только в теле запроса.");
   const listing = url.pathname === "/miniapp/api/orders";
-  const method = listing ? "GET" : "POST";
+  const report = url.pathname === "/miniapp/api/orders/report";
+  const download = report && request.method === "GET";
+  if (!download && url.search)
+    throw new RequestError(400, "Параметры заказа передаются только в теле запроса.");
+  const method = listing || download ? "GET" : "POST";
   if (request.method !== method) {
-    response.setHeader("Allow", method);
+    response.setHeader("Allow", report ? "GET, POST" : method);
     throw new RequestError(405, "Недопустимый метод для заказа.");
   }
   if (!payments)
@@ -50,10 +54,36 @@ export async function handlePaymentRequest(
       "Заказы временно недоступны. Бесплатные функции не требуют оплаты.",
     );
   if (listing) {
-    json(response, 200, { orders: await payments.ledger.listOrders(userId) });
+    json(response, 200, {
+      orders: await payments.ledger.listOrders(userId),
+      reportSalesEnabled: payments.reportSalesEnabled,
+    });
+    return;
+  }
+  if (download) {
+    const keys = [...url.searchParams.keys()];
+    const parsed = orderId.safeParse(url.searchParams.get("orderId"));
+    if (keys.length !== 1 || keys[0] !== "orderId" || !parsed.success)
+      throw new RequestError(400, "Нужен только идентификатор orderId.");
+    const bytes = await payments.downloadReport(userId, parsed.data);
+    if (!response.destroyed) {
+      response.writeHead(200, {
+        "Content-Type": "application/pdf",
+        "Content-Length": bytes.byteLength,
+        "Content-Disposition": 'inline; filename="vin-report.pdf"',
+      });
+      response.end(bytes);
+    }
     return;
   }
   const raw = await readFlatJson(request, 512);
+  if (report) {
+    const parsed = reportBody.safeParse(raw);
+    if (!parsed.success) throw new RequestError(400, "Передайте только проверенный VIN.");
+    const order = await payments.reportOffer(userId, parsed.data.vin);
+    if (!response.destroyed) json(response, 200, { order });
+    return;
+  }
   if (url.pathname === "/miniapp/api/orders/checkout") {
     const parsed = checkoutBody.safeParse(raw);
     if (!parsed.success)

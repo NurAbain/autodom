@@ -1,7 +1,14 @@
 import type { EncarListing, VinCheckResult } from "@autodom/core/vin";
 import { load } from "cheerio";
 import { describe, expect, it } from "vitest";
-import { vinResultPresentation, vinSourceText } from "../src/vin-text.js";
+import {
+  hasKoreanVinRecord,
+  vinResultActions,
+  vinResultNotice,
+  vinResultPresentation,
+  vinSourceText,
+  vinVisibleProviders,
+} from "../src/vin-text.js";
 
 const result: VinCheckResult = {
   vin: "KMHDU41DBAU123456",
@@ -46,6 +53,20 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).not.toContain("attacker.invalid");
     expect(text).not.toContain("NHTSA");
     expect(text).not.toContain("vpic.nhtsa.dot.gov");
+    expect(vinVisibleProviders(result)).toEqual(["car365", "carhistory"]);
+    expect(vinResultActions(result).keyboard.inline_keyboard).toEqual([
+      [
+        expect.objectContaining({
+          callback_data: "vin-report-example",
+          style: "primary",
+        }),
+      ],
+    ]);
+    expect(rendered("tg-button")).toHaveLength(1);
+    expect(rendered("tg-button").attr("data")).toBe("vin-report-example");
+    for (const html of [text, richHtml]) {
+      expect(html).not.toMatch(/vinarchive:|Google|США \/ ОАЭ|Фото и поиск в интернете|web_app/);
+    }
   });
 
   it("presents decoder specifications separately from vehicle history", () => {
@@ -79,6 +100,62 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(section).not.toContain("2024-05-02");
     const { text } = vinResultPresentation(decoded);
     expect(text).not.toContain("attacker.invalid");
+  });
+
+  it("shows found decoder facts without inferring Korean records from the VIN or assembly country", () => {
+    const decoded: VinCheckResult = {
+      ...result,
+      carhistory: { ...result.carhistory, status: "not_found" },
+      car365: { ...result.car365, status: "not_found" },
+      nhtsa_vpic: {
+        status: "available",
+        source_url: "",
+        checked_at: result.checked_at,
+        data: {
+          vin: result.vin,
+          make: "HYUNDAI",
+          model: "AVANTE",
+          model_year: 2011,
+          body_class: null,
+          fuel_type: null,
+          plant_country: "SOUTH KOREA",
+        },
+      },
+    };
+    expect(hasKoreanVinRecord(decoded)).toBe(false);
+    expect(vinVisibleProviders(decoded)).toEqual(["nhtsa_vpic"]);
+    expect(vinResultNotice(decoded)).toBeNull();
+    const actions = vinResultActions(decoded);
+    expect(actions.report).toEqual([]);
+    expect(actions.keyboard.inline_keyboard.flat()).toEqual([
+      expect.objectContaining({ callback_data: `vinarchive:${result.vin}` }),
+      expect.objectContaining({ url: expect.stringContaining("google.com/search") }),
+    ]);
+    const { text, richHtml } = vinResultPresentation(decoded);
+    expect(load(richHtml)("h3")).toHaveLength(1);
+    for (const html of [text, richHtml]) {
+      expect(html).toContain("HYUNDAI");
+      expect(html).toContain("SOUTH KOREA");
+      expect(html).not.toMatch(
+        /Экспорт и пробег|Полный отчёт|vin-report-example|Avante|0 км|Заказ/,
+      );
+    }
+  });
+
+  it("keeps found facts and sample while disclosing failed checks without empty source sections", () => {
+    const partial: VinCheckResult = {
+      ...result,
+      carhistory: { ...result.carhistory, status: "unavailable" },
+    };
+    expect(vinVisibleProviders(partial)).toEqual(["car365"]);
+    expect(vinResultNotice(partial)).toMatch(/неполная.*не удалось/);
+    const presentation = vinResultPresentation(partial);
+    expect(load(presentation.richHtml)('tg-button[data="vin-report-example"]')).toHaveLength(1);
+    for (const html of [presentation.text, presentation.richHtml]) {
+      expect(html).toContain("Avante");
+      expect(html).toMatch(/неполная/);
+      expect(html).not.toContain("Наличие отчёта подтверждено");
+    }
   });
 
   it("treats unknown decoder fields as unknown rather than absent vehicle features", () => {
@@ -154,6 +231,8 @@ describe("VIN observations presented without buying or certifying a report", () 
     };
     const history = {
       ...result,
+      carhistory: { ...result.carhistory, status: "not_found" },
+      car365: { ...result.car365, status: "not_found" },
       encar: {
         status: "available",
         source_url: "https://attacker.invalid",
@@ -171,6 +250,9 @@ describe("VIN observations presented without buying or certifying a report", () 
         },
       },
     } satisfies VinCheckResult;
+    expect(hasKoreanVinRecord(history)).toBe(true);
+    expect(vinVisibleProviders(history)).toEqual(["encar"]);
+    expect(vinResultNotice(history)).toMatch(/неполная/);
     const { text } = vinResultPresentation(history);
     expect(text).toContain("39720103");
     expect(text).toContain("2024-05-02T11:12:13");
@@ -178,12 +260,18 @@ describe("VIN observations presented without buying or certifying a report", () 
       /39711062|40122438|OTHER VIN|UNKNOWN VIN|INVALID ID|attacker\.invalid/,
     );
     for (const status of ["disabled", "unavailable", "not_found"] as const) {
+      const stale = { ...history, encar: { ...history.encar, status } };
+      expect(hasKoreanVinRecord(stale)).toBe(false);
+      expect(vinResultActions(stale).report).toEqual([]);
       expect(
         vinSourceText("encar", { ...history, encar: { ...history.encar, status } }),
       ).not.toContain("39720103");
     }
     history.encar.data.vin = "WBA51AG03NCK98884";
     expect(vinSourceText("encar", history)).not.toContain("39720103");
+    expect(hasKoreanVinRecord(history)).toBe(false);
+    expect(vinVisibleProviders(history)).toEqual([]);
+    expect(vinResultNotice(history)).toMatch(/неполная/);
   });
 
   it("keeps provider markup as visible text rather than links or purchase buttons in either format", () => {
@@ -221,15 +309,27 @@ describe("VIN observations presented without buying or certifying a report", () 
     ).toContain("неизвестен");
     expect(unknown.text).not.toContain("0 км");
     for (const status of ["not_found", "unavailable", "disabled"] as const) {
-      const presentation = vinResultPresentation({
+      const stale: VinCheckResult = {
         ...result,
         carhistory: { ...result.carhistory, status },
         car365: { ...result.car365, status },
-      });
+      };
+      const presentation = vinResultPresentation(stale);
+      expect(hasKoreanVinRecord(stale)).toBe(false);
+      expect(vinVisibleProviders(stale)).toEqual([]);
+      expect(vinResultActions(stale).report).toEqual([]);
+      expect(vinResultNotice(stale)).toMatch(
+        status === "not_found"
+          ? /не найдены.*не подтверждает/
+          : status === "unavailable"
+            ? /неполная.*не удалось/
+            : /не подключена.*не отправлен/,
+      );
+      expect(load(presentation.richHtml)("h3")).toHaveLength(0);
       for (const html of [presentation.text, presentation.richHtml]) {
         expect(html).not.toMatch(/Avante|0 км|2024-05-02|Найдена экспортная декларация/);
         expect(html).not.toContain("Наличие отчёта подтверждено");
-        expect(load(html).root().text()).toMatch(/Заказ.*недоступен/);
+        expect(html).not.toMatch(/vin-report-example|Полный отчёт|Заказ/);
       }
     }
   });

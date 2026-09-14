@@ -125,6 +125,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/orders",
     "/miniapp/api/orders/checkout",
     "/miniapp/api/orders/cancel",
+    "/miniapp/api/orders/report",
   ];
 
   function respond(response: ServerResponse, status: number, value: unknown): void {
@@ -170,7 +171,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
       response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
       response.setHeader(
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src blob: https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://img5.lalafo.com https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net https://www.dubicars.com https://cs.copart.com; connect-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
+        "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; img-src blob: https://im.mashina.kg https://pictures.mashina.kg https://storage.mashina.kg https://s3.mashina.kg https://img5.lalafo.com https://ci.encar.com https://images.bid.cars https://mercury.bid.cars https://pluto.bid.car https://listings-prod.tcimg.net https://www.dubicars.com https://cs.copart.com; connect-src 'self'; frame-src 'self' blob:; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org https://*.telegram.org",
       );
       void (async () => {
         const url = new URL(request.url ?? "/", origin);
@@ -204,7 +205,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           if (asset.type === "application/pdf")
             response.setHeader(
               "Content-Disposition",
-              `attachment; filename="${KOREAN_REPORT_EXAMPLE_PDF.filename}"`,
+              `inline; filename="${KOREAN_REPORT_EXAMPLE_PDF.filename}"`,
             );
           response.writeHead(200, {
             "Content-Type": asset.type,
@@ -317,6 +318,9 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               "Передайте один VIN только в теле запроса.",
             );
           const vin = await readVinRequest(request);
+          const reportRevision = archive
+            ? undefined
+            : options.payments?.forgetVinResult(user.id, vin);
           if (archive && !options.checkVinArchive) {
             respond(response, 200, disabledVinArchiveResult(vin));
             return;
@@ -332,7 +336,20 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           if (response.destroyed) controller.abort();
           try {
             const result = await lookup(vin, controller.signal);
-            if (!response.destroyed) respond(response, 200, result);
+            if (result.vin !== vin) throw new Error("VIN result does not match the request");
+            if (reportRevision !== undefined && "carhistory" in result)
+              options.payments?.rememberVinResult(user.id, result, reportRevision);
+            if (!response.destroyed)
+              respond(
+                response,
+                200,
+                archive
+                  ? result
+                  : {
+                      ...result,
+                      reportSalesEnabled: options.payments?.reportSalesEnabled ?? false,
+                    },
+              );
           } catch {
             if (!response.destroyed) {
               options.onError?.(

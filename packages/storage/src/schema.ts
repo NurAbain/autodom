@@ -198,6 +198,13 @@ export const paymentOrders = pgTable(
       .$type<PaymentOrder["fulfillmentStatus"]>()
       .notNull(),
     charge_id: text("charge_id"),
+    vin: text("vin"),
+    paid_at: text("paid_at"),
+    report_file_id: text("report_file_id"),
+    report_message_id: money("report_message_id"),
+    delivered_at: text("delivered_at"),
+    admin_notified_at: text("admin_notified_at"),
+    pre_checkout_id: text("pre_checkout_id"),
     needs_review: boolean("needs_review").notNull(),
   },
   (table) => [
@@ -205,24 +212,29 @@ export const paymentOrders = pgTable(
     uniqueIndex("payment_orders_charge").on(table.provider, table.charge_id),
     check(
       "payment_orders_kind",
-      sql`${table.provider} = 'finik' AND ${table.product} = 'inspection' AND ${table.currency} = 'KGS'`,
+      sql`(${table.provider} = 'finik' AND ${table.product} = 'inspection' AND ${table.currency} = 'KGS' AND ${table.vin} IS NULL) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
     ),
     check(
       "payment_orders_amount",
-      sql`${table.amount} BETWEEN 1 AND 9007199254740991 AND ${table.amount} % 100 = 0`,
+      sql`${table.amount} BETWEEN 1 AND 9007199254740991 AND (${table.provider} <> 'finik' OR ${table.amount} % 100 = 0)`,
     ),
     check("payment_orders_buyer_id", sql`${table.user_id} BETWEEN 1 AND 9007199254740991`),
     check(
       "payment_orders_state",
-      sql`${table.invoice_status} IN ('offered','pending','cancelled') AND ${table.payment_status} IN ('unpaid','paid') AND ${table.fulfillment_status} IN ('ready','fulfilled','cancelled')`,
+      sql`${table.invoice_status} IN ('offered','pending','cancelled') AND ${table.payment_status} IN ('unpaid','paid','refunded') AND ${table.fulfillment_status} IN ('ready','delivering','delivery_unknown','fulfilled','cancelled')`,
     ),
     check(
       "payment_orders_capture",
-      sql`(${table.payment_status} = 'unpaid' AND ${table.charge_id} IS NULL) OR (${table.payment_status} = 'paid' AND ${table.charge_id} IS NOT NULL AND ${table.accepted_at} IS NOT NULL)`,
+      sql`(${table.payment_status} = 'unpaid' AND ${table.charge_id} IS NULL AND ${table.paid_at} IS NULL) OR (${table.payment_status} IN ('paid','refunded') AND ${table.charge_id} IS NOT NULL AND ${table.accepted_at} IS NOT NULL AND (${table.provider} = 'finik' OR ${table.paid_at} IS NOT NULL))`,
     ),
     check(
       "payment_orders_fulfillment",
-      sql`${table.fulfillment_status} <> 'fulfilled' OR ${table.payment_status} = 'paid'`,
+      sql`${table.fulfillment_status} NOT IN ('fulfilled','delivering','delivery_unknown') OR ${table.payment_status} IN ('paid','refunded')`,
+    ),
+    uniqueIndex("payment_orders_pre_checkout").on(table.pre_checkout_id),
+    check(
+      "payment_orders_report",
+      sql`(${table.provider} = 'finik' AND ${table.payment_status} <> 'refunded' AND ${table.fulfillment_status} NOT IN ('delivering','delivery_unknown') AND ${table.report_file_id} IS NULL AND ${table.report_message_id} IS NULL AND ${table.delivered_at} IS NULL AND ${table.admin_notified_at} IS NULL AND ${table.pre_checkout_id} IS NULL) OR (${table.provider} = 'telegram_stars' AND (${table.pre_checkout_id} IS NULL OR ${table.accepted_at} IS NOT NULL) AND (${table.payment_status} = 'unpaid' OR ${table.pre_checkout_id} IS NOT NULL) AND (${table.fulfillment_status} NOT IN ('delivering','delivery_unknown','fulfilled') OR ${table.report_file_id} IS NOT NULL) AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.report_message_id} BETWEEN 1 AND 9007199254740991 AND ${table.report_message_id} IS NOT NULL AND ${table.delivered_at} IS NOT NULL) OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.report_message_id} IS NULL AND ${table.delivered_at} IS NULL)) AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid') AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))`,
     ),
   ],
 );
@@ -244,7 +256,10 @@ export const paymentEvents = pgTable(
     uniqueIndex("payment_events_fingerprint").on(table.fingerprint),
     index("payment_events_transaction").on(table.provider, table.event_id),
     index("payment_events_charge").on(table.provider, table.charge_id),
-    check("payment_events_provider", sql`${table.provider} = 'finik'`),
+    check("payment_events_provider", sql`${table.provider} IN ('finik','telegram_stars')`),
+    uniqueIndex("payment_events_applied_charge_kind")
+      .on(table.provider, table.charge_id, sql`(${table.data}->>'kind')`)
+      .where(sql`${table.outcome} = 'applied'`),
     check(
       "payment_events_outcome",
       sql`(${table.outcome} = 'applied' AND ${table.review_reason} IS NULL) OR (${table.outcome} = 'review' AND ${table.review_reason} IS NOT NULL)`,
@@ -270,10 +285,12 @@ export const paymentRefunds = pgTable(
     index("payment_refunds_order").on(table.order_id),
     uniqueIndex("payment_refunds_active")
       .on(table.order_id)
-      .where(sql`${table.status} = 'requested'`),
+      .where(
+        sql`${table.status} = 'requested' OR (${table.provider} = 'telegram_stars' AND ${table.status} IN ('submitted','confirmed'))`,
+      ),
     check(
       "payment_refunds_kind",
-      sql`${table.provider} = 'finik' AND ${table.status} IN ('requested','submitted','failed')`,
+      sql`(${table.provider} = 'finik' AND ${table.status} IN ('requested','submitted','failed')) OR (${table.provider} = 'telegram_stars' AND ${table.status} IN ('requested','submitted','failed','confirmed'))`,
     ),
     check("payment_refunds_amount", sql`${table.amount} BETWEEN 1 AND 9007199254740991`),
   ],

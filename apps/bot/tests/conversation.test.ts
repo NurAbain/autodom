@@ -1125,19 +1125,28 @@ describe("grammY transport boundaries", () => {
     });
     const firstBytes = firstPhotos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
     const secondBytes = new Uint8Array([255, 216, 99, 255, 217]);
-    const { bot, calls } = telegram(undefined, archive, async (request) => {
-      if (request.vin !== vin || request.provider !== "copart" || request.auction !== "copart")
-        throw new Error("Unknown archive photo");
-      const index = firstPhotos.indexOf(request.photo_url);
-      const bytes =
-        request.lot_id === "12345678" && index !== -1
-          ? firstBytes[index]
-          : request.lot_id === "23456789" && request.photo_url === secondPhoto
-            ? secondBytes
-            : undefined;
-      if (!bytes) throw new Error("Unknown archive photo");
-      return { bytes, content_type: "image/jpeg" };
-    });
+    const { bot, calls } = telegram(
+      async () => ({
+        vin,
+        checked_at: 1_789_000_000,
+        carhistory: { status: "disabled", source_url: "", checked_at: null },
+        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+      }),
+      archive,
+      async (request) => {
+        if (request.vin !== vin || request.provider !== "copart" || request.auction !== "copart")
+          throw new Error("Unknown archive photo");
+        const index = firstPhotos.indexOf(request.photo_url);
+        const bytes =
+          request.lot_id === "12345678" && index !== -1
+            ? firstBytes[index]
+            : request.lot_id === "23456789" && request.photo_url === secondPhoto
+              ? secondBytes
+              : undefined;
+        if (!bytes) throw new Error("Unknown archive photo");
+        return { bytes, content_type: "image/jpeg" };
+      },
+    );
     await bot.init();
     const message = {
       message_id: 1,
@@ -1147,11 +1156,16 @@ describe("grammY transport boundaries", () => {
     };
     await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${vin}` } });
     expect(archive).not.toHaveBeenCalled();
-    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        expect.arrayContaining([expect.objectContaining({ callback_data: `vinarchive:${vin}` })]),
-      ]),
-    });
+    const archiveMessage = calls.at(-1)?.payload.rich_message;
+    if (
+      !archiveMessage ||
+      typeof archiveMessage !== "object" ||
+      !("html" in archiveMessage) ||
+      typeof archiveMessage.html !== "string"
+    )
+      throw new Error("Expected rich archive actions");
+    const archiveControls = load(archiveMessage.html);
+    expect(archiveControls(`tg-button[data="vinarchive:${vin}"]`)).toHaveLength(1);
     for (const [data, from] of [
       ["vinarchive:invalid", message.from],
       [`vinarchive:${vin}`, { ...message.from, id: 2 }],
@@ -1443,15 +1457,7 @@ describe("grammY transport boundaries", () => {
       message: { ...message, text: "/vin KMHDU41DBAU123456" },
     });
     expect(String(calls.at(-1)?.payload.text)).toMatch(/не подключена/);
-    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        expect.arrayContaining([
-          expect.objectContaining({
-            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-          }),
-        ]),
-      ]),
-    });
+    expect(calls.at(-1)?.payload.reply_markup).toBeUndefined();
     expect(await store.getDraft(1)).toBeNull();
     const checkVin = vi.fn<VinLookup>();
     const enabled = telegram(checkVin);
@@ -1482,15 +1488,7 @@ describe("grammY transport boundaries", () => {
     const text = String(calls.at(-1)?.payload.text);
     expect(text).toMatch(/неизвестен/);
     expect(text).not.toContain("private-api-token");
-    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        expect.arrayContaining([
-          expect.objectContaining({
-            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-          }),
-        ]),
-      ]),
-    });
+    expect(calls.at(-1)?.payload.reply_markup).toBeUndefined();
     expect(await store.getDraft(1)).toEqual(draft);
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
@@ -1600,9 +1598,8 @@ describe("grammY transport boundaries", () => {
         expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
       }
       if (mode === "rich") {
-        expect(rendered('tg-button[type="url"]').attr("url")).toBe(
-          "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-        );
+        expect(rendered('tg-button[type="url"], tg-button[type="web_app"]')).toHaveLength(0);
+        expect(rendered('tg-button[type="callback_data"]').attr("data")).toBe("vin-report-example");
         expect(sent.every((call) => call.payload.reply_markup === undefined)).toBe(true);
       } else {
         expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(
@@ -1612,11 +1609,14 @@ describe("grammY transport boundaries", () => {
           inline_keyboard: expect.arrayContaining([
             expect.arrayContaining([
               expect.objectContaining({
-                url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+                callback_data: "vin-report-example",
               }),
             ]),
           ]),
         });
+        expect(JSON.stringify(sent.at(-1)?.payload.reply_markup)).not.toMatch(
+          /vinarchive:|google\.com|web_app/,
+        );
       }
     },
   );

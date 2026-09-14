@@ -1,10 +1,11 @@
-export type PaymentProvider = "finik";
-export type PaymentProduct = "inspection";
-export type PaymentCurrency = "KGS";
+export type PaymentProvider = "finik" | "telegram_stars";
+export type PaymentProduct = "inspection" | "vin_report";
+export type PaymentCurrency = "KGS" | "XTR";
 
 export interface PaymentOfferInput {
   userId: number;
   product: PaymentProduct;
+  vin?: string | null;
   amount: number;
   title: string;
   description: string;
@@ -16,23 +17,31 @@ export interface PaymentOfferInput {
 }
 export interface PaymentOrder extends PaymentOfferInput {
   id: string;
+  vin: string | null;
+  paidAt: string | null;
+  reportFileId: string | null;
+  reportMessageId: number | null;
+  deliveredAt: string | null;
+  adminNotifiedAt: string | null;
+  preCheckoutId: string | null;
+  refundPending: boolean;
   provider: PaymentProvider;
   currency: PaymentCurrency;
   createdAt: string;
   acceptedAt: string | null;
   invoiceUrl: string | null;
   invoiceStatus: "offered" | "pending" | "cancelled";
-  paymentStatus: "unpaid" | "paid";
-  fulfillmentStatus: "ready" | "fulfilled" | "cancelled";
+  paymentStatus: "unpaid" | "paid" | "refunded";
+  fulfillmentStatus: "ready" | "delivering" | "delivery_unknown" | "fulfilled" | "cancelled";
   chargeId: string | null;
   needsReview: boolean;
 }
 export interface PaymentEvent {
   provider: PaymentProvider;
   eventId: string;
-  kind: "paid";
+  kind: "paid" | "refunded";
   orderId: string | null;
-  userId: null;
+  userId: number | null;
   currency: string;
   amount: number;
   chargeId: string;
@@ -44,7 +53,7 @@ export interface PaymentRefund {
   provider: PaymentProvider;
   amount: number;
   reason: string;
-  status: "requested" | "submitted" | "failed";
+  status: "requested" | "submitted" | "failed" | "confirmed";
   createdAt: string;
 }
 
@@ -97,9 +106,19 @@ export function validatePaymentUrl(value: string, support = false): void {
 }
 /** Future expiry is checked only on offer creation/acceptance, not on financial restore. */
 export function validatePaymentOffer(input: PaymentOfferInput): void {
-  if (!Number.isSafeInteger(input.userId) || input.userId <= 0 || input.product !== "inspection")
-    throw new Error("Invalid physical inspection buyer or product");
-  validatePaymentAmount(input.amount, true);
+  if (
+    !Number.isSafeInteger(input.userId) ||
+    input.userId <= 0 ||
+    (input.product !== "inspection" && input.product !== "vin_report")
+  )
+    throw new Error("Invalid payment buyer or product");
+  if (
+    input.product === "vin_report"
+      ? typeof input.vin !== "string" || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(input.vin)
+      : input.vin != null
+  )
+    throw new Error("Invalid payment VIN");
+  validatePaymentAmount(input.amount, input.product === "inspection");
   validatePaymentText(input.title, "title", 300);
   validatePaymentText(input.description, "description", 300);
   validatePaymentText(input.seller, "seller", 300);
@@ -109,8 +128,16 @@ export function validatePaymentOffer(input: PaymentOfferInput): void {
   validatePaymentTimestamp(input.expiresAt);
 }
 export function validatePaymentEvent(event: PaymentEvent): void {
-  if (event.provider !== "finik" || event.kind !== "paid" || event.userId !== null)
-    throw new Error("Invalid Finik payment event");
+  if (
+    event.provider === "finik"
+      ? event.kind !== "paid" || event.userId !== null
+      : event.provider !== "telegram_stars" ||
+        (event.kind !== "paid" && event.kind !== "refunded") ||
+        !Number.isSafeInteger(event.userId) ||
+        event.userId === null ||
+        event.userId <= 0
+  )
+    throw new Error("Invalid payment event provider, kind or buyer");
   if (event.orderId !== null) finikPaymentId(event.orderId);
   validatePaymentText(event.eventId, "event ID", 300);
   validatePaymentText(event.chargeId, "charge ID", 300);

@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { money } from "@autodom/core";
 import {
   ENCAR_HISTORY_MAX_LISTINGS,
   ENCAR_HISTORY_MAX_PHOTOS,
@@ -27,11 +26,19 @@ import type { InlineKeyboardMarkup } from "grammy/types";
 import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
 import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
-import { paymentOrderStatus } from "./payment-text.js";
-import type { PaymentService } from "./payments.js";
+import {
+  paymentAmountText,
+  paymentOrderStatus,
+  VIN_REPORT_MAX_BYTES,
+  VIN_REPORT_OWNER,
+  VIN_REPORT_STARS,
+  VIN_REPORT_TERMS,
+} from "./payment-text.js";
+import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
   confirmedEncarListings,
+  hasKoreanVinRecord,
   VIN_ARCHIVE_CARWAY_NOTICE,
   VIN_ARCHIVE_LABEL,
   VIN_ARCHIVE_STATUS_TEXT,
@@ -190,6 +197,7 @@ export interface TelegramBotOptions {
   conversation?: Conversation;
   photoRecognizer?: PhotoRecognizer;
   payments?: PaymentService;
+  starsEnabled?: boolean;
 }
 
 export function createTelegramBot(
@@ -199,6 +207,17 @@ export function createTelegramBot(
 ): AutodomBot {
   const bot = new Bot(token, {
     client: { timeoutSeconds: 40, ...(options.apiRoot ? { apiRoot: options.apiRoot } : {}) },
+  });
+  options.payments?.configureStars(bot.api, options.starsEnabled === true, token);
+  // Financial callbacks bypass per-user serialization and all slow VIN/media work.
+  bot.on("pre_checkout_query", async (context) => {
+    if (options.payments) await options.payments.approveStarsCheckout(context.preCheckoutQuery);
+    else
+      await context.answerPreCheckoutQuery(false, { error_message: "Покупка сейчас недоступна." });
+  });
+  bot.on(["message:successful_payment", "message:refunded_payment"], async (context) => {
+    // Polling already committed this receipt before acknowledging its offset; replay is safe.
+    await options.payments?.ingestTelegramPayment(context.update);
   });
   const conversation = options.conversation ?? new Conversation(store);
   const recognizePhoto = options.photoRecognizer;
@@ -259,15 +278,27 @@ export function createTelegramBot(
   }
   async function checkVin(chatId: number, vin: string): Promise<void> {
     if (normalizeVin(vin) !== vin) return;
-    const actions = vinResultActions(vin, options.miniAppUrl);
+    const revision = options.payments?.forgetVinResult(chatId, vin);
+    let keyboard: InlineKeyboardMarkup | undefined;
     let presentation = { text: escapeHtml(VIN_NOT_ENABLED), richHtml: "" };
     let result: VinCheckResult | undefined;
     if (options.checkVin) {
       try {
         const checked = await options.checkVin(vin);
         if (checked.vin !== vin) throw new Error("VIN result does not match the request");
+        const actions = vinResultActions(checked);
         presentation = vinResultPresentation(checked, actions);
         result = checked;
+        if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
+        if (options.payments?.reportSalesEnabled && hasKoreanVinRecord(checked)) {
+          actions.report.push({
+            text: `Купить PDF · ${VIN_REPORT_STARS} Stars`,
+            callback_data: `vin-report-buy:${vin}`,
+          });
+          actions.keyboard.inline_keyboard.push([actions.report[actions.report.length - 1]!]);
+          presentation = vinResultPresentation(checked, actions);
+        }
+        keyboard = actions.keyboard;
       } catch {
         presentation.text =
           "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
@@ -278,14 +309,12 @@ export function createTelegramBot(
       chatId,
       [
         {
-          text: result
-            ? presentation.text
-            : `${presentation.text}\n\n${actions.additional.map(({ notice }) => escapeHtml(notice)).join("\n\n")}`,
+          text: presentation.text,
           ...(presentation.richHtml ? { richHtml: presentation.richHtml } : {}),
           buttons: [],
         },
       ],
-      { fallbackReplyMarkup: actions.keyboard },
+      keyboard ? { fallbackReplyMarkup: keyboard } : {},
     );
     if (!result) return;
     const sentListings = new Set<string>();
@@ -492,6 +521,102 @@ export function createTelegramBot(
       }),
     ]);
   });
+  function privateBuyer(context: Context): boolean {
+    return (
+      context.chat?.type === "private" &&
+      !!context.from &&
+      !context.from.is_bot &&
+      context.chat.id === context.from.id
+    );
+  }
+  async function paymentAction(
+    context: Context,
+    action: (payments: PaymentService) => Promise<void>,
+  ): Promise<void> {
+    if (!privateBuyer(context)) return;
+    if (!options.payments) {
+      await context.reply("Платежи недоступны.");
+      return;
+    }
+    try {
+      await action(options.payments);
+    } catch (error) {
+      await context.reply(
+        error instanceof PaymentRequestError
+          ? error.message
+          : "Действие не подтверждено. Проверьте /orders или /report; повторно не платите. Поддержка: /paysupport.",
+      );
+    }
+  }
+  bot.command("terms", async (context) => {
+    if (privateBuyer(context)) await context.reply(VIN_REPORT_TERMS);
+  });
+  bot.command("start", async (context, next) => {
+    if (context.match !== "paysupport") return next();
+    if (privateBuyer(context))
+      await context.reply(
+        "Для связи с владельцем отправьте /paysupport и ваш вопрос или запрос полного возврата. Укажите номер заказа.",
+      );
+  });
+  bot.command("paysupport", (context) =>
+    paymentAction(context, async (payments) => {
+      await payments.paymentSupport(context.from!.id, context.match);
+      await context.reply("Вопрос отправлен владельцу Autodom. Ответ придёт в этот чат.");
+    }),
+  );
+  bot.command("payreply", (context) =>
+    paymentAction(context, async (payments) => {
+      const match = /^(\d+)\s+([\s\S]+)$/u.exec(context.match);
+      if (!match) throw new PaymentRequestError(400, "Используйте /payreply BUYER_ID текст.");
+      await payments.paymentSupportReply(context.from!.id, Number(match[1]), match[2]!);
+      await context.reply("Ответ отправлен покупателю.");
+    }),
+  );
+  bot.command("refund", (context) =>
+    paymentAction(context, async (payments) => {
+      const order = await payments.refundReport(context.from!.id, context.match.trim());
+      await context.reply(`${order.id}\n${paymentOrderStatus(order)}`);
+    }),
+  );
+  bot.command("report", (context) =>
+    paymentAction(context, async (payments) => {
+      if (context.from!.id !== VIN_REPORT_OWNER)
+        throw new PaymentRequestError(403, "Только владелец.");
+      const order = await payments.ledger.getOrder(context.match.trim());
+      if (!order || order.product !== "vin_report")
+        throw new PaymentRequestError(404, "PDF-заказ не найден.");
+      await context.reply(
+        `${order.id}\nVIN ${order.vin}\nПокупатель ${order.userId}\n${paymentAmountText(order)}\n${paymentOrderStatus(order)}\nВыдан: ${order.deliveredAt ?? "нет"}\nСообщение: ${order.reportMessageId ?? "не подтверждено"}`,
+      );
+    }),
+  );
+  bot.on("message:document", async (context, next) => {
+    if (!/^\/deliver(?:@\w+)?(?:\s|$)/u.test(context.message.caption ?? "")) return next();
+    await paymentAction(context, async (payments) => {
+      if (context.from!.id !== VIN_REPORT_OWNER)
+        throw new PaymentRequestError(403, "Только владелец.");
+      const match = /^\/deliver(?:@\w+)?\s+([0-9a-f-]+)\s+(\S+)\s*$/u.exec(
+        context.message.caption ?? "",
+      );
+      const document = context.message.document;
+      if (
+        !match ||
+        document.mime_type !== "application/pdf" ||
+        !document.file_name?.toLowerCase().endsWith(".pdf") ||
+        !document.file_size ||
+        document.file_size > VIN_REPORT_MAX_BYTES
+      )
+        throw new PaymentRequestError(
+          400,
+          "Пришлите PDF до 20 МБ с подписью /deliver ORDER_UUID VIN.",
+        );
+      const order = await payments.ledger.getOrder(match[1]!);
+      if (!order || order.vin !== normalizeVin(match[2]!))
+        throw new PaymentRequestError(400, "VIN документа в подписи должен совпадать с заказом.");
+      const delivered = await payments.deliverReport(context.from!.id, order.id, document.file_id);
+      await context.reply(`${delivered.id}\n${paymentOrderStatus(delivered)}`);
+    });
+  });
   bot.command("orders", async (context) => {
     if (
       context.chat.type !== "private" ||
@@ -509,12 +634,12 @@ export function createTelegramBot(
       "<b>Мои заказы</b>\n\n" +
         (orders.length
           ? "Оплата и выполнение услуги — разные статусы. Состав, продавец, исполнитель и условия доступны в приложении."
-          : "Заказов пока нет. Платёж появляется только для отдельно согласованной физической услуги. Поиск, уведомления и проверка VIN бесплатны."),
+          : "Заказов пока нет. Поиск, уведомления и базовая проверка VIN бесплатны. Покупка PDF доступна отдельно, только после корейского результата и согласия с условиями."),
       orders
         .slice(0, 10)
         .map((order) =>
           escapeHtml(
-            `${order.title} · ${money(order.amount, "KGS")}\n${paymentOrderStatus(order)}\nНомер: ${order.id}\nПоддержка: ${order.supportUrl}`,
+            `${order.title} · ${paymentAmountText(order)}\n${paymentOrderStatus(order)}\nНомер: ${order.id}\n${order.vin ? `VIN: ${order.vin}\n` : ""}Поддержка: ${order.product === "vin_report" ? "/paysupport текст" : order.supportUrl}`,
           ),
         ),
     );
@@ -642,6 +767,38 @@ export function createTelegramBot(
     const chatId = userId;
     const data = "data" in callback ? (callback.data ?? "") : "";
     await store.withLock(`autodom:user:${userId}`, async () => {
+      if (data.startsWith("vin-report-buy:")) {
+        await paymentAction(context, async (payments) => {
+          const order = await payments.reportOffer(userId, data.slice("vin-report-buy:".length));
+          await context.reply(
+            `${order.title}\nVIN ${order.vin}\n${paymentAmountText(order)}\nЗаказ ${order.id}\n${paymentOrderStatus(order)}\n\n${order.terms}`,
+            {
+              ...(order.paymentStatus === "unpaid"
+                ? {
+                    reply_markup: new InlineKeyboard().text(
+                      "Принимаю условия · перейти к оплате",
+                      `vin-report-pay:${order.id}`,
+                    ),
+                  }
+                : {}),
+            },
+          );
+        });
+        return;
+      }
+      if (data.startsWith("vin-report-pay:")) {
+        await paymentAction(context, async (payments) => {
+          const order = await payments.checkout(userId, data.slice("vin-report-pay:".length), true);
+          if (!order.invoiceUrl) throw new PaymentRequestError(503, "Счёт ещё не подтверждён.");
+          await context.reply(
+            `VIN ${order.vin} · ${paymentAmountText(order)}\nОплата подтверждается только сервером Telegram. Статус: /orders.`,
+            {
+              reply_markup: new InlineKeyboard().url("Оплатить Stars", order.invoiceUrl),
+            },
+          );
+        });
+        return;
+      }
       if (data === "vin-report-example") {
         await sendReportExample(chatId);
         return;
@@ -726,6 +883,8 @@ export async function configureTelegramBot(bot: Bot, signal: AbortSignal): Promi
         { command: "tips", description: "Советы перед покупкой" },
         { command: "vin", description: "Проверить VIN: CarHistory и Car365, без покупки" },
         { command: "orders", description: "Мои заказы, оплата и поддержка услуг" },
+        { command: "terms", description: "Условия покупки полного корейского PDF" },
+        { command: "paysupport", description: "Написать владельцу по оплате или возврату" },
         { command: "quiet", description: "Тихие часы: /quiet 23:00-08:00 или off" },
         { command: "privacy", description: "Хранение и удаление моих данных" },
         { command: "status", description: "Состояние каталога" },

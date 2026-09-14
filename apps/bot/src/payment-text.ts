@@ -1,16 +1,48 @@
 import type { PaymentOrder } from "@autodom/core/payments";
 
+export const VIN_REPORT_STARS = 500;
+export const VIN_REPORT_OWNER = 706854211;
+export const VIN_REPORT_SLA_MS = 60 * 60 * 1000;
+export const VIN_REPORT_MAX_BYTES = 20 * 1024 * 1024;
+export const VIN_REPORT_TERMS = `Полный корейский PDF по указанному VIN — ${VIN_REPORT_STARS} Telegram Stars (XTR), разовая покупка. Продавец и исполнитель: владелец Autodom (Telegram ID ${VIN_REPORT_OWNER}). Настоящий PDF вручную отправляется в этот бот в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если выдать отчёт невозможно, владелец возвращает все ${VIN_REPORT_STARS} Stars. Сведения исторические и могут быть неполными; отчёт не гарантирует состояние автомобиля. Образец — не отчёт по вашему VIN. Поддержка и запрос полного возврата: /paysupport текст. По покупке отвечает Autodom, не поддержка Telegram. Подтверждая условия перед оплатой, вы подтверждаете VIN, цену, срок и эти условия.`;
+
+export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency">): string {
+  return order.currency === "XTR"
+    ? `${order.amount} Stars (XTR)`
+    : `${(order.amount / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} сом`;
+}
+
 export const PAYMENT_PRIVACY_NOTICE =
-  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание и сумму заказа, но не Telegram ID или профиль поиска. Переход на платёжную страницу не подтверждает оплату. Заявка на возврат не означает возврат денег.";
+  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание и сумму физического осмотра, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для ручной выдачи и поддержки. Переход на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
 
 export function paymentOrderStatus(order: PaymentOrder): string {
+  if (order.paymentStatus === "refunded")
+    return order.needsReview
+      ? "Возврат подтверждён · другие платёжные расхождения требуют проверки"
+      : "Полный возврат Stars подтверждён";
   if (order.needsReview) return "Платёж требует проверки — не оплачивайте повторно";
+  if (order.product === "vin_report" && order.refundPending)
+    return "Полный возврат запрошен · подтверждения Telegram пока нет · выдача PDF приостановлена";
+  if (order.product === "vin_report" && order.paymentStatus === "paid") {
+    if (order.fulfillmentStatus === "fulfilled")
+      return "Оплата подтверждена · PDF отправлен в Telegram";
+    if (order.fulfillmentStatus === "delivering")
+      return "Оплата подтверждена · отправка PDF начата, результат ещё не подтверждён";
+    if (order.fulfillmentStatus === "delivery_unknown")
+      return "Исход отправки PDF неизвестен · поддержка /paysupport, повторно не платите";
+    if (order.paidAt && Date.parse(order.paidAt) + VIN_REPORT_SLA_MS <= Date.now())
+      return "Оплата подтверждена · срок 60 минут истёк · обратитесь в /paysupport за PDF или полным возвратом";
+    return "Оплата подтверждена · ожидаем ручную выдачу PDF в течение 60 минут после оплаты";
+  }
   if (order.paymentStatus === "paid")
     return order.fulfillmentStatus === "fulfilled"
       ? "Оплата подтверждена · осмотр выполнен"
       : "Оплата подтверждена · выполнение осмотра ещё не подтверждено";
   if (order.invoiceStatus === "cancelled") return "Предложение отменено";
   if (Date.parse(order.expiresAt) <= Date.now()) return "Срок предложения истёк";
-  if (order.invoiceStatus === "pending") return "Ожидаем серверное подтверждение Finik";
+  if (order.invoiceStatus === "pending")
+    return order.currency === "XTR"
+      ? "Ожидаем подтверждение Telegram · повторно не платите"
+      : "Ожидаем серверное подтверждение Finik";
   return "Предложение ожидает вашего решения";
 }

@@ -802,7 +802,7 @@ export class Conversation {
       return [
         {
           text: "Введите VIN из 17 символов или отправьте фото VIN в боте. Бесплатно проверим доступные корейские данные; это не полный платный отчёт.",
-          buttons: [[["Пример полного PDF-отчёта", "vin-report-example"]], ...START_BUTTONS],
+          buttons: START_BUTTONS,
           miniAppView: "vin",
         },
       ];

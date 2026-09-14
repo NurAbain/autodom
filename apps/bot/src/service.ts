@@ -27,28 +27,43 @@ import { type AutodomBot, configureTelegramBot, sendReplies } from "./telegram.j
 export function startPolling(
   bot: Bot,
   metrics?: Pick<Metrics, "recordTelegramUpdate">,
+  payments?: Pick<PaymentService, "ingestTelegramPayment">,
 ): RunnerHandle {
   let offset = 0;
+  let uncommitted: Update[] | undefined;
   const active = new Set<Promise<void>>();
   const source = createSource<Update>({
     async supply(capacity, signal) {
       for (;;) {
         try {
-          const updates = await bot.api.getUpdates(
-            {
-              offset,
-              limit: Math.max(1, Math.min(capacity, 100)),
-              timeout: 30,
-              allowed_updates: ["message", "callback_query"],
-            },
-            signal,
-          );
+          const updates =
+            uncommitted ??
+            (await bot.api.getUpdates(
+              {
+                offset,
+                limit: Math.max(1, Math.min(capacity, 100)),
+                timeout: 30,
+                allowed_updates: ["message", "callback_query", "pre_checkout_query"],
+              },
+              signal,
+            ));
+          // Never send a higher offset until every financial receipt is durable.
+          // Retain this batch on storage failure rather than acknowledging or dropping it.
+          uncommitted = updates;
+          for (const update of updates) {
+            if (update.message?.successful_payment || update.message?.refunded_payment) {
+              if (!payments) throw new Error("Financial receipt requires the payment ledger");
+              await payments.ingestTelegramPayment(update);
+            }
+          }
+          uncommitted = undefined;
           const last = updates.at(-1);
           if (last) offset = last.update_id + 1;
           return updates;
         } catch (error) {
           if (signal.aborted) throw error;
-          if (!(error instanceof GrammyError || error instanceof HttpError)) throw error;
+          if (!uncommitted && !(error instanceof GrammyError || error instanceof HttpError))
+            throw error;
           if (
             error instanceof GrammyError &&
             (error.error_code === 401 || error.error_code === 409)
@@ -294,7 +309,7 @@ export async function runBotService(
     );
     watchServer(metricsServer, "Metrics");
     abort.signal.throwIfAborted();
-    runner = startPolling(bot, metrics);
+    runner = startPolling(bot, metrics, context.payments);
     const polling = runner.task();
     if (!polling) throw new Error("Telegram polling did not start");
     tasks.push(
@@ -310,6 +325,32 @@ export async function runBotService(
       ),
       maintain(store, settings, "bot", abort.signal),
     );
+    if (context.payments) {
+      const payments = context.payments;
+      tasks.push(
+        (async () => {
+          while (!abort.signal.aborted) {
+            try {
+              await payments.notifyPendingReports();
+            } catch (err) {
+              logger.warn({ err }, "Paid PDF owner notification deferred");
+            }
+            if (abort.signal.aborted) break;
+            await new Promise<void>((resolve) => {
+              const onAbort = () => {
+                clearTimeout(timer);
+                resolve();
+              };
+              const timer = setTimeout(() => {
+                abort.signal.removeEventListener("abort", onAbort);
+                resolve();
+              }, 30_000);
+              abort.signal.addEventListener("abort", onAbort, { once: true });
+            });
+          }
+        })(),
+      );
+    }
     logger.info(
       { role: "bot", metrics_port: port, ...(listener ? { miniapp_port: listener.port } : {}) },
       "Autodom service ready",

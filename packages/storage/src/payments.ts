@@ -11,11 +11,22 @@ import {
   validatePaymentText,
   validatePaymentUrl,
 } from "@autodom/core/payments";
-import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { paymentEvents, paymentOrders, paymentRefunds } from "./schema.js";
 import type { Store } from "./store.js";
 
-export function decodePaymentOrder(row: typeof paymentOrders.$inferSelect): PaymentOrder {
+const orderColumns = {
+  ...getTableColumns(paymentOrders),
+  // Single-table projections strip column qualifiers; this id must reference the outer order.
+  refund_pending: sql<boolean>`EXISTS (
+    SELECT 1 FROM payment_refunds r WHERE r.order_id = ${paymentOrders}.${sql.identifier(paymentOrders.id.name)}
+      AND r.status IN ('requested','submitted')
+  )`.as("refund_pending"),
+};
+
+export function decodePaymentOrder(
+  row: typeof paymentOrders.$inferSelect & { refund_pending?: boolean },
+): PaymentOrder {
   return {
     id: row.id,
     userId: row.user_id,
@@ -37,6 +48,14 @@ export function decodePaymentOrder(row: typeof paymentOrders.$inferSelect): Paym
     paymentStatus: row.payment_status,
     fulfillmentStatus: row.fulfillment_status,
     chargeId: row.charge_id,
+    vin: row.vin,
+    paidAt: row.paid_at,
+    reportFileId: row.report_file_id,
+    reportMessageId: row.report_message_id,
+    deliveredAt: row.delivered_at,
+    adminNotifiedAt: row.admin_notified_at,
+    preCheckoutId: row.pre_checkout_id,
+    refundPending: row.refund_pending ?? false,
     needsReview: row.needs_review,
   };
 }
@@ -78,14 +97,19 @@ export class PaymentStore {
     validatePaymentOffer(input);
     if (Date.parse(input.expiresAt) <= Date.now()) throw new Error("Inspection offer has expired");
     return this.store.transaction(async () => {
+      if (input.product === "vin_report") {
+        const existing = await this.findOpenVinReport(input.userId, input.vin!);
+        if (existing) return existing;
+      }
       const [row] = await this.store.database
         .insert(paymentOrders)
         .values({
           id: randomUUID(),
           user_id: input.userId,
           product: input.product,
-          provider: "finik",
-          currency: "KGS",
+          provider: input.product === "vin_report" ? "telegram_stars" : "finik",
+          currency: input.product === "vin_report" ? "XTR" : "KGS",
+          vin: input.vin ?? null,
           amount: input.amount,
           title: input.title,
           description: input.description,
@@ -110,7 +134,7 @@ export class PaymentStore {
   async getOrder(id: string): Promise<PaymentOrder | null> {
     finikPaymentId(id);
     const [row] = await this.store.database
-      .select()
+      .select(orderColumns)
       .from(paymentOrders)
       .where(eq(paymentOrders.id, id));
     return row ? decodePaymentOrder(row) : null;
@@ -119,7 +143,7 @@ export class PaymentStore {
     if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("Invalid payment buyer");
     return (
       await this.store.database
-        .select()
+        .select(orderColumns)
         .from(paymentOrders)
         .where(eq(paymentOrders.user_id, userId))
         .orderBy(desc(paymentOrders.created_at), desc(paymentOrders.id))
@@ -136,7 +160,8 @@ export class PaymentStore {
         Date.parse(order.expiresAt) <= acceptedAt ||
         order.invoiceStatus === "cancelled" ||
         order.fulfillmentStatus === "cancelled" ||
-        order.paymentStatus !== "unpaid"
+        order.paymentStatus !== "unpaid" ||
+        order.needsReview
       )
         throw new Error("Inspection offer cannot be accepted");
       if (order.acceptedAt) return order;
@@ -164,7 +189,7 @@ export class PaymentStore {
     });
   }
   async ingestEvent(event: PaymentEvent): Promise<"applied" | "duplicate" | "review"> {
-    // Reject malformed transport input explicitly; well-formed authenticated discrepancies are durable.
+    // Only authenticated server receipts reach this boundary; discrepancies remain durable.
     validatePaymentEvent(event);
     event = { ...event, occurredAt: new Date(event.occurredAt).toISOString() };
     const fingerprint = paymentEventFingerprint(event);
@@ -192,36 +217,106 @@ export class PaymentStore {
             eq(paymentOrders.charge_id, event.chargeId),
           ),
         );
+      const sameKind = previous.filter((row) => row.data.kind === event.kind);
+      // Telegram can replay the same receipt in a distinct update with a new timestamp.
+      if (
+        event.provider === "telegram_stars" &&
+        sameKind.some(
+          (row) =>
+            row.outcome === "applied" &&
+            row.data.orderId === event.orderId &&
+            row.data.userId === event.userId &&
+            row.data.currency === event.currency &&
+            row.data.amount === event.amount &&
+            row.data.chargeId === event.chargeId,
+        )
+      )
+        return "duplicate";
       let reason: string | null = null;
       let capture = false;
-      if (previous.length || captured) reason = "conflicting_transaction_or_charge";
+      let refund = false;
+      if (sameKind.length || previous.some((row) => row.event_id === event.eventId))
+        reason = "conflicting_transaction_or_charge";
       else if (!order) reason = "unknown_order";
+      else if (event.provider !== order.provider) reason = "provider_mismatch";
+      else if (event.provider === "telegram_stars" && event.userId !== order.userId)
+        reason = "buyer_mismatch";
       else if (event.currency !== order.currency || event.amount !== order.amount)
         reason = "amount_or_currency_mismatch";
       else if (!order.acceptedAt) reason = "unaccepted_order";
+      else if (event.kind === "refunded") {
+        if (
+          !captured ||
+          captured.id !== order.id ||
+          order.chargeId !== event.chargeId ||
+          !["paid", "refunded"].includes(order.paymentStatus)
+        )
+          reason = "refund_without_capture";
+        else if (
+          Math.floor(Date.parse(event.occurredAt) / 1000) <
+          Math.floor(Date.parse(order.paidAt!) / 1000)
+        )
+          reason = "refund_precedes_capture";
+        else refund = true;
+      } else if (captured) reason = "conflicting_transaction_or_charge";
       else if (order.paymentStatus !== "unpaid") reason = "additional_charge";
+      else if (order.provider === "telegram_stars" && !order.preCheckoutId)
+        reason = "unreserved_checkout";
       else {
         capture = true;
+        const receiptTime = Date.parse(event.occurredAt);
+        const acceptanceTime = Date.parse(order.acceptedAt);
         if (
-          Date.now() >= Date.parse(order.expiresAt) ||
-          Date.parse(event.occurredAt) >= Date.parse(order.expiresAt) ||
+          (order.provider === "finik" && Date.now() >= Date.parse(order.expiresAt)) ||
+          receiptTime >= Date.parse(order.expiresAt) ||
           order.invoiceStatus === "cancelled" ||
           order.fulfillmentStatus === "cancelled"
         )
           reason = "late_or_cancelled_payment";
-        else if (Date.parse(event.occurredAt) < Date.parse(order.acceptedAt))
+        else if (
+          order.provider === "telegram_stars"
+            ? Math.floor(receiptTime / 1000) < Math.floor(acceptanceTime / 1000)
+            : receiptTime < acceptanceTime
+        ) {
           reason = "receipt_precedes_acceptance";
+          capture = false;
+        }
       }
-      if (reason === "receipt_precedes_acceptance") capture = false;
-      if (order && capture) {
+      if (order && capture)
         await this.store.database
           .update(paymentOrders)
           .set({
             payment_status: "paid",
             charge_id: event.chargeId,
+            paid_at: event.occurredAt,
             needs_review: order.needsReview || reason !== null,
           })
           .where(eq(paymentOrders.id, order.id));
+      if (order && refund) {
+        await this.store.database
+          .update(paymentOrders)
+          .set({
+            payment_status: "refunded",
+            fulfillment_status: ["fulfilled", "delivering", "delivery_unknown"].includes(
+              order.fulfillmentStatus,
+            )
+              ? order.fulfillmentStatus
+              : "cancelled",
+          })
+          .where(eq(paymentOrders.id, order.id));
+        await this.store.database
+          .update(paymentRefunds)
+          .set({
+            status: "confirmed",
+            updated_at: now(),
+            note: "Authenticated Telegram refund receipt",
+          })
+          .where(
+            and(
+              eq(paymentRefunds.order_id, order.id),
+              inArray(paymentRefunds.status, ["requested", "submitted"]),
+            ),
+          );
       }
       if (reason) {
         const affected = [
@@ -250,7 +345,7 @@ export class PaymentStore {
         review_reason: reason,
         received_at: now(),
       });
-      return outcome;
+      return refund && order?.paymentStatus === "refunded" ? "duplicate" : outcome;
     });
   }
   async cancelOffer(id: string, userId: number): Promise<boolean> {
@@ -270,6 +365,7 @@ export class PaymentStore {
       const order = await this.getOrder(id);
       if (
         !order ||
+        order.product !== "inspection" ||
         order.paymentStatus !== "paid" ||
         order.needsReview ||
         order.fulfillmentStatus === "cancelled"
@@ -290,14 +386,25 @@ export class PaymentStore {
       const order = await this.getOrder(orderId);
       if (!order || order.paymentStatus !== "paid")
         throw new Error("Refund requires captured payment");
+      if (
+        order.provider === "telegram_stars" &&
+        (amount !== order.amount || order.fulfillmentStatus === "delivering")
+      )
+        throw new Error("Stars require full refund without an active delivery");
       const refunds = await this.store.database
         .select()
         .from(paymentRefunds)
         .where(eq(paymentRefunds.order_id, orderId));
+      if (order.provider === "telegram_stars") {
+        const pending = refunds.find(
+          (refund) => refund.status === "requested" || refund.status === "submitted",
+        );
+        if (pending) return decodeRefund(pending);
+      }
       if (refunds.some((refund) => refund.status === "requested"))
         throw new Error("Refund request already active");
       const reserved = refunds
-        .filter((refund) => refund.status === "submitted")
+        .filter((refund) => refund.status === "submitted" || refund.status === "confirmed")
         .reduce((total, refund) => total + BigInt(refund.amount), 0n);
       if (reserved + BigInt(amount) > BigInt(order.amount))
         throw new Error("Refund requests exceed captured amount");
@@ -307,7 +414,7 @@ export class PaymentStore {
         .values({
           id: randomUUID(),
           order_id: orderId,
-          provider: "finik",
+          provider: order.provider,
           amount,
           reason,
           status: "requested",
@@ -337,19 +444,226 @@ export class PaymentStore {
         .orderBy(desc(paymentRefunds.created_at), desc(paymentRefunds.id))
     ).map(decodeRefund);
   }
-  async markRefund(id: string, state: "submitted" | "failed", note?: string): Promise<void> {
-    if (state !== "submitted" && state !== "failed")
+  async markRefund(
+    id: string,
+    state: "submitted" | "failed" | "confirmed",
+    note?: string,
+  ): Promise<void> {
+    if (!["submitted", "failed", "confirmed"].includes(state))
       throw new Error("Invalid refund request state");
     if (note !== undefined) validatePaymentText(note, "refund note", 2000);
     await this.store.transaction(async () => {
       const refund = await this.getRefund(id);
       if (!refund) throw new Error("Refund request not found");
       if (refund.status === state) return;
-      if (refund.status !== "requested") throw new Error("Refund request is already terminal");
+      if (
+        refund.status !== "requested" &&
+        !(refund.provider === "telegram_stars" && refund.status === "submitted")
+      )
+        throw new Error("Refund request is already terminal");
+      if (state === "confirmed") {
+        const order = await this.getOrder(refund.orderId);
+        if (
+          refund.provider !== "telegram_stars" ||
+          !order ||
+          order.provider !== refund.provider ||
+          refund.amount !== order.amount ||
+          order.paymentStatus !== "paid" ||
+          order.fulfillmentStatus === "delivering"
+        )
+          throw new Error("Refund confirmation requires full captured Stars payment");
+        await this.store.database
+          .update(paymentOrders)
+          .set({
+            payment_status: "refunded",
+            fulfillment_status: order.fulfillmentStatus === "fulfilled" ? "fulfilled" : "cancelled",
+          })
+          .where(eq(paymentOrders.id, order.id));
+      }
       await this.store.database
         .update(paymentRefunds)
         .set({ status: state, note: note ?? null, updated_at: now() })
         .where(eq(paymentRefunds.id, id));
+    });
+  }
+
+  async findOpenVinReport(userId: number, vin: string): Promise<PaymentOrder | null> {
+    if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(vin))
+      throw new Error("Invalid report buyer or VIN");
+    const rows = await this.store.database
+      .select(orderColumns)
+      .from(paymentOrders)
+      .where(
+        and(
+          eq(paymentOrders.user_id, userId),
+          eq(paymentOrders.vin, vin),
+          eq(paymentOrders.product, "vin_report"),
+          ne(paymentOrders.payment_status, "refunded"),
+          ne(paymentOrders.invoice_status, "cancelled"),
+          ne(paymentOrders.fulfillment_status, "cancelled"),
+        ),
+      )
+      .orderBy(desc(paymentOrders.created_at), desc(paymentOrders.id));
+    const row = rows.find(
+      (item) =>
+        item.payment_status !== "unpaid" ||
+        item.pre_checkout_id ||
+        item.needs_review ||
+        Date.parse(item.expires_at) > Date.now(),
+    );
+    return row ? decodePaymentOrder(row) : null;
+  }
+
+  async reserveStarsCheckout(
+    orderId: string,
+    userId: number,
+    currency: string,
+    amount: number,
+    queryId: string,
+  ): Promise<boolean> {
+    validatePaymentText(queryId, "precheckout ID", 300);
+    return this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (
+        !order ||
+        order.provider !== "telegram_stars" ||
+        order.product !== "vin_report" ||
+        order.userId !== userId ||
+        currency !== "XTR" ||
+        amount !== order.amount ||
+        !order.acceptedAt ||
+        order.invoiceStatus !== "pending" ||
+        order.paymentStatus !== "unpaid" ||
+        order.fulfillmentStatus !== "ready" ||
+        order.needsReview ||
+        Date.parse(order.expiresAt) <= Date.now()
+      )
+        return false;
+      if (order.preCheckoutId) return order.preCheckoutId === queryId;
+      const [used] = await this.store.database
+        .select({ id: paymentOrders.id })
+        .from(paymentOrders)
+        .where(eq(paymentOrders.pre_checkout_id, queryId))
+        .limit(1);
+      if (used) return false;
+      await this.store.database
+        .update(paymentOrders)
+        .set({ pre_checkout_id: queryId })
+        .where(eq(paymentOrders.id, orderId));
+      return true;
+    });
+  }
+
+  /** Caller must first receive a successful, explicit Telegram checkout rejection. */
+  async releaseStarsCheckout(orderId: string, queryId: string): Promise<void> {
+    finikPaymentId(orderId);
+    validatePaymentText(queryId, "precheckout ID", 300);
+    await this.store.transaction(async () => {
+      await this.store.database
+        .update(paymentOrders)
+        .set({ pre_checkout_id: null })
+        .where(
+          and(
+            eq(paymentOrders.id, orderId),
+            eq(paymentOrders.provider, "telegram_stars"),
+            eq(paymentOrders.payment_status, "unpaid"),
+            eq(paymentOrders.pre_checkout_id, queryId),
+          ),
+        );
+    });
+  }
+
+  async listPendingVinReports(): Promise<PaymentOrder[]> {
+    return (
+      await this.store.database
+        .select(orderColumns)
+        .from(paymentOrders)
+        .where(
+          and(
+            eq(paymentOrders.product, "vin_report"),
+            eq(paymentOrders.payment_status, "paid"),
+            isNull(paymentOrders.admin_notified_at),
+          ),
+        )
+        .orderBy(asc(paymentOrders.paid_at), asc(paymentOrders.id))
+        .limit(100)
+    ).map(decodePaymentOrder);
+  }
+
+  async markReportNotified(orderId: string): Promise<void> {
+    await this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (!order || order.product !== "vin_report" || order.paymentStatus === "unpaid")
+        throw new Error("Notification requires a captured report");
+      if (!order.adminNotifiedAt)
+        await this.store.database
+          .update(paymentOrders)
+          .set({ admin_notified_at: now() })
+          .where(eq(paymentOrders.id, orderId));
+    });
+  }
+
+  async beginReportDelivery(orderId: string, fileId: string): Promise<PaymentOrder> {
+    validatePaymentText(fileId, "report file ID", 1024);
+    return this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (
+        !order ||
+        order.product !== "vin_report" ||
+        order.paymentStatus !== "paid" ||
+        order.needsReview ||
+        order.fulfillmentStatus !== "ready"
+      )
+        throw new Error("Report is not available for delivery");
+      if ((await this.listRefunds(orderId)).some((refund) => refund.status !== "failed"))
+        throw new Error("Report has an active refund");
+      const [row] = await this.store.database
+        .update(paymentOrders)
+        .set({ fulfillment_status: "delivering", report_file_id: fileId })
+        .where(eq(paymentOrders.id, orderId))
+        .returning();
+      return decodePaymentOrder(row!);
+    });
+  }
+
+  async finishReportDelivery(orderId: string, messageId: number): Promise<void> {
+    if (!Number.isSafeInteger(messageId) || messageId <= 0)
+      throw new Error("Invalid report document message ID");
+    await this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (!order || order.product !== "vin_report" || !order.reportFileId)
+        throw new Error("Report delivery not reserved");
+      if (order.fulfillmentStatus === "fulfilled" && order.reportMessageId === messageId) return;
+      if (order.fulfillmentStatus !== "delivering")
+        throw new Error("Report delivery is not active");
+      await this.store.database
+        .update(paymentOrders)
+        .set({
+          fulfillment_status: "fulfilled",
+          report_message_id: messageId,
+          delivered_at: now(),
+        })
+        .where(eq(paymentOrders.id, orderId));
+    });
+  }
+
+  async failReportDelivery(orderId: string, uncertain: boolean): Promise<void> {
+    if (typeof uncertain !== "boolean") throw new Error("Invalid delivery failure");
+    await this.store.transaction(async () => {
+      const order = await this.getOrder(orderId);
+      if (!order || order.product !== "vin_report" || order.fulfillmentStatus !== "delivering")
+        throw new Error("Report delivery is not active");
+      await this.store.database
+        .update(paymentOrders)
+        .set({
+          fulfillment_status: uncertain
+            ? "delivery_unknown"
+            : order.paymentStatus === "refunded"
+              ? "cancelled"
+              : "ready",
+          report_file_id: uncertain ? order.reportFileId : null,
+        })
+        .where(eq(paymentOrders.id, orderId));
     });
   }
 }

@@ -105,6 +105,22 @@ async function rewriteSnapshot(
       if (row && record.table === "listings") delete row.normalized_title;
     }
   }
+  if (Number(records[0]?.schema_version) < 7) {
+    for (const record of records) {
+      const row = record.row as Record<string, unknown> | undefined;
+      if (row && record.table === "payment_orders")
+        for (const name of [
+          "vin",
+          "paid_at",
+          "report_file_id",
+          "report_message_id",
+          "delivered_at",
+          "admin_notified_at",
+          "pre_checkout_id",
+        ])
+          delete row[name];
+    }
+  }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
   await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
@@ -423,6 +439,333 @@ describe("Finik physical inspection ledger", () => {
     const targetUrl = await database();
     await expect(restore(damaged, targetUrl)).rejects.toThrow();
     expect(await new PaymentStore(await open(targetUrl)).getOrder(first.id)).toBeNull();
+  });
+});
+
+const reportOffer = (userId = 1): PaymentOfferInput => ({
+  ...inspectionOffer(userId),
+  product: "vin_report",
+  amount: 500,
+  vin: "KMHCT41DADU123456",
+  title: "Korean PDF report",
+});
+const starsReceipt = (orderId: string, userId = 1): PaymentEvent => ({
+  ...receipt(orderId),
+  provider: "telegram_stars",
+  currency: "XTR",
+  amount: 500,
+  userId,
+});
+
+describe("Telegram Stars financial and delivery boundaries", () => {
+  it("serializes offers and reserves one checkout query across connections, including expiry", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    const [first, second] = await Promise.all([
+      payments.createOffer(reportOffer()),
+      peer.createOffer(reportOffer()),
+    ]);
+    expect(first.id).toBe(second.id);
+    await payments.acceptOrder(first.id, 1);
+    expect(await payments.reserveStarsCheckout(first.id, 2, "XTR", 500, "wrong-buyer")).toBe(false);
+    expect(await payments.reserveStarsCheckout(first.id, 1, "KGS", 500, "wrong-currency")).toBe(
+      false,
+    );
+    expect(await payments.reserveStarsCheckout(first.id, 1, "XTR", 499, "wrong-amount")).toBe(
+      false,
+    );
+    const attempts = await Promise.all([
+      payments.reserveStarsCheckout(first.id, 1, "XTR", 500, "query-a"),
+      peer.reserveStarsCheckout(first.id, 1, "XTR", 500, "query-b"),
+    ]);
+    expect(attempts.filter(Boolean)).toHaveLength(1);
+    const query = attempts[0] ? "query-a" : "query-b";
+    expect(await peer.reserveStarsCheckout(first.id, 1, "XTR", 500, query)).toBe(true);
+    vi.setSystemTime((NOW + 3601) * 1000);
+    expect((await payments.findOpenVinReport(1, first.vin!))?.id).toBe(first.id);
+    expect(await payments.reserveStarsCheckout(first.id, 1, "XTR", 500, query)).toBe(false);
+    expect(
+      (
+        await payments.createOffer({
+          ...reportOffer(),
+          expiresAt: new Date((NOW + 7200) * 1000).toISOString(),
+        })
+      ).id,
+    ).toBe(first.id);
+    const unreserved = await payments.createOffer({
+      ...reportOffer(2),
+      expiresAt: new Date((NOW + 7200) * 1000).toISOString(),
+    });
+    vi.setSystemTime((NOW + 7201) * 1000);
+    expect(await payments.findOpenVinReport(2, unreserved.vin!)).toBeNull();
+  });
+  it("releases only a definitively declined matching checkout, never a captured reservation", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(reportOffer());
+    await payments.acceptOrder(order.id, 1);
+    await payments.reserveStarsCheckout(order.id, 1, "XTR", 500, "declined");
+    await payments.releaseStarsCheckout(order.id, "different-query");
+    expect((await payments.getOrder(order.id))?.preCheckoutId).toBe("declined");
+    await payments.releaseStarsCheckout(order.id, "declined");
+    expect(await payments.reserveStarsCheckout(order.id, 1, "XTR", 500, "approved")).toBe(true);
+    await payments.ingestEvent(starsReceipt(order.id));
+    await payments.releaseStarsCheckout(order.id, "approved");
+    expect((await payments.getOrder(order.id))?.preCheckoutId).toBe("approved");
+  });
+
+  it("accepts same-second authenticated capture exactly once and refuses physical completion", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    vi.setSystemTime(NOW * 1000 + 750);
+    const order = await payments.createOffer(reportOffer());
+    await payments.acceptOrder(order.id, 1);
+    await payments.reserveStarsCheckout(order.id, 1, "XTR", 500, "query");
+    const paid = starsReceipt(order.id);
+    expect(
+      (await Promise.all([payments.ingestEvent(paid), peer.ingestEvent(paid)])).sort(),
+    ).toEqual(["applied", "duplicate"]);
+    expect(
+      await payments.ingestEvent({
+        ...paid,
+        eventId: "replayed-update",
+        occurredAt: new Date((NOW + 1) * 1000).toISOString(),
+      }),
+    ).toBe("duplicate");
+    expect(await payments.getOrder(order.id)).toMatchObject({
+      paymentStatus: "paid",
+      fulfillmentStatus: "ready",
+      needsReview: false,
+      paidAt: paid.occurredAt,
+    });
+    expect(await payments.completeInspection(order.id)).toBe(false);
+    const refunded = { ...paid, kind: "refunded" as const, eventId: `refund:${paid.chargeId}` };
+    expect(await payments.ingestEvent(refunded)).toBe("applied");
+    expect(await payments.ingestEvent(refunded)).toBe("duplicate");
+    expect(await payments.ingestEvent(paid)).toBe("duplicate");
+    expect(await payments.getOrder(order.id)).toMatchObject({
+      paymentStatus: "refunded",
+      fulfillmentStatus: "cancelled",
+      chargeId: paid.chargeId,
+    });
+  });
+
+  it("retains wrong buyer, provider, currency and extra charge receipts without delivering", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(reportOffer());
+    await payments.acceptOrder(order.id, 1);
+    await payments.reserveStarsCheckout(order.id, 1, "XTR", 500, "query");
+    expect(await payments.ingestEvent(starsReceipt(order.id, 2))).toBe("review");
+    expect(await payments.ingestEvent({ ...receipt(order.id), currency: "XTR", amount: 500 })).toBe(
+      "review",
+    );
+    expect(await payments.ingestEvent({ ...starsReceipt(order.id), currency: "KGS" })).toBe(
+      "review",
+    );
+    expect((await payments.getOrder(order.id))?.paymentStatus).toBe("unpaid");
+    const valid = starsReceipt(order.id);
+    expect(await payments.ingestEvent(valid)).toBe("applied");
+    expect(await payments.ingestEvent(starsReceipt(order.id))).toBe("review");
+    await expect(payments.beginReportDelivery(order.id, "pdf")).rejects.toThrow();
+    expect((await payments.getOrder(order.id))?.chargeId).toBe(valid.chargeId);
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      await expect(
+        client.query("UPDATE payment_orders SET charge_id = 'forged' WHERE id = $1", [order.id]),
+      ).rejects.toThrow();
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("keeps ambiguous delivery and refund requests mutually safe through backup and restore", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(reportOffer());
+    await payments.acceptOrder(order.id, 1);
+    await payments.reserveStarsCheckout(order.id, 1, "XTR", 500, "query");
+    const paid = starsReceipt(order.id);
+    await payments.ingestEvent(paid);
+    await payments.markReportNotified(order.id);
+    const attempts = await Promise.allSettled([
+      payments.beginReportDelivery(order.id, "pdf"),
+      payments.beginReportDelivery(order.id, "other-pdf"),
+    ]);
+    expect(attempts.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    await expect(payments.requestRefund(order.id, 500, "Unable to deliver")).rejects.toThrow();
+    await payments.failReportDelivery(order.id, true);
+    await expect(payments.beginReportDelivery(order.id, "replacement")).rejects.toThrow();
+    await expect(payments.requestRefund(order.id, 499, "Partial")).rejects.toThrow();
+    const refund = await payments.requestRefund(order.id, 500, "Unable to confirm delivery");
+    await payments.markRefund(refund.id, "submitted", "Ambiguous provider response");
+    expect((await payments.requestRefund(order.id, 500, "Retry")).id).toBe(refund.id);
+    const source = join(directory, "stars-pending.ndjson");
+    await backup(db, source);
+    const targetUrl = await database();
+    await restore(source, targetUrl);
+    const restored = new PaymentStore(await open(targetUrl));
+    expect(await restored.getOrder(order.id)).toEqual(await payments.getOrder(order.id));
+    expect(await restored.getOrder(order.id)).toMatchObject({
+      refundPending: true,
+      paymentStatus: "paid",
+      fulfillmentStatus: "delivery_unknown",
+    });
+    expect(await restored.listPendingVinReports()).toEqual([]);
+    await expect(restored.beginReportDelivery(order.id, "retry")).rejects.toThrow();
+    await restored.markRefund(refund.id, "confirmed", "Telegram API returned true");
+    await restored.markRefund(refund.id, "confirmed");
+    expect(await restored.getOrder(order.id)).toMatchObject({
+      refundPending: false,
+      paymentStatus: "refunded",
+      fulfillmentStatus: "cancelled",
+    });
+    const confirmed = join(directory, "stars-confirmed.ndjson");
+    await backup(await open(targetUrl), confirmed);
+    const confirmedUrl = await database();
+    await restore(confirmed, confirmedUrl);
+    const echoed = new PaymentStore(await open(confirmedUrl));
+    expect((await echoed.getOrder(order.id))?.paymentStatus).toBe("refunded");
+    const echo = {
+      ...paid,
+      kind: "refunded" as const,
+      eventId: `refund:${paid.chargeId}`,
+      occurredAt: new Date((NOW + 60) * 1000).toISOString(),
+    };
+    expect(await echoed.ingestEvent(echo)).toBe("duplicate");
+    expect(
+      await echoed.ingestEvent({ ...echo, occurredAt: new Date((NOW + 61) * 1000).toISOString() }),
+    ).toBe("duplicate");
+    expect(await echoed.getOrder(order.id)).toMatchObject({
+      paymentStatus: "refunded",
+      needsReview: false,
+    });
+  });
+
+  it("records actual document delivery even when an authentic refund races the send", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(reportOffer());
+    await payments.acceptOrder(order.id, 1);
+    await payments.reserveStarsCheckout(order.id, 1, "XTR", 500, "query");
+    const paid = starsReceipt(order.id);
+    await payments.ingestEvent(paid);
+    await payments.beginReportDelivery(order.id, "rejected-file");
+    await payments.failReportDelivery(order.id, false);
+    expect((await payments.getOrder(order.id))?.reportFileId).toBeNull();
+    await payments.beginReportDelivery(order.id, "actual-file");
+    await payments.ingestEvent({ ...paid, kind: "refunded", eventId: `refund:${paid.chargeId}` });
+    await payments.finishReportDelivery(order.id, 42);
+    await payments.finishReportDelivery(order.id, 42);
+    await expect(payments.finishReportDelivery(order.id, 43)).rejects.toThrow();
+    await expect(payments.beginReportDelivery(order.id, "other")).rejects.toThrow();
+    expect(await payments.getOrder(order.id)).toMatchObject({
+      paymentStatus: "refunded",
+      fulfillmentStatus: "fulfilled",
+      reportMessageId: 42,
+      reportFileId: "actual-file",
+    });
+    const source = join(directory, "delivered-refunded.ndjson");
+    await backup(db, source);
+    const restoredUrl = await database();
+    await restore(source, restoredUrl);
+    expect(await new PaymentStore(await open(restoredUrl)).getOrder(order.id)).toEqual(
+      await payments.getOrder(order.id),
+    );
+    for (const damage of ["buyer", "paid-time", "delivery"]) {
+      const damaged = join(directory, `${damage}.ndjson`);
+      await rewriteSnapshot(source, damaged, (record) => {
+        if (record.table !== "payment_orders") return;
+        const row = record.row as Record<string, unknown>;
+        if (damage === "buyer") row.user_id = "2";
+        if (damage === "paid-time") row.paid_at = new Date((NOW - 1) * 1000).toISOString();
+        if (damage === "delivery") row.report_message_id = null;
+      });
+      await expect(restore(damaged, await database())).rejects.toThrow();
+    }
+  });
+
+  it("restores pre-Stars Finik captures without inventing their missing capture timestamp", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(order.id, 1);
+    const paid = receipt(order.id);
+    await payments.ingestEvent(paid);
+    const current = join(directory, "current-finik.ndjson");
+    const old = join(directory, "pre-stars.ndjson");
+    await backup(db, current);
+    await rewriteSnapshot(current, old, (record) => {
+      if (Object.hasOwn(record, "schema_version")) record.schema_version = 6;
+    });
+    const restoredUrl = await database();
+    await restore(old, restoredUrl);
+    const restored = new PaymentStore(await open(restoredUrl));
+    expect(await restored.getOrder(order.id)).toMatchObject({
+      paymentStatus: "paid",
+      paidAt: null,
+      vin: null,
+    });
+    expect(await restored.ingestEvent(paid)).toBe("duplicate");
+    expect(await restored.completeInspection(order.id)).toBe(true);
+  });
+  it("upgrades a populated version-eight Finik journal without rewriting prior receipts", async () => {
+    const payments = new PaymentStore(db);
+    const order = await payments.createOffer(inspectionOffer());
+    await payments.acceptOrder(order.id, 1);
+    const paid = receipt(order.id);
+    await payments.ingestEvent(paid);
+    const previousUrl = await database();
+    const previous = new pg.Client({ connectionString: previousUrl });
+    const current = new pg.Client({ connectionString: url });
+    await previous.connect();
+    await current.connect();
+    try {
+      await previous.query(
+        "CREATE TABLE autodom_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
+      );
+      for (const [index, name] of [
+        "0001_initial.sql",
+        "0002_mileage_bigint.sql",
+        "0003_advertising_consent.sql",
+        "0004_remove_advertising_consent.sql",
+        "0005_owner_vehicles.sql",
+        "0006_payments.sql",
+        "0007_uae_market.sql",
+        "0008_catalog_filters.sql",
+      ].entries()) {
+        const statement = await readFile(join("packages/storage/migrations", name), "utf8");
+        await previous.query(statement);
+        await previous.query("INSERT INTO autodom_migrations(version, checksum) VALUES ($1,$2)", [
+          index + 1,
+          createHash("sha256").update(statement).digest("hex"),
+        ]);
+      }
+      const savedOrder = await current.query("SELECT * FROM payment_orders WHERE id = $1", [
+        order.id,
+      ]);
+      const savedReceipt = await current.query("SELECT * FROM payment_events WHERE order_id = $1", [
+        order.id,
+      ]);
+      await previous.query(
+        "INSERT INTO payment_orders SELECT * FROM json_populate_record(NULL::payment_orders, $1::json)",
+        [JSON.stringify(savedOrder.rows[0])],
+      );
+      await previous.query(
+        "INSERT INTO payment_events SELECT * FROM json_populate_record(NULL::payment_events, $1::json)",
+        [JSON.stringify(savedReceipt.rows[0])],
+      );
+    } finally {
+      await previous.end();
+      await current.end();
+    }
+    const upgraded = new PaymentStore(await open(previousUrl));
+    expect(await upgraded.getOrder(order.id)).toMatchObject({
+      provider: "finik",
+      currency: "KGS",
+      paymentStatus: "paid",
+      paidAt: null,
+      chargeId: paid.chargeId,
+    });
+    expect(await upgraded.ingestEvent(paid)).toBe("duplicate");
+    expect(await upgraded.completeInspection(order.id)).toBe(true);
+    expect((await upgraded.createOffer(reportOffer())).currency).toBe("XTR");
   });
 });
 
