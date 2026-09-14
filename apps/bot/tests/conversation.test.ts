@@ -950,10 +950,36 @@ describe("grammY transport boundaries", () => {
           ? identity
           : method === "getWebhookInfo"
             ? { url: "", pending_update_count: 0 }
-            : true;
+            : method === "sendMessage" || method === "sendRichMessage"
+              ? { message_id: calls.length }
+              : true;
       return { ok: true, result } as never;
     });
     return { bot, calls };
+  }
+  function photoCallback(
+    calls: { method: string; payload: Record<string, unknown> }[],
+    vin: string,
+    archive = false,
+  ) {
+    const data = `${archive ? "vinarchivephotos" : "vinphotos"}:${vin}`;
+    const index = calls.findLastIndex(
+      (call) =>
+        ["sendMessage", "sendRichMessage"].includes(call.method) &&
+        JSON.stringify(call.payload).includes(data),
+    );
+    if (index === -1) throw new Error("No photo offer was delivered");
+    return {
+      id: `photos-${index}`,
+      from: { id: 1, is_bot: false, first_name: "Buyer" },
+      chat_instance: "private",
+      message: {
+        message_id: index + 1,
+        date: 1,
+        chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+      },
+      data,
+    };
   }
   async function uploadedBytes(photo: unknown): Promise<unknown> {
     expect(photo).toBeInstanceOf(InputFile);
@@ -1019,9 +1045,16 @@ describe("grammY transport boundaries", () => {
       from: { id: 1, is_bot: false, first_name: "Buyer" },
       chat: { id: 1, type: "private" as const, first_name: "Buyer" },
     };
-    const vinWork = bot.handleUpdate({
+    await bot.handleUpdate({
       update_id: 1,
       message: { ...message, text: `/vin ${vin}` },
+    });
+    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
+      [],
+    );
+    const vinWork = bot.handleUpdate({
+      update_id: 2,
+      callback_query: photoCallback(calls, vin),
     });
     await photoEntered.promise;
     const archiveWork = bot.handleUpdate({
@@ -1037,6 +1070,10 @@ describe("grammY transport boundaries", () => {
     try {
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(calls.filter((call) => call.method === "answerCallbackQuery")).toEqual([
+        {
+          method: "answerCallbackQuery",
+          payload: { callback_query_id: photoCallback(calls, vin).id },
+        },
         {
           method: "answerCallbackQuery",
           payload: { callback_query_id: "archive-during-photo" },
@@ -1125,6 +1162,7 @@ describe("grammY transport boundaries", () => {
     });
     const firstBytes = firstPhotos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
     const secondBytes = new Uint8Array([255, 216, 99, 255, 217]);
+    const downloaded: string[] = [];
     const { bot, calls } = telegram(
       async () => ({
         vin,
@@ -1134,6 +1172,7 @@ describe("grammY transport boundaries", () => {
       }),
       archive,
       async (request) => {
+        downloaded.push(request.photo_url);
         if (request.vin !== vin || request.provider !== "copart" || request.auction !== "copart")
           throw new Error("Unknown archive photo");
         const index = firstPhotos.indexOf(request.photo_url);
@@ -1193,6 +1232,27 @@ describe("grammY transport boundaries", () => {
     });
     released.resolve(result);
     await work;
+    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
+      [],
+    );
+    expect(downloaded).toEqual([]);
+    const photos = photoCallback(calls, vin, true);
+    for (const forged of [
+      { ...photos, data: "vinarchivephotos:WBA51AG03NCK98884" },
+      { ...photos, message: { ...photos.message, message_id: 9999 } },
+      {
+        ...photos,
+        from: { ...photos.from, id: 2 },
+        message: { ...photos.message, chat: { ...photos.message.chat, id: 2 } },
+      },
+    ]) {
+      await bot.handleUpdate({ update_id: 4, callback_query: forged });
+    }
+    expect(downloaded).toEqual([]);
+    await bot.handleUpdate({
+      update_id: 4,
+      callback_query: photos,
+    });
     const albums = await Promise.all(
       calls
         .filter((call) => call.method === "sendMediaGroup")
@@ -1216,6 +1276,13 @@ describe("grammY transport boundaries", () => {
       .join("\n");
     expect(archiveText).toContain("2026-08-01");
     expect(await store.getProfile(1)).toBeNull();
+    expect(downloaded).toEqual([...firstPhotos, secondPhoto]);
+    await bot.handleUpdate({
+      update_id: 5,
+      message: { ...message, text: "/cancel" },
+    });
+    await bot.handleUpdate({ update_id: 6, callback_query: photos });
+    expect(downloaded).toEqual([...firstPhotos, secondPhoto]);
   });
 
   it.each(["missing", "expired"] as const)(
@@ -1278,6 +1345,10 @@ describe("grammY transport boundaries", () => {
             chat: { id: 1, type: "private", first_name: "Buyer" },
           },
         },
+      });
+      await bot.handleUpdate({
+        update_id: 2,
+        callback_query: photoCallback(calls, vin, true),
       });
       const fallback = calls
         .filter((call) => call.method === "sendMessage")
@@ -1365,6 +1436,13 @@ describe("grammY transport boundaries", () => {
             chat: { id: 1, type: "private", first_name: "Buyer" },
           },
         },
+      });
+      expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
+        [],
+      );
+      await bot.handleUpdate({
+        update_id: 2,
+        callback_query: photoCallback(calls, vin, true),
       });
       const delivered = calls.flatMap((call) =>
         call.method === "sendMediaGroup"
@@ -1599,7 +1677,7 @@ describe("grammY transport boundaries", () => {
       }
       if (mode === "rich") {
         expect(rendered('tg-button[type="url"], tg-button[type="web_app"]')).toHaveLength(0);
-        expect(rendered('tg-button[type="callback_data"]').attr("data")).toBe("vin-report-example");
+        expect(rendered('tg-button[data="vin-report-example"]')).toHaveLength(1);
         expect(sent.every((call) => call.payload.reply_markup === undefined)).toBe(true);
       } else {
         expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(
@@ -1686,6 +1764,26 @@ describe("grammY transport boundaries", () => {
         text: "/vin KMHDU41DBAU123456",
       },
     });
+    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
+      [],
+    );
+    const callback = photoCallback(calls, "KMHDU41DBAU123456");
+    for (const forged of [
+      { ...callback, data: "vinphotos:WBA51AG03NCK98884" },
+      { ...callback, message: { ...callback.message, message_id: 9999 } },
+      { ...callback, from: { ...callback.from, id: 2 } },
+      {
+        ...callback,
+        from: { ...callback.from, id: 2 },
+        message: { ...callback.message, chat: { ...callback.message.chat, id: 2 } },
+      },
+    ]) {
+      await bot.handleUpdate({ update_id: 2, callback_query: forged });
+    }
+    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
+      [],
+    );
+    await bot.handleUpdate({ update_id: 3, callback_query: callback });
     const albums = calls
       .filter((call) => call.method === "sendPhoto" || call.method === "sendMediaGroup")
       .map((call) =>
@@ -1695,9 +1793,31 @@ describe("grammY transport boundaries", () => {
       );
     expect(albums.map((album) => album.length)).toEqual([10, 10, 1, 2]);
     expect(albums.flat()).toEqual([...firstPhotos, ...secondPhotos]);
-    expect(calls.find((call) => call.method === "sendMessage")?.payload.text).toContain(
-      "KMHDU41DBAU123456",
-    );
+    const deliveredCount = calls.filter((call) =>
+      ["sendPhoto", "sendMediaGroup"].includes(call.method),
+    ).length;
+    await bot.handleUpdate({
+      update_id: 4,
+      message: {
+        ...callback.message,
+        from: callback.from,
+        text: "/vin KMHDU41DBAU123456",
+      },
+    });
+    await bot.handleUpdate({ update_id: 5, callback_query: callback });
+    expect(
+      calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method)),
+    ).toHaveLength(deliveredCount);
+    const current = photoCallback(calls, "KMHDU41DBAU123456");
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10 * 60 * 1000 + 1);
+    try {
+      await bot.handleUpdate({ update_id: 6, callback_query: current });
+      expect(
+        calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method)),
+      ).toHaveLength(deliveredCount);
+    } finally {
+      clock.mockRestore();
+    }
   });
   it("rejects a result for another VIN before attributing its photographs to the requested car", async () => {
     const otherVin = "WBA51AG03NCK98884";

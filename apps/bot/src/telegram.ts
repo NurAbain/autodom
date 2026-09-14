@@ -49,6 +49,7 @@ import {
   VIN_DISCLOSURE,
   VIN_HELP,
   VIN_NOT_ENABLED,
+  VIN_PHOTOS_LABEL,
   vinArchiveLotText,
   vinArchiveTime,
   vinResultActions,
@@ -98,7 +99,11 @@ export async function sendReplies(
   bot: Bot,
   chatId: number,
   replies: readonly Reply[],
-  options: { miniAppUrl?: string; fallbackReplyMarkup?: InlineKeyboardMarkup } = {},
+  options: {
+    miniAppUrl?: string;
+    fallbackReplyMarkup?: InlineKeyboardMarkup;
+    onSent?: (messageId: number) => void;
+  } = {},
 ): Promise<void> {
   for (const reply of replies) {
     const detailUrl =
@@ -156,7 +161,7 @@ export async function sendReplies(
       (!photoRejected || Buffer.byteLength(richHtml + photoNote, "utf8") + 7 <= 32768)
     ) {
       try {
-        await bot.api.sendRichMessage(
+        const sent = await bot.api.sendRichMessage(
           chatId,
           {
             html: (photoRejected ? `<p>${photoNote.trim()}</p>` : "") + richHtml,
@@ -164,6 +169,7 @@ export async function sendReplies(
           },
           hasKeyboard && !options.fallbackReplyMarkup ? { reply_markup: keyboard } : {},
         );
+        options.onSent?.(sent.message_id);
         continue;
       } catch (error) {
         // Older self-hosted Bot API versions may lack this method. Never turn an
@@ -183,11 +189,12 @@ export async function sendReplies(
     }
     const packedReplies = packReplies(photoNote + reply.text, [], reply.buttons);
     for (const [index, packed] of packedReplies.entries()) {
-      await bot.api.sendMessage(chatId, packed.text, {
+      const sent = await bot.api.sendMessage(chatId, packed.text, {
         parse_mode: "HTML",
         link_preview_options: { is_disabled: true },
         ...(index === packedReplies.length - 1 && hasKeyboard ? { reply_markup: keyboard } : {}),
       });
+      if (index === packedReplies.length - 1) options.onSent?.(sent.message_id);
     }
   }
 }
@@ -222,7 +229,6 @@ export function createTelegramBot(
   });
   const vinOnly = options.mode === "vin";
   const reportBotUrl = !vinOnly ? options.reportBotUrl : undefined;
-  const fullBotUrl = "https://t.me/autodomkgbot";
   // Register before payment handlers too: only a user's own private chat is reachable.
   bot.use(async (context, next) => {
     if (context.message && privateBuyer(context))
@@ -247,8 +253,37 @@ export function createTelegramBot(
     { nonce: string; candidates: readonly string[]; expiresAt: number }
   >();
   const photoTtlMs = 10 * 60 * 1000;
+  interface VehiclePhotoOffer {
+    result: VinCheckResult | VinArchiveResult;
+    expiresAt: number;
+    messageIds: Set<number>;
+  }
+  const vehiclePhotos = new Map<string, VehiclePhotoOffer>();
+  function clearVehiclePhotos(userId: number): void {
+    vehiclePhotos.delete(`${userId}:encar`);
+    vehiclePhotos.delete(`${userId}:archive`);
+  }
+  function rememberVehiclePhotos(
+    userId: number,
+    kind: "encar" | "archive",
+    result: VinCheckResult | VinArchiveResult,
+  ) {
+    const now = Date.now();
+    for (const [key, offer] of vehiclePhotos) {
+      if (offer.expiresAt <= now) vehiclePhotos.delete(key);
+    }
+    const key = `${userId}:${kind}`;
+    vehiclePhotos.delete(key);
+    if (vehiclePhotos.size >= 1000) {
+      const oldest = vehiclePhotos.keys().next().value;
+      if (oldest !== undefined) vehiclePhotos.delete(oldest);
+    }
+    const offer = { result, expiresAt: now + photoTtlMs, messageIds: new Set<number>() };
+    vehiclePhotos.set(key, offer);
+    return offer;
+  }
   const photoHelp = recognizePhoto
-    ? "Можно отправить фото VIN крупным планом, без бликов: все 17 символов должны быть видны. Фото обрабатывает GPU OCR-сервер Autodom; Telegram хранит отправленное сообщение. VIN не отправляем на проверку, пока вы не подтвердите распознанный номер."
+    ? "Отправьте фото VIN крупным планом, без бликов: все 17 символов должны быть видны. Перед проверкой вы сможете подтвердить или исправить распознанный номер."
     : "Распознавание фото не подключено. Введите VIN вручную: /vin VIN.";
   function rememberPhoto(userId: number, candidates: readonly string[]) {
     const now = Date.now();
@@ -273,39 +308,17 @@ export function createTelegramBot(
       .text("Проверить VIN / фото", "/vin")
       .row()
       .text("Мои заказы", "/orders")
-      .text("Пример PDF", "vin-report-example")
       .row()
-      .text("Поддержка", "/paysupport")
-      .row()
-      .url("Поиск и продажа авто — Автодом", fullBotUrl);
+      .text("Поддержка", "/paysupport");
   }
-  async function vinWelcome(chatId: number, otherGoal = false): Promise<void> {
-    if (otherGoal) {
-      await bot.api.sendMessage(
-        chatId,
-        "<b>Здесь — VIN и корейские отчёты.</b>\nПришлите 17 символов VIN или фото номера.\n\nПоиск, продажа, обмен и уведомления — в <b>@autodomkgbot</b>.",
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .url("Открыть Автодом", fullBotUrl)
-            .row()
-            .text("Проверить VIN", "/vin"),
-        },
-      );
-      return;
-    }
+  async function vinWelcome(chatId: number): Promise<void> {
     await bot.api.sendMessage(
       chatId,
       [
-        "<b>Проверка VIN и отчёты</b>",
-        "Пришлите <b>VIN из 17 символов</b> или фото номера. Бесплатно проверим доступные записи и характеристики.",
-        ...(options.payments?.reportSalesEnabled
-          ? [
-              `При наличии корейских данных — <b>полный PDF за ${paymentAmountText(options.payments.reportPrice)}</b>. Выдача вручную до <b>60 минут</b> после оплаты. Если отчёт выдать невозможно — <b>полный возврат</b>.`,
-            ]
-          : ["Покупка PDF сейчас недоступна. Бесплатная проверка и пример отчёта — ниже."]),
+        "<b>Бесплатная проверка VIN</b>",
+        "Пришлите <b>VIN из 17 символов</b> или фото номера. Покажем доступные бесплатные данные об автомобиле.",
         "Нет записей ≠ нет ДТП. Фото VIN проверяем только после вашего подтверждения.",
-        "VIN передаём подключённым источникам только для проверки. Платный отчёт — по вашему выбору.\n/terms — условия · /privacy — данные",
+        "/privacy — ваши данные · /orders — существующие заказы · /paysupport — помощь",
       ].join("\n\n"),
       { parse_mode: "HTML", reply_markup: vinMenu() },
     );
@@ -329,20 +342,22 @@ export function createTelegramBot(
         "<b>Ваши данные</b>",
         escapeHtml(VIN_DISCLOSURE),
         escapeHtml(photoHelp),
+        "Фото VIN обрабатывает сервер распознавания Autodom; Telegram хранит отправленное сообщение.",
         "Подтверждение фото действует 10 минут. Новый VIN, /start или /cancel сбрасывает его.",
         escapeHtml(PAYMENT_PRIVACY_NOTICE),
         ...(deleting
           ? [
-              "VIN не записывается в профиль поиска. Для удаления ранее сохранённых авто, фильтров и настроек откройте @autodomkgbot и выполните /delete. Заказы и платежи сохраняются; по ним напишите /paysupport.",
+              "VIN не записывается в профиль поиска. Для удаления ранее сохранённых авто, фильтров и настроек отправьте /paysupport Удалить мои сохранённые данные. Владелец уточнит запрос в этом чате. Ничего не удаляем без вашего подтверждения; заказы и платежи хранятся отдельно.",
             ]
           : [
-              "Сохранённые авто, фильтры и уведомления управляются в @autodomkgbot. /delete — как удалить эти данные.",
+              "Для запроса удаления ранее сохранённых авто, фильтров и настроек используйте /delete. Данные не удаляются автоматически.",
             ]),
       ].join("\n\n"),
       { parse_mode: "HTML", reply_markup: vinMenu() },
     );
   }
   async function vinHelp(userId: number, chatId: number): Promise<void> {
+    clearVehiclePhotos(userId);
     rememberPhoto(userId, []);
     await sendReplies(
       bot,
@@ -378,43 +393,44 @@ export function createTelegramBot(
   }
   async function checkVin(chatId: number, vin: string): Promise<void> {
     if (normalizeVin(vin) !== vin) return;
+    clearVehiclePhotos(chatId);
     const revision = options.payments?.forgetVinResult(chatId, vin);
     let keyboard: InlineKeyboardMarkup | undefined;
+    let purchase: InlineKeyboardMarkup["inline_keyboard"][number][number] | undefined;
+    let photoOffer: VehiclePhotoOffer | undefined;
     let presentation = { text: escapeHtml(VIN_NOT_ENABLED), richHtml: "" };
-    let result: VinCheckResult | undefined;
     if (options.checkVin) {
       try {
         const checked = await options.checkVin(vin);
         if (checked.vin !== vin) throw new Error("VIN result does not match the request");
         const actions = vinResultActions(checked);
-        result = checked;
+        if (actions.photos.length) photoOffer = rememberVehiclePhotos(chatId, "encar", checked);
         if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
         if (hasKoreanVinRecord(checked)) {
           const price = options.payments?.reportPrice ?? {
             amount: VIN_REPORT_FINIK_MINOR,
             currency: "KGS" as const,
           };
-          const purchase = reportBotUrl
+          purchase = reportBotUrl
             ? {
-                text: `КУПИТЬ полный PDF · ${paymentAmountText(price)}`,
+                text: `Полный PDF · ${paymentAmountText(price)}`,
                 url: `${reportBotUrl}?start=vin_${vin}`,
                 style: "primary" as const,
               }
             : options.payments?.reportSalesEnabled
               ? {
-                  text: `КУПИТЬ полный PDF · ${paymentAmountText(price)}`,
+                  text: `Полный PDF · ${paymentAmountText(price)}`,
                   callback_data: `vin-report-buy:${vin}`,
                   style: "primary" as const,
                 }
               : undefined;
-          if (purchase) {
-            actions.report.unshift(purchase);
-            actions.keyboard.inline_keyboard.unshift([purchase]);
-          }
         }
         presentation = vinResultPresentation(checked, actions);
         keyboard = actions.keyboard;
       } catch {
+        clearVehiclePhotos(chatId);
+        photoOffer = undefined;
+        purchase = undefined;
         presentation.text =
           "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
       }
@@ -429,9 +445,20 @@ export function createTelegramBot(
           buttons: [],
         },
       ],
-      keyboard ? { fallbackReplyMarkup: keyboard } : {},
+      {
+        ...(keyboard ? { fallbackReplyMarkup: keyboard } : {}),
+        ...(photoOffer ? { onSent: (id: number) => photoOffer?.messageIds.add(id) } : {}),
+      },
     );
-    if (!result) return;
+    if (purchase)
+      await bot.api.sendMessage(
+        chatId,
+        "Если нужен полный отчёт, его можно заказать отдельно. Это необязательно; бесплатные данные — выше.",
+        { reply_markup: { inline_keyboard: [[purchase]] } },
+      );
+  }
+  async function sendEncarPhotos(chatId: number, result: VinCheckResult): Promise<void> {
+    const vin = result.vin;
     const sentListings = new Set<string>();
     for (const listing of confirmedEncarListings(result).slice(0, ENCAR_HISTORY_MAX_LISTINGS)) {
       if (sentListings.has(listing.id)) continue;
@@ -457,6 +484,7 @@ export function createTelegramBot(
     }
   }
   async function checkVinArchive(chatId: number, vin: string): Promise<void> {
+    vehiclePhotos.delete(`${chatId}:archive`);
     let result: VinArchiveResult;
     try {
       result = options.checkVinArchive
@@ -506,7 +534,6 @@ export function createTelegramBot(
         options,
       );
     }
-    let photoSignal: AbortSignal | undefined;
     for (const group of groupVinArchiveLots(result)) {
       const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
       const { provider, lot } = group.photo_source;
@@ -533,6 +560,38 @@ export function createTelegramBot(
         ),
         options,
       );
+    }
+    if (
+      groupVinArchiveLots(result).some(({ photo_source: { provider, lot } }) =>
+        lot.photos.some((photo) =>
+          isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
+        ),
+      )
+    ) {
+      const offer = rememberVehiclePhotos(chatId, "archive", result);
+      const sent = await bot.api.sendMessage(
+        chatId,
+        "Найдены архивные фото автомобиля. Отправим их, только если вы нажмёте кнопку.",
+        {
+          reply_markup: new InlineKeyboard().text(VIN_PHOTOS_LABEL, `vinarchivephotos:${vin}`),
+        },
+      );
+      offer.messageIds.add(sent.message_id);
+    }
+  }
+  async function sendArchivePhotos(chatId: number, result: VinArchiveResult): Promise<void> {
+    const vin = result.vin;
+    let photoSignal: AbortSignal | undefined;
+    for (const group of groupVinArchiveLots(result)) {
+      const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
+      const { provider, lot } = group.photo_source;
+      const photos = [
+        ...new Set(
+          lot.photos.filter((photo) =>
+            isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
+          ),
+        ),
+      ];
       for (let offset = 0; offset < photos.length; offset += 10) {
         const batch = photos.slice(offset, offset + 10);
         const media: InputFile[] = [];
@@ -730,6 +789,7 @@ export function createTelegramBot(
   });
   bot.command("start", async (context, next) => {
     if (!privateBuyer(context)) return;
+    clearVehiclePhotos(context.from!.id);
     if (context.match.startsWith("vin_")) {
       await store.withLock(`autodom:user:${context.from!.id}`, async () => {
         const vin = normalizeVin(context.match.slice(4));
@@ -867,7 +927,7 @@ export function createTelegramBot(
       "<b>Мои заказы</b>\n\n" +
         (orders.length
           ? "Оплата и выполнение услуги — разные статусы. Состав, продавец, исполнитель и условия доступны в приложении."
-          : "Заказов пока нет. Пришлите VIN: после корейского результата можно купить PDF. Оплата — только после вашего согласия с условиями."),
+          : "Заказов пока нет. Для бесплатной проверки пришлите VIN из 17 символов или фото номера."),
       orders
         .slice(0, 10)
         .map(
@@ -913,6 +973,7 @@ export function createTelegramBot(
       }
       if (context.message.photo) {
         pendingPhotos.delete(userId);
+        clearVehiclePhotos(userId);
         if (!vinOnly) await conversation.handle(userId, chatId, "/vin");
         if (!recognizePhoto) {
           await context.reply(photoHelp);
@@ -926,7 +987,7 @@ export function createTelegramBot(
           return;
         }
         await context.reply(
-          "Распознаю фото на GPU OCR-сервере Autodom. Проверка VIN начнётся только после вашего подтверждения.",
+          "Распознаю VIN на фото. Проверка начнётся только после вашего подтверждения.",
         );
         let candidates: readonly string[];
         try {
@@ -990,6 +1051,7 @@ export function createTelegramBot(
         return;
       }
       if (text.startsWith("/")) pendingPhotos.delete(userId);
+      if (/^\/(?:start|cancel)(?:@\w+)?(?:\s|$)/iu.test(text)) clearVehiclePhotos(userId);
       const pending = pendingPhotos.get(userId);
       if (pending && pending.expiresAt > Date.now()) {
         await context.reply(
@@ -1002,7 +1064,7 @@ export function createTelegramBot(
         const command = /^\/([a-z]+)(?:@\w+)?(?:\s|$)/iu.exec(text)?.[1]?.toLowerCase();
         if (command === "privacy" || command === "delete")
           await vinPrivacy(chatId, command === "delete");
-        else await vinWelcome(chatId, !["help", "cancel", "start"].includes(command ?? ""));
+        else await vinWelcome(chatId);
         return;
       }
       const replies = await conversation.handle(userId, chatId, text);
@@ -1073,6 +1135,33 @@ export function createTelegramBot(
         await sendReportExample(chatId);
         return;
       }
+      if (data.startsWith("vinphotos:") || data.startsWith("vinarchivephotos:")) {
+        const archive = data.startsWith("vinarchivephotos:");
+        const value = data.slice(archive ? "vinarchivephotos:".length : "vinphotos:".length);
+        const vin = normalizeVin(value);
+        const key = `${userId}:${archive ? "archive" : "encar"}`;
+        const offer = vehiclePhotos.get(key);
+        const messageId = callback.message?.message_id;
+        if (
+          !vin ||
+          vin !== value ||
+          !offer ||
+          offer.result.vin !== vin ||
+          offer.expiresAt <= Date.now() ||
+          messageId === undefined ||
+          !offer.messageIds.has(messageId)
+        ) {
+          if (offer && offer.expiresAt <= Date.now()) vehiclePhotos.delete(key);
+          await context.reply(
+            "Эта кнопка фото устарела или относится к другой проверке. Проверьте VIN заново; для архивных фото повторите поиск архива.",
+          );
+          return;
+        }
+        if (archive && "coverage" in offer.result) await sendArchivePhotos(chatId, offer.result);
+        else if (!archive && !("coverage" in offer.result))
+          await sendEncarPhotos(chatId, offer.result);
+        return;
+      }
       if (data.startsWith("vinarchive:")) {
         const value = data.slice("vinarchive:".length);
         const vin = normalizeVin(value);
@@ -1113,6 +1202,7 @@ export function createTelegramBot(
         return;
       }
       pendingPhotos.delete(userId);
+      if (data === "/start" || data === "/cancel") clearVehiclePhotos(userId);
       if (data === "/vin" || data.startsWith("/vin ")) {
         if (!vinOnly) await conversation.handle(userId, chatId, "/vin");
         const vin = normalizeVin(data.slice(4));
@@ -1122,7 +1212,10 @@ export function createTelegramBot(
       }
       if (vinOnly) {
         if (data === "/privacy" || data === "/delete") await vinPrivacy(chatId, data === "/delete");
-        else await vinWelcome(chatId, data !== "/start" && data !== "/cancel" && data !== "/help");
+        else {
+          clearVehiclePhotos(userId);
+          await vinWelcome(chatId);
+        }
         return;
       }
       const replies = await conversation.handle(userId, chatId, data);
@@ -1132,6 +1225,7 @@ export function createTelegramBot(
   return Object.assign(bot, {
     clearVinInput(userId: number): void {
       pendingPhotos.delete(userId);
+      clearVehiclePhotos(userId);
     },
   });
 }
@@ -1155,7 +1249,7 @@ export async function configureTelegramBot(
     await bot.api.setMyCommands(
       options.mode === "vin"
         ? [
-            { command: "start", description: "Проверить VIN и заказать корейский PDF" },
+            { command: "start", description: "Бесплатная проверка VIN" },
             { command: "vin", description: "Новая проверка VIN или фото номера" },
             { command: "orders", description: "Мои PDF, оплата и статус выдачи" },
             { command: "sample", description: "Пример корейского PDF — не ваш отчёт" },

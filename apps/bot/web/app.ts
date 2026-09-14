@@ -32,6 +32,7 @@ import {
   VIN_DISCLOSURE,
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
+  VIN_PHOTOS_LABEL,
   VIN_SOURCE_NAMES,
   vinArchiveLotText,
   vinArchiveTime,
@@ -98,7 +99,7 @@ async function loadConfig(): Promise<void> {
   config = { mode: value.mode, ...(reportBotUrl ? { reportBotUrl } : {}) };
   document.documentElement.dataset.botMode = config.mode;
   document.title =
-    config.mode === "vin" ? "АвтоКГ — VIN и корейские отчёты" : "Автодом — автомобили";
+    config.mode === "vin" ? "АвтоКГ — бесплатная проверка VIN" : "Автодом — автомобили";
 }
 
 function cancelRequests(): void {
@@ -394,12 +395,7 @@ function showHome(): void {
   const goals = element("nav", "goals");
   goals.setAttribute("aria-label", "Выберите цель");
   for (const [view, number, title, description] of [
-    [
-      "vin",
-      "01",
-      "Проверить VIN",
-      "Бесплатная проверка корейских источников. VIN или фото в чате.",
-    ],
+    ["vin", "01", "Проверить VIN", "Бесплатные данные об автомобиле. VIN или фото в чате."],
     [
       "sell",
       "02",
@@ -445,16 +441,16 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
   const notice = element("p", "footnote");
   notice.setAttribute("role", "status");
   panel.append(
-    element("p", "eyebrow", "Корейская история · PDF"),
+    element("p", "muted", "Дополнительно · платный PDF"),
     element("h2", "", preview.title),
   );
   if (config?.reportBotUrl) {
-    actions.append(reportBotLink(`vin_${result.vin}`, "Купить отчёт в VIN-боте"));
+    actions.append(reportBotLink(`vin_${result.vin}`, "Условия отчёта в VIN-боте"));
     notice.textContent = "Цена и доступность — в VIN-боте. Оплата, PDF и поддержка остаются там.";
   } else if (result.reportSalesEnabled && result.reportPrice) {
     const price = paymentAmountText(result.reportPrice);
     panel.append(element("p", "report-price", price));
-    const buy = button(`КУПИТЬ ОТЧЁТ · ${price}`, () => {
+    const buy = button(`Заказать отчёт · ${price}`, () => {
       if (buy.disabled) return;
       buy.disabled = true;
       buy.textContent = "Открываем заказ…";
@@ -469,7 +465,7 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
         .finally(() => {
           if (started === generation && panel.isConnected) {
             buy.disabled = false;
-            buy.textContent = `КУПИТЬ ОТЧЁТ · ${price}`;
+            buy.textContent = `Заказать отчёт · ${price}`;
           }
         });
     });
@@ -486,8 +482,6 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
     button("Посмотреть образец PDF", () => navigate("report-example"), "button button-quiet"),
     element("p", "footnote", preview.limitations),
   );
-  if (result.carhistory.status === "available")
-    panel.append(element("p", "vin-observation", vinSourceText("carhistory", result)));
   return panel;
 }
 
@@ -776,6 +770,7 @@ function gallery(
   title: string,
   photoUrls: readonly string[],
   archive?: { request: Omit<VinArchivePhotoRequest, "photo_url">; signal: AbortSignal },
+  signal: AbortSignal | undefined = archive?.signal,
 ): HTMLElement {
   const section = element("section", "gallery");
   section.setAttribute("aria-label", `Фотографии: ${title}`);
@@ -795,11 +790,12 @@ function gallery(
     if (blobUrl) URL.revokeObjectURL(blobUrl);
     blobUrl = undefined;
   };
-  archive?.signal.addEventListener(
+  signal?.addEventListener(
     "abort",
     () => {
       observer?.disconnect();
       releasePhoto();
+      for (const image of section.querySelectorAll("img")) image.removeAttribute("src");
     },
     { once: true },
   );
@@ -832,7 +828,7 @@ function gallery(
   }
   function renderPhoto(): void {
     releasePhoto();
-    if (archive?.signal.aborted) return;
+    if (signal?.aborted) return;
     const index = selected;
     const imageUrl = photos[index];
     if (imageUrl === undefined) throw new RangeError("Photo index is out of bounds");
@@ -923,7 +919,7 @@ function gallery(
   }
   if (photoNotice && photoLink) section.append(photoNotice, photoLink);
   renderPhoto();
-  if (archive && !archive.signal.aborted) {
+  if (archive && !signal?.aborted) {
     if (typeof IntersectionObserver === "undefined") {
       visible = true;
       queueMicrotask(renderPhoto);
@@ -949,7 +945,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element(
       "p",
       "muted",
-      "Сначала проверим корейские источники. Покажем найденные записи и доступные характеристики.",
+      "Введите VIN — бесплатно покажем найденные сведения об автомобиле и доступную историю.",
     ),
   );
   if (car) {
@@ -970,7 +966,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   }
   const disclosure = element("details", "disclosure");
   disclosure.append(
-    element("summary", "", "Какие источники проверяем и куда передаём VIN"),
+    element("summary", "", "Конфиденциальность проверки"),
     element("p", "footnote", VIN_DISCLOSURE),
   );
   const form = element("form", "vin-form");
@@ -1071,6 +1067,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         element("p", "vin", `VIN ${result.vin}`),
         element("p", "footnote", `Ответ получен: ${vinArchiveTime(result.checked_at)}`),
       ];
+      const revealPhotos: Array<() => void> = [];
       for (const source of result.sources) {
         const section = element("section", "vin-source");
         section.dataset.status = source.status;
@@ -1137,6 +1134,14 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             once: true,
           });
           const showGallery = (index: number): void => {
+            if (
+              started !== generation ||
+              revision !== archiveRevision ||
+              controller.signal.aborted ||
+              classifiedVin !== vin ||
+              normalizeVin(input.value) !== vin
+            )
+              return;
             galleryController?.abort();
             galleryController = new AbortController();
             if (controller.signal.aborted) galleryController.abort();
@@ -1171,19 +1176,41 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               choices.push(choice);
               controls.append(choice);
             });
+            controls.hidden = true;
             lotSection.append(controls);
           }
-          lotSection.append(galleryHost);
-          showGallery(
-            Math.max(
-              0,
-              galleries.findIndex(
-                (candidate) => candidate.provider === group.photo_source.provider,
+          lotSection.append(element("p", "footnote", "Найдены архивные фотографии."), galleryHost);
+          revealPhotos.push(() => {
+            controls.hidden = false;
+            showGallery(
+              Math.max(
+                0,
+                galleries.findIndex(
+                  (candidate) => candidate.provider === group.photo_source.provider,
+                ),
               ),
-            ),
-          );
+            );
+          });
         }
         sections.push(lotSection);
+      }
+      if (revealPhotos.length) {
+        const getPhotos = button(VIN_PHOTOS_LABEL, () => {
+          if (
+            getPhotos.disabled ||
+            !getPhotos.isConnected ||
+            started !== generation ||
+            revision !== archiveRevision ||
+            controller.signal.aborted ||
+            classifiedVin !== vin ||
+            normalizeVin(input.value) !== vin
+          )
+            return;
+          getPhotos.disabled = true;
+          for (const reveal of revealPhotos) reveal();
+          getPhotos.remove();
+        });
+        sections.push(getPhotos);
       }
       archiveResults.replaceChildren(...sections);
     } catch (error) {
@@ -1207,6 +1234,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   }
   async function lookup(): Promise<void> {
     if (started !== generation || submit.disabled) return;
+    lookupController?.abort();
+    lookupController = undefined;
     resetFollowUp();
     const vin = normalizeVin(input.value);
     if (!vin) {
@@ -1224,13 +1253,14 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     input.removeAttribute("aria-invalid");
     results.setAttribute("aria-busy", "true");
     const revision = ++lookupRevision;
-    lookupController?.abort();
     const controller = new AbortController();
     lookupController = controller;
+    pending.add(controller);
+    controller.signal.addEventListener("abort", () => pending.delete(controller), { once: true });
     input.value = vin;
     submit.disabled = true;
     submit.textContent = "Проверяем…";
-    results.replaceChildren(element("p", "", `Проверяем VIN ${vin} у подключённых провайдеров…`));
+    results.replaceChildren(element("p", "", `Проверяем VIN ${vin}…`));
     try {
       const result = await request<MiniAppVinResult>(
         "/miniapp/api/vin",
@@ -1253,7 +1283,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       disclosure.hidden = korean;
       const notice = vinResultNotice(result);
       if (notice) results.append(element("p", "notice", notice));
-      if (korean) results.append(premiumPanel(result));
+      const revealPhotos: Array<() => void> = [];
       for (const provider of vinVisibleProviders(result)) {
         if (provider === "carhistory") continue;
         const observation = result[provider];
@@ -1328,13 +1358,29 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               fact.append(element("dt", "", label), element("dd", "", value));
               facts.append(fact);
             }
-            advertisement.append(
-              facts,
-              gallery(
-                `Объявление №${listing.id} · ${listing.model ?? listing.vin}`,
-                listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)),
-              ),
-            );
+            advertisement.append(facts);
+            const photoUrls = [
+              ...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id))),
+            ];
+            if (photoUrls.length) {
+              advertisement.append(
+                element("p", "footnote", `Найдены фотографии: ${photoUrls.length}.`),
+              );
+              revealPhotos.push(() => {
+                advertisement.append(
+                  gallery(
+                    `Объявление №${listing.id} · ${listing.model ?? listing.vin}`,
+                    photoUrls,
+                    undefined,
+                    controller.signal,
+                  ),
+                );
+              });
+            } else {
+              advertisement.append(
+                element("p", "footnote", "Фотографии не предоставлены источником."),
+              );
+            }
             section.append(advertisement);
           }
           section.append(
@@ -1351,6 +1397,26 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         }
         results.append(section);
       }
+      if (result.carhistory.status === "available")
+        results.append(element("p", "vin-observation", vinSourceText("carhistory", result)));
+      if (revealPhotos.length) {
+        const getPhotos = button(VIN_PHOTOS_LABEL, () => {
+          if (
+            getPhotos.disabled ||
+            !getPhotos.isConnected ||
+            started !== generation ||
+            revision !== lookupRevision ||
+            controller.signal.aborted ||
+            normalizeVin(input.value) !== vin
+          )
+            return;
+          getPhotos.disabled = true;
+          for (const reveal of revealPhotos) reveal();
+          getPhotos.remove();
+        });
+        results.append(getPhotos);
+      }
+      if (korean) results.append(premiumPanel(result));
       if (!korean) {
         classifiedVin = vin;
         const url = vinGoogleSearchUrl(vin);
@@ -1371,7 +1437,6 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       );
     } finally {
       if (started === generation && revision === lookupRevision) {
-        lookupController = undefined;
         submit.disabled = false;
         submit.textContent = "Проверить VIN";
         results.setAttribute("aria-busy", "false");
