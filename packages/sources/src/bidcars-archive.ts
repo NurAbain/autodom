@@ -26,6 +26,7 @@ const ORIGIN = "https://bid.cars";
 const MAX_RECORDS = 100;
 const MAX_PAGES = 5;
 const MAX_IMAGES = 100;
+const MAX_RELATED_LOTS = 5;
 const MONTHS = [
   "January",
   "February",
@@ -46,10 +47,12 @@ interface Candidate {
   id: string;
   url: string;
   rows: JsonObject[];
+  detail?: Detail;
 }
 interface Detail {
-  lot: VinArchiveLot;
+  lot: VinArchiveLot | null;
   partial: boolean;
+  related: string[];
 }
 export interface BidCarsArchiveOptions {
   routes: readonly ProxyRoute[];
@@ -109,7 +112,7 @@ function declaration(text: string, name: string): string {
   return values[0]!;
 }
 
-function parseDetail(text: string, candidate: Candidate, vin: string): Detail | null {
+function parseDetail(text: string, candidate: Candidate, vin: string): Detail {
   if (!/<html(?:\s|>)/iu.test(text) || !/<\/html\s*>/iu.test(text))
     throw new SourceError("Incomplete Bid.Cars detail");
   const $ = load(text);
@@ -172,8 +175,8 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail | 
   for (const node of $(".copy-vin").toArray())
     if ($(node).text().replace(/\s+/gu, "") !== vin)
       throw new SourceError("Bid.Cars displayed VIN mismatch");
-  if (archived === "0") return null;
   if (
+    archived === "1" &&
     !$("#archieved-message")
       .text()
       .replace(/\s+/gu, " ")
@@ -193,6 +196,7 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail | 
   const usd = currency === "USD" || (currency === undefined && / USD$/u.test(visiblePrice));
   let partial = false;
   const events: VinArchiveEvent[] = [];
+  const related = new Set<string>();
   const history = $(".sales-history-table");
   const headers = history
     .find("thead th")
@@ -213,21 +217,43 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail | 
       const cell = (index: number) => cells.eq(index).text().replace(/\s+/gu, " ").trim();
       const date = calendar(cell(1));
       const link = cells.eq(2).find("a").attr("href");
-      if (
-        cells.length !== 7 ||
-        cell(0) !== auction ||
-        cell(2) !== lot ||
-        (link !== `${ORIGIN}/en/lot/${lot}` && link !== candidate.url) ||
-        !date
-      ) {
+      const key = cell(2);
+      const status = cell(5).toLowerCase();
+      if (cells.length !== 7 || !date) {
         partial = true;
         continue;
       }
-      const status = cell(5).toLowerCase();
+      if (key !== lot) {
+        partial = true;
+        const match = /^([01])-([1-9][0-9]{0,11})$/u.exec(key);
+        if (
+          match?.[2] &&
+          cell(0) === (match[1] === "1" ? "Copart" : "IAAI") &&
+          cells.eq(2).find("a").length === 1 &&
+          typeof link === "string" &&
+          (link === `${ORIGIN}/en/lot/${key}` ||
+            isVinArchiveLotUrl(
+              link,
+              "bidcars",
+              match[1] === "1" ? "copart" : "iaai",
+              match[2],
+              vin,
+            )) &&
+          ["sold", "not sold", "ended", "auction ended"].includes(status) &&
+          related.size < MAX_RELATED_LOTS
+        )
+          related.add(key);
+        continue;
+      }
+      if (cell(0) !== auction || (link !== `${ORIGIN}/en/lot/${lot}` && link !== candidate.url)) {
+        partial = true;
+        continue;
+      }
       if (!["sold", "not sold", "ended", "auction ended"].includes(status)) {
         partial = true;
         continue;
       }
+      if (archived === "0") continue;
       events.push({
         status: status === "sold" ? "sold" : "ended",
         auction_at: null,
@@ -236,6 +262,7 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail | 
       });
     }
   }
+  if (archived === "0") return { lot: null, partial, related: [...related] };
   for (const row of candidate.rows) {
     const date = calendar(
       row.prebid_close_time_lang && typeof row.prebid_close_time_lang === "object"
@@ -341,6 +368,7 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail | 
       photos_complete: complete,
     },
     partial,
+    related: [...related],
   };
 }
 
@@ -518,40 +546,46 @@ export class BidCarsArchive {
     }
   }
 
+  async #discover(
+    vin: string,
+    signal: AbortSignal,
+    query = vin,
+    archived = true,
+  ): Promise<Candidate | undefined> {
+    const url = `${ORIGIN}/app/search/en/vin-lot/${query}/${archived}`;
+    const body = object(JSON.parse(await this.#text(url, signal)));
+    if (
+      !Number.isSafeInteger(body.results) ||
+      Number(body.results) < 0 ||
+      typeof body.url !== "string"
+    )
+      throw new SourceError("Bid.Cars VIN discovery schema changed");
+    const match = /^https:\/\/bid\.cars\/en\/lot\/([01])-([1-9][0-9]{0,11})\//u.exec(body.url);
+    if (Number(body.results) > 0 && match) {
+      const auction = match[1] === "1" ? "copart" : "iaai";
+      if (
+        !isVinArchiveLotUrl(body.url, "bidcars", auction, match[2]!, vin) ||
+        new URL(body.url).href !== body.url ||
+        (query !== vin && query !== `${match[1]}-${match[2]}`)
+      )
+        throw new SourceError("Bid.Cars VIN discovery identity mismatch");
+      return { auction, id: match[2]!, url: body.url, rows: [] };
+    }
+    if (body.url !== `${ORIGIN}/en/search/archived/results?search-type=typing&query=${query}`)
+      throw new SourceError("Bid.Cars VIN discovery URL mismatch");
+    return undefined;
+  }
+
   async #lookup(vin: string, signal: AbortSignal): Promise<VinArchiveObservation> {
     const lots: VinArchiveLot[] = [];
     let partial = false;
     const base = `${ORIGIN}/app/search/archived/request?search-type=typing&query=${vin}`;
     const candidates = new Map<string, Candidate>();
-    const discovered = `${ORIGIN}/app/search/en/vin-lot/${vin}/true`;
     try {
-      // This is exact-VIN discovery, not archive proof: active details are explicitly excluded.
-      const body = object(JSON.parse(await this.#text(discovered, signal)));
-      if (
-        !Number.isSafeInteger(body.results) ||
-        Number(body.results) < 0 ||
-        typeof body.url !== "string"
-      )
-        throw new SourceError("Bid.Cars VIN discovery schema changed");
-      const match = /^https:\/\/bid\.cars\/en\/lot\/([01])-([1-9][0-9]{0,11})\//u.exec(body.url);
-      if (Number(body.results) > 0 && match) {
-        const auction = match[1] === "1" ? "copart" : "iaai";
-        if (
-          !isVinArchiveLotUrl(body.url, "bidcars", auction, match[2]!, vin) ||
-          new URL(body.url).href !== body.url
-        )
-          throw new SourceError("Bid.Cars VIN discovery identity mismatch");
-        candidates.set(`${match[1]}-${match[2]}`, {
-          auction,
-          id: match[2]!,
-          url: body.url,
-          rows: [],
-        });
-      } else if (
-        body.url !== `${ORIGIN}/en/search/archived/results?search-type=typing&query=${vin}`
-      ) {
-        throw new SourceError("Bid.Cars VIN discovery URL mismatch");
-      }
+      // Discovery is not archive proof: every candidate still needs a verified detail.
+      const candidate = await this.#discover(vin, signal);
+      if (candidate)
+        candidates.set(`${candidate.auction === "copart" ? "1" : "0"}-${candidate.id}`, candidate);
     } catch {
       partial = true;
     }
@@ -611,10 +645,31 @@ export class BidCarsArchive {
     } catch {
       partial = true;
     }
+    if (partial && !candidates.size) {
+      try {
+        // Anonymous archive pagination can be empty while a current VIN page links old lots.
+        const current = await this.#discover(vin, signal, vin, false);
+        if (current) {
+          current.detail = parseDetail(await this.#text(current.url, signal), current, vin);
+          candidates.set(`${current.auction === "copart" ? "1" : "0"}-${current.id}`, current);
+          for (const key of current.detail.related) {
+            try {
+              const candidate = await this.#discover(vin, signal, key);
+              if (candidate) candidates.set(key, candidate);
+            } catch {
+              partial = true;
+            }
+          }
+        }
+      } catch {
+        partial = true;
+      }
+    }
     for (const candidate of candidates.values()) {
       try {
-        const detail = parseDetail(await this.#text(candidate.url, signal), candidate, vin);
-        if (!detail) continue;
+        const detail =
+          candidate.detail ?? parseDetail(await this.#text(candidate.url, signal), candidate, vin);
+        if (!detail.lot) continue;
         partial ||= detail.partial;
         const lot = detail.lot;
         // Preserve identity and event evidence even if cancellation or every image fails.

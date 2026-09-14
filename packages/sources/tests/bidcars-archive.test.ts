@@ -171,6 +171,102 @@ describe("Bid.Cars photo downloads", () => {
 });
 
 describe("Bid.Cars exact VIN archive", () => {
+  it("recovers related archives from verified current history without publishing the current lot", async () => {
+    const currentLot = LOT.replace("0-45397077", "0-45397079");
+    const copartLot = LOT.replace("0-45397077", "1-59622426");
+    const history = [
+      ["IAAI", "0-45397077"],
+      ["Copart", "1-59622426"],
+    ]
+      .map(
+        ([auction, id]) =>
+          `<tr><th>${auction}</th><td>2026-08-31</td><td><a href="https://bid.cars/en/lot/${id}">${id}</a></td><td>---</td><td>100588 mi</td><td>Sold</td><td>Unknown</td></tr>`,
+      )
+      .join("");
+    const current = html
+      .replaceAll("45397077", "45397079")
+      .replace("var isArchived = 1;", "var isArchived = 0;")
+      .replace("<tbody>", `<tbody>${history}`);
+    const copart = html
+      .replaceAll("0-45397077", "1-59622426")
+      .replaceAll("IAAI", "Copart")
+      .replace(">45397077</h2>", ">59622426</h2>")
+      .replace('class="lot-drop">0-', 'class="lot-drop">1-');
+    const { service } = setup({
+      fetch: async (url) => {
+        if (url.href === DISCOVER)
+          return new Response(
+            JSON.stringify({
+              results: 3,
+              url: `https://bid.cars/en/search/archived/results?search-type=typing&query=${VIN}`,
+            }),
+          );
+        if (url.href === SEARCH)
+          return new Response(JSON.stringify({ ...rows(), data: [], per_page: 1 }));
+        if (url.href === DISCOVER.replace("/true", "/false"))
+          return new Response(JSON.stringify({ results: 1, url: currentLot }));
+        if (url.href === currentLot) return new Response(current);
+        if (url.pathname === "/app/search/en/vin-lot/0-45397077/true")
+          return new Response(JSON.stringify({ results: 1, url: LOT }));
+        if (url.pathname === "/app/search/en/vin-lot/1-59622426/true")
+          return new Response(JSON.stringify({ results: 1, url: copartLot }));
+        if (url.href === LOT) return new Response(html);
+        if (url.href === copartLot) return new Response(copart);
+        if (url.origin === "https://mercury.bid.cars")
+          return new Response(Buffer.from([255, 216, 255, 224]), { status: 206 });
+        throw new Error(`Unexpected request ${url.href}`);
+      },
+    });
+    const result = await service.check(VIN, new AbortController().signal);
+    expect(result).toMatchObject({
+      status: "available",
+      partial: true,
+      lots: [
+        { auction: "iaai", lot_id: "45397077", photos_complete: true },
+        { auction: "copart", lot_id: "59622426", photos_complete: true },
+      ],
+    });
+    expect(result.lots.map((lot) => lot.photos.length)).toEqual([16, 16]);
+    expect(result.lots.every((lot) => lot.events.some((event) => event.status === "sold"))).toBe(
+      true,
+    );
+  });
+  it("does not discover history from a current page with a conflicting VIN", async () => {
+    const current = html
+      .replace("var isArchived = 1;", "var isArchived = 0;")
+      .replace(
+        '"vehicleIdentificationNumber": "1FTFW1ED9NFB06106"',
+        '"vehicleIdentificationNumber": "1FTFW1ED9NFB06107"',
+      )
+      .replace(
+        "<tbody>",
+        '<tbody><tr><th>Copart</th><td>2026-08-31</td><td><a href="https://bid.cars/en/lot/1-59622426">1-59622426</a></td><td>---</td><td>100588 mi</td><td>Sold</td><td>Unknown</td></tr>',
+      );
+    const { service, requests } = setup({
+      fetch: async (url) => {
+        if (url.href === DISCOVER)
+          return new Response(
+            JSON.stringify({
+              results: 3,
+              url: `https://bid.cars/en/search/archived/results?search-type=typing&query=${VIN}`,
+            }),
+          );
+        if (url.href === SEARCH)
+          return new Response(JSON.stringify({ ...rows(), data: [], per_page: 1 }));
+        if (url.href === DISCOVER.replace("/true", "/false"))
+          return new Response(JSON.stringify({ results: 1, url: LOT }));
+        if (url.href === LOT) return new Response(current);
+        throw new Error(`Unverified history must not be requested: ${url.href}`);
+      },
+    });
+    expect(await service.check(VIN, new AbortController().signal)).toMatchObject({
+      status: "unavailable",
+      partial: true,
+      lots: [],
+    });
+    expect(requests.some((url) => url.includes("/vin-lot/1-59622426/"))).toBe(false);
+  });
+
   it("recovers all three native sales events without duplicating the gallery or fabricating timestamps", async () => {
     const search = rows();
     search.data.push({
