@@ -61,7 +61,6 @@ const root = document.getElementById("app")!;
 type View =
   | "home"
   | "vin"
-  | "carfax"
   | "buy"
   | "sell"
   | "report-example"
@@ -130,7 +129,6 @@ function navigate(view: View, targetId?: string): void {
   url.searchParams.delete("view");
   url.searchParams.delete("order_id");
   url.searchParams.delete("vin");
-  url.searchParams.delete("reportKind");
   if (view === "car" && targetId) url.searchParams.set("car", targetId);
   else if (view !== "home") url.searchParams.set("view", view);
   if (view === "orders" && targetId) url.searchParams.set("order_id", targetId);
@@ -434,7 +432,6 @@ function showHome(): void {
       "footnote home-note",
       "Выберите только то, что нужно сейчас. Для проверки VIN не нужна анкета покупателя.",
     ),
-    button("Заказать CARFAX · 499 сом", () => navigate("carfax"), "button button-quiet"),
     button("Мои заказы и оплата услуг", () => navigate("orders"), "back-link"),
   );
 }
@@ -453,42 +450,37 @@ function samplePdfLink(reportKind: VinReportKind = "korea"): HTMLAnchorElement {
 }
 
 function premiumPanel(
-  result: Pick<
-    MiniAppVinResult,
-    "vin" | "reportSalesEnabled" | "reportPrice" | "carfaxReportSalesEnabled" | "carfaxReportPrice"
-  >,
-  reportKind: VinReportKind = "korea",
-): HTMLElement {
+  result: Pick<MiniAppVinResult, "vin" | "reportSalesEnabled" | "reportPrice" | "reportKind">,
+): HTMLElement | null {
+  const reportKind = result.reportKind;
+  if (!reportKind) return null;
   const started = generation;
-  const carfax = reportKind === "carfax";
-  const preview = carfax ? CARFAX_REPORT_PREVIEW : KOREAN_REPORT_PREVIEW;
-  const salesEnabled = carfax ? result.carfaxReportSalesEnabled : result.reportSalesEnabled;
-  const reportPrice = carfax ? result.carfaxReportPrice : result.reportPrice;
+  const preview = reportKind === "carfax" ? CARFAX_REPORT_PREVIEW : KOREAN_REPORT_PREVIEW;
   const panel = element("section", "panel premium-panel");
   const actions = element("div", "report-actions");
   const notice = element("p", "footnote");
   notice.setAttribute("role", "status");
+  const sample = samplePdfLink(reportKind);
+  sample.textContent = "Посмотреть образец PDF";
   panel.append(
-    element("p", "muted", "Дополнительно · платный PDF"),
-    element("h2", "", preview.title),
+    element("h2", "", "Полный отчёт найден"),
+    element("p", "footnote", preview.limitations),
+    sample,
   );
-  if (config?.reportBotUrl) {
-    actions.append(
-      reportBotLink(`${carfax ? "carfax" : "vin"}_${result.vin}`, "Условия отчёта в VIN-боте"),
-    );
+  const price = result.reportPrice ? paymentAmountText(result.reportPrice) : null;
+  if (config?.reportBotUrl && price) {
+    actions.append(reportBotLink(`vin_${result.vin}`, `Получить доступ · ${price}`));
     notice.textContent =
-      "Цена и возможность заказа — в VIN-боте. Оплата, PDF и поддержка остаются там.";
-  } else if (salesEnabled && reportPrice) {
-    const price = paymentAmountText(reportPrice);
-    panel.append(element("p", "report-price", price));
-    const buy = button(`Заказать отчёт · ${price}`, () => {
+      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
+      "Если получить отчёт невозможно — полный возврат. Условия и оплата — в VIN-боте.";
+  } else if (result.reportSalesEnabled && price) {
+    const buy = button(`Получить доступ · ${price}`, () => {
       if (buy.disabled) return;
       buy.disabled = true;
       buy.textContent = "Открываем заказ…";
       notice.textContent = "Сначала состав и условия. Деньги пока не списываются.";
       void request<{ order: PaymentOrder }>("/miniapp/api/orders/report", {
         vin: result.vin,
-        reportKind,
       })
         .then(({ order }) => {
           if (started === generation && panel.isConnected) navigate("orders", order.id);
@@ -499,36 +491,18 @@ function premiumPanel(
         .finally(() => {
           if (started === generation && panel.isConnected) {
             buy.disabled = false;
-            buy.textContent = `Заказать отчёт · ${price}`;
+            buy.textContent = `Получить доступ · ${price}`;
           }
         });
     });
     actions.append(buy);
     notice.textContent =
-      `PDF вручную до ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты. ` +
+      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
       "Если получить отчёт невозможно — полный возврат. Условия — до оплаты.";
   } else {
-    notice.textContent = "Заказ нового отчёта пока недоступен.";
+    notice.textContent = "Покупка доступа пока недоступна.";
   }
-  panel.append(
-    actions,
-    notice,
-    button(
-      "Посмотреть образец PDF",
-      () => navigate(carfax ? "carfax-example" : "report-example"),
-      "button button-quiet",
-    ),
-    element("p", "footnote", preview.limitations),
-    ...(carfax
-      ? [
-          element(
-            "p",
-            "footnote",
-            "Наличие истории CARFAX для этого VIN заранее не подтверждено. Это заказ с ручной выдачей, а не результат бесплатной проверки.",
-          ),
-        ]
-      : []),
-  );
+  panel.append(actions, notice);
   return panel;
 }
 
@@ -569,88 +543,8 @@ function showCarfaxExample(): void {
       "Внешний публичный образец, не отчёт по вашему VIN. PDF откроется на сайте источника только после нажатия.",
     ),
     sourceLink(CARFAX_REPORT_EXAMPLE_PDF.sourceUrl, "Страница источника образца"),
-    button("Заказать для своего VIN", () => navigate("carfax")),
+    button("Перейти к проверке своего VIN", () => navigate("vin")),
   );
-}
-
-function showCarfax(): void {
-  const started = generation;
-  const main = shell();
-  const panel = element("section", "panel vin-panel");
-  const form = element("form", "vin-form");
-  const label = element("label", "", "VIN — 17 латинских букв и цифр, без I, O, Q");
-  label.htmlFor = "carfax-vin";
-  const input = element("input", "vin-input");
-  input.id = "carfax-vin";
-  input.name = "vin";
-  input.required = true;
-  input.autocomplete = "off";
-  input.spellcheck = false;
-  input.maxLength = 64;
-  input.setAttribute("autocapitalize", "characters");
-  const submit = element("button", "button", "Открыть условия CARFAX");
-  submit.type = "submit";
-  const result = element("div", "vin-results");
-  result.setAttribute("role", "status");
-  let revision = 0;
-  input.addEventListener("input", () => {
-    revision += 1;
-    submit.disabled = false;
-    result.replaceChildren();
-  });
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const vin = normalizeVin(input.value);
-    if (!vin) {
-      result.replaceChildren(
-        element("p", "notice", "Проверьте VIN: нужны 17 латинских букв и цифр, без I, O, Q."),
-      );
-      return;
-    }
-    const current = ++revision;
-    const report = {
-      vin,
-      reportSalesEnabled: false,
-      reportPrice: null,
-      carfaxReportSalesEnabled: false,
-      carfaxReportPrice: null,
-    };
-    if (config?.reportBotUrl) {
-      result.replaceChildren(premiumPanel(report, "carfax"));
-      return;
-    }
-    submit.disabled = true;
-    result.replaceChildren(element("p", "muted", "Загружаем условия заказа…"));
-    void request<Pick<MiniAppVinResult, "carfaxReportSalesEnabled" | "carfaxReportPrice">>(
-      "/miniapp/api/orders",
-    )
-      .then((sales) => {
-        if (started === generation && current === revision)
-          result.replaceChildren(premiumPanel({ ...report, ...sales }, "carfax"));
-      })
-      .catch((error: unknown) => {
-        if (started === generation && current === revision)
-          result.replaceChildren(element("p", "notice", errorText(error)));
-      })
-      .finally(() => {
-        if (started === generation && current === revision) submit.disabled = false;
-      });
-  });
-  form.append(label, input, submit);
-  panel.append(
-    element("h1", "", "Заказать CARFAX · 499 сом"),
-    element(
-      "p",
-      "muted",
-      "PDF вручную до 60 минут после подтверждённой оплаты. Если получить отчёт невозможно — полный возврат. Наличие истории для вашего VIN заранее не подтверждено.",
-    ),
-    element("p", "footnote", PAYMENT_PRIVACY_NOTICE),
-    form,
-    result,
-    button("Публичный образец CARFAX", () => navigate("carfax-example"), "button button-quiet"),
-    button("Бесплатная проверка VIN", () => navigate("vin"), "back-link"),
-  );
-  main.append(panel);
 }
 
 function showDialogue(view: "buy" | "sell"): void {
@@ -1560,9 +1454,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         });
         results.append(getPhotos);
       }
-      if (korean) results.append(premiumPanel(result));
-      if (result.carfaxReportSalesEnabled || config?.reportBotUrl)
-        results.append(premiumPanel(result, "carfax"));
+      const report = premiumPanel(result);
+      if (report) results.append(report);
       if (!korean) {
         classifiedVin = vin;
         const url = vinGoogleSearchUrl(vin);
@@ -1610,7 +1503,6 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element("p", "footnote", VIN_CAUTION),
     disclosure,
     followUp,
-    button("Отдельный заказ CARFAX · 499 сом", () => navigate("carfax"), "button button-quiet"),
   );
   return panel;
 }
@@ -1781,9 +1673,7 @@ async function showOrders(): Promise<void> {
       element(
         "p",
         "eyebrow",
-        config?.mode === "vin"
-          ? "Корейские PDF и CARFAX"
-          : "Отчёты и отдельно согласованные услуги",
+        config?.mode === "vin" ? "Полные отчёты по VIN" : "Отчёты и отдельно согласованные услуги",
       ),
       element("h1", "", "Мои заказы"),
       element(
@@ -1803,15 +1693,11 @@ async function showOrders(): Promise<void> {
           "p",
           "",
           config?.mode === "vin"
-            ? "Проверьте VIN бесплатно или отдельно закажите CARFAX с ручной выдачей. Наличие истории CARFAX заранее не подтверждено."
+            ? "Проверьте VIN бесплатно. Если полный отчёт найден, можно посмотреть образец PDF и получить доступ."
             : "Здесь появится отдельно согласованная услуга с реальным исполнителем, составом, ценой и условиями. Счета без такого заказа не создаются.",
         ),
       );
-      if (config?.mode === "vin")
-        empty.append(
-          button("Проверить VIN", () => navigate("vin")),
-          button("Заказать CARFAX · 499 сом", () => navigate("carfax"), "button button-quiet"),
-        );
+      if (config?.mode === "vin") empty.append(button("Проверить VIN", () => navigate("vin")));
       main.append(empty);
     }
     for (const order of orders) {
@@ -1850,7 +1736,11 @@ async function showOrders(): Promise<void> {
       if (order.product === "vin_report" && order.paymentStatus === "paid" && order.paidAt) {
         const deadline = new Date(Date.parse(order.paidAt) + VIN_REPORT_SLA_MS);
         panel.append(
-          element("p", "footnote", `Срок выдачи PDF: ${deadline.toLocaleString("ru-RU")}.`),
+          element(
+            "p",
+            "footnote",
+            `Срок предоставления доступа к PDF: ${deadline.toLocaleString("ru-RU")}.`,
+          ),
         );
       }
       if (
@@ -2038,7 +1928,6 @@ async function load(): Promise<void> {
   const id = params.get("car");
   currentView =
     view === "vin" ||
-    view === "carfax" ||
     view === "carfax-example" ||
     view === "buy" ||
     view === "sell" ||
@@ -2054,8 +1943,7 @@ async function load(): Promise<void> {
     currentView !== "orders" &&
     currentView !== "support" &&
     currentView !== "report-example" &&
-    currentView !== "carfax-example" &&
-    currentView !== "carfax"
+    currentView !== "carfax-example"
   ) {
     currentView = "vin";
     const url = new URL(window.location.href);
@@ -2076,10 +1964,6 @@ async function load(): Promise<void> {
   if (currentView === "orders") {
     if (config?.reportBotUrl) showDelegatedOrders();
     else await showOrders();
-    return;
-  }
-  if (currentView === "carfax") {
-    showCarfax();
     return;
   }
   if (currentView === "carfax-example") {

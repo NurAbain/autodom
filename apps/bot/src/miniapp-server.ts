@@ -31,9 +31,10 @@ import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
+import { VIN_REPORT_FINIK_MINOR } from "./payment-text.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { handlePaymentRequest } from "./payments-http.js";
-import { VIN_NOT_ENABLED } from "./vin-text.js";
+import { confirmedVinReportKind, VIN_NOT_ENABLED } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
 import { handleWebReportRequest } from "./web-report-http.js";
 
@@ -433,9 +434,10 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
                   : {
                       ...result,
                       reportSalesEnabled: payments?.reportSalesEnabled ?? false,
-                      reportPrice: payments?.reportPrice ?? null,
-                      carfaxReportSalesEnabled: payments?.carfaxReportSalesEnabled ?? false,
-                      carfaxReportPrice: payments?.carfaxReportPrice ?? null,
+                      reportPrice:
+                        payments?.reportPrice ??
+                        (reportBotUrl ? { amount: VIN_REPORT_FINIK_MINOR, currency: "KGS" } : null),
+                      reportKind: "carhistory" in result ? confirmedVinReportKind(result) : null,
                     },
               );
           } catch {

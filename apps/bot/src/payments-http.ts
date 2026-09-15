@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isWebVinReport, type PaymentEvent, VIN_REPORT_KINDS } from "@autodom/core/payments";
+import { isWebVinReport, type PaymentEvent } from "@autodom/core/payments";
 import { z } from "zod";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
@@ -11,7 +11,6 @@ const cancellationBody = z.object({ orderId }).strict();
 const reportBody = z
   .object({
     vin: z.string().regex(/^[A-HJ-NPR-Z0-9]{17}$/u),
-    reportKind: z.enum(VIN_REPORT_KINDS).default("korea"),
   })
   .strict();
 const eventBody = z
@@ -63,8 +62,6 @@ export async function handlePaymentRequest(
       orders: (await payments.ledger.listOrders(userId)).filter((order) => !isWebVinReport(order)),
       reportSalesEnabled: payments.reportSalesEnabled,
       reportPrice: payments.reportPrice,
-      carfaxReportSalesEnabled: payments.carfaxReportSalesEnabled,
-      carfaxReportPrice: payments.carfaxReportPrice,
     });
     return;
   }
@@ -87,13 +84,8 @@ export async function handlePaymentRequest(
   const raw = await readFlatJson(request, 512);
   if (report) {
     const parsed = reportBody.safeParse(raw);
-    if (!parsed.success) throw new RequestError(400, "Нужны VIN и допустимый вид отчёта.");
-    const order = await payments.reportOffer(
-      userId,
-      parsed.data.vin,
-      "telegram",
-      parsed.data.reportKind,
-    );
+    if (!parsed.success) throw new RequestError(400, "Нужен только VIN.");
+    const order = await payments.reportOffer(userId, parsed.data.vin);
     if (!response.destroyed) json(response, 200, { order });
     return;
   }

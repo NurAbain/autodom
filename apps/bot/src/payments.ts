@@ -25,7 +25,7 @@ import {
   VIN_REPORT_TERMS,
   VIN_REPORT_WEB_TERMS,
 } from "./payment-text.js";
-import { hasKoreanVinRecord } from "./vin-text.js";
+import { confirmedVinReportKind } from "./vin-text.js";
 
 export function loadVinReportStarsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env.AUTODOM_VIN_REPORT_STARS_ENABLED;
@@ -165,7 +165,7 @@ export class PaymentService {
   private telegramToken?: string;
   private readonly koreanResults = new Map<
     string,
-    { revision: number; expiresAt: number; eligible: boolean }
+    { revision: number; expiresAt: number; reportKind: VinReportKind | null }
   >();
   private vinRevision = 0;
 
@@ -196,8 +196,6 @@ export class PaymentService {
     return this.carfaxEnabled && this.nativeFinikEnabled && !!this.gateway && !!this.telegramApi;
   }
 
-  readonly carfaxReportPrice = { amount: CARFAX_REPORT_FINIK_MINOR, currency: "KGS" } as const;
-
   forgetVinResult(userId: number, vin: string, channel: "telegram" | "web" = "telegram"): number {
     const now = Date.now();
     for (const [id, result] of this.koreanResults) {
@@ -210,7 +208,7 @@ export class PaymentService {
       if (oldest !== undefined) this.koreanResults.delete(oldest);
     }
     const revision = ++this.vinRevision;
-    this.koreanResults.set(key, { revision, expiresAt: now + 15 * 60 * 1000, eligible: false });
+    this.koreanResults.set(key, { revision, expiresAt: now + 15 * 60 * 1000, reportKind: null });
     return revision;
   }
 
@@ -224,17 +222,19 @@ export class PaymentService {
     if (!vin || vin !== result.vin) return;
     const current = this.koreanResults.get(`${channel}:${userId}:${vin}`);
     if (!current || current.revision !== revision || current.expiresAt <= Date.now()) return;
-    current.eligible = hasKoreanVinRecord(result);
+    current.reportKind = confirmedVinReportKind(result);
   }
 
   async reportOffer(
     userId: number,
     value: string,
     channel: "telegram" | "web" = "telegram",
-    reportKind: VinReportKind = "korea",
   ): Promise<PaymentOrder> {
-    if (reportKind !== "korea" && reportKind !== "carfax")
-      throw new PaymentRequestError(400, "Неизвестный вид отчёта.");
+    const vin = normalizeVin(value);
+    if (!vin) throw new PaymentRequestError(400, "Нужен корректный VIN из 17 символов.");
+    const key = `${channel}:${userId}:${vin}`;
+    const eligibility = this.koreanResults.get(key);
+    const reportKind = eligibility?.reportKind;
     const carfax = reportKind === "carfax";
     const web = channel === "web";
     const finik = web || this.nativeFinikEnabled;
@@ -246,14 +246,10 @@ export class PaymentService {
           : !this.reportSalesEnabled
     )
       throw new PaymentRequestError(503, "Покупка этого PDF сейчас отключена.");
-    const vin = normalizeVin(value);
-    if (!vin) throw new PaymentRequestError(400, "Нужен корректный VIN из 17 символов.");
-    const key = `${channel}:${userId}:${vin}`;
-    const eligibility = carfax ? undefined : this.koreanResults.get(key);
-    if (!carfax && (!eligibility?.eligible || eligibility.expiresAt <= Date.now()))
+    if (!reportKind || !eligibility || eligibility.expiresAt <= Date.now())
       throw new PaymentRequestError(
         409,
-        "Сначала выполните свежую проверку этого VIN с корейской записью.",
+        "Сначала проверьте VIN. Для покупки нужно подтверждение наличия полного отчёта.",
       );
     return this.store.withLock(
       `autodom:report:offer:${channel}:${userId}:${vin}:${reportKind}`,
@@ -268,17 +264,15 @@ export class PaymentService {
         if (existing) return existing;
         const me = await this.requireTelegramApi().getMe();
         if (
-          !carfax &&
-          (!eligibility ||
-            this.koreanResults.get(key) !== eligibility ||
-            !eligibility.eligible ||
-            eligibility.expiresAt <= Date.now())
+          this.koreanResults.get(key) !== eligibility ||
+          eligibility.reportKind !== reportKind ||
+          eligibility.expiresAt <= Date.now()
         )
           throw new PaymentRequestError(
             409,
             "Проверка VIN обновилась. Повторите проверку перед покупкой.",
           );
-        const title = carfax ? "CARFAX · PDF" : "Полный корейский PDF";
+        const title = "Полный отчёт · PDF";
         const input = {
           userId,
           vin,
@@ -290,7 +284,7 @@ export class PaymentService {
               ? VIN_REPORT_FINIK_MINOR
               : VIN_REPORT_STARS,
           title,
-          description: `${title} по VIN ${vin}. Ручная выдача в течение ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты.`,
+          description: `${title} по VIN ${vin}. Доступ в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты.`,
           seller: `Autodom · владелец ${VIN_REPORT_OWNER}`,
           executor: `Владелец Autodom · ${VIN_REPORT_OWNER}`,
           supportUrl: `https://t.me/${me.username}?start=paysupport`,

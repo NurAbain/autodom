@@ -450,7 +450,7 @@ function statusText(order: PaymentOrder): string {
       return "Оплата подтверждена · выдача отменена. Уточните полный возврат в поддержке.";
     if (order.paidAt && Date.parse(order.paidAt) + 3_600_000 <= Date.now())
       return "Оплата подтверждена · срок 1 час истёк. Запросите PDF или полный возврат в поддержке.";
-    return "Оплата подтверждена · ожидаем ручную выдачу PDF в течение 1 часа";
+    return "Оплата подтверждена · доступ к PDF в течение 1 часа";
   }
   if (order.invoiceStatus === "cancelled" || order.fulfillmentStatus === "cancelled")
     return "Заказ отменён";

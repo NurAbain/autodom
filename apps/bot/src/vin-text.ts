@@ -1,3 +1,4 @@
+import type { VinReportKind } from "@autodom/core/payments";
 import {
   type Car365Record,
   type EncarListing,
@@ -131,6 +132,11 @@ export function hasKoreanVinRecord(result: VinCheckResult): boolean {
     result.car365.status === "available" ||
     confirmedEncarListings(result).length > 0
   );
+}
+
+/** Free records, decoding and photos do not confirm that a full report exists. */
+export function confirmedVinReportKind(result: VinCheckResult): VinReportKind | null {
+  return result.carhistory.status === "available" ? "korea" : null;
 }
 
 export function vinVisibleProviders(result: VinCheckResult): VinProvider[] {
