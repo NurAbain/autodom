@@ -1,3 +1,4 @@
+import { BODY_TYPES, BUDGET_SCOPES, MARKETS, money, TRANSMISSIONS, USE_CASES } from "@autodom/core";
 import type { CatalogLookup } from "@autodom/core/catalog-filter";
 import {
   CATALOG_OPTION_LABELS,
@@ -19,6 +20,11 @@ type Draft = Record<string, unknown>;
 type Action =
   | { kind: "go"; state: string }
   | { kind: "row"; index: number }
+  | { kind: "field"; key: string }
+  | { kind: "drop_field"; key: string; value: unknown }
+  | { kind: "drop_vehicle"; index: number }
+  | { kind: "drop_option"; key: CatalogOptionKey; value: string }
+  | { kind: "drop_range"; key: CatalogRangeKey }
   | { kind: "add" | "remove" | "reset" | "clear" | "retry" | "search_clear" }
   | { kind: "pick"; key: CatalogFieldKey }
   | { kind: "option"; choice: CatalogChoice }
@@ -90,6 +96,193 @@ function clearLegacy(data: Draft, key: string): void {
   const field = fields[key];
   if (field) data[field[0]] = field[1];
 }
+export function renderFilterOverview(
+  data: Draft,
+  choice: (label: string, value: string) => Button,
+): Reply {
+  const filter = filterOf(data);
+  const actions: Record<string, Action> = {};
+  const editor: NonNullable<Reply["filterEditor"]> = {
+    sections: [],
+    chips: [],
+    description:
+      "Укажите важное; остальные параметры не ограничивают поиск. Цена — без дополнительных расходов. Неизвестные данные не проходят выбранные фильтры.",
+  };
+  const buttons: Button[][] = [];
+  const button = (label: string, action: Action) => {
+    const id = `c${Object.keys(actions).length.toString(36)}`;
+    actions[id] = action;
+    const result = choice(label, id);
+    buttons.push([result]);
+    return result[1];
+  };
+  const section = (title: string) => {
+    const result = {
+      title,
+      fields: [] as NonNullable<Reply["filterEditor"]>["sections"][number]["fields"],
+    };
+    editor.sections.push(result);
+    return result;
+  };
+  const field = (
+    group: NonNullable<Reply["filterEditor"]>["sections"][number],
+    label: string,
+    value: string,
+    action: Action,
+  ) => group.fields.push({ label, value, command: button(`${label}: ${value}`, action) });
+  const chip = (label: string, action: Action) =>
+    editor.chips.push({ label, command: button(`Убрать · ${label}`, action) });
+  const basic = section("Автомобиль и бюджет");
+  if (!filter.vehicles.length)
+    field(basic, "Выбрать автомобиль", "любая марка и модель", { kind: "add" });
+  filter.vehicles.forEach((row, index) => {
+    field(basic, `Автомобиль ${index + 1}`, vehicleLabel(row), { kind: "row", index });
+    chip(vehicleLabel(row), { kind: "drop_vehicle", index });
+  });
+  if (filter.vehicles.length && filter.vehicles.length < 5)
+    field(basic, "Добавить альтернативу", `${filter.vehicles.length} из 5`, { kind: "add" });
+  field(
+    basic,
+    "Бюджет",
+    `${data.minimum ? money(Number(data.minimum), String(data.currency)) + " — " : "до "}${money(Number(data.maximum), String(data.currency))}`,
+    { kind: "field", key: "budget" },
+  );
+  field(basic, "Валюта", String(data.currency), { kind: "field", key: "currency" });
+  field(
+    basic,
+    "Что входит в бюджет",
+    BUDGET_SCOPES[data.budget_scope as keyof typeof BUDGET_SCOPES] ?? BUDGET_SCOPES.car,
+    { kind: "field", key: "budget_scope" },
+  );
+  const location = section("Рынок и место объявления");
+  field(location, "Рынок", MARKETS[data.market as keyof typeof MARKETS] ?? String(data.market), {
+    kind: "field",
+    key: "market",
+  });
+  const common = section("Основные характеристики");
+  const more = section("Другие характеристики");
+  const legacyValues: Partial<Record<CatalogOptionKey | CatalogRangeKey, string>> = {
+    city: String(data.city ?? ""),
+    body_type: BODY_TYPES[data.body_type as keyof typeof BODY_TYPES] ?? "",
+    gearbox: TRANSMISSIONS[data.transmission as keyof typeof TRANSMISSIONS] ?? "",
+    year: data.year_min == null ? "" : `от ${data.year_min}`,
+    mileage: data.mileage_max_km == null ? "" : `до ${data.mileage_max_km} км`,
+  };
+  for (const key of OPTION_KEYS) {
+    const selected = filter.options[key] ?? [];
+    const group = ["region", "city"].includes(key)
+      ? location
+      : ["body_type", "fuel_type", "gearbox", "drive_type"].includes(key)
+        ? common
+        : more;
+    field(
+      group,
+      CATALOG_OPTION_LABELS[key],
+      selected.map((item) => item.label).join(", ") ||
+        (legacyValues[key] ? `${legacyValues[key]} · прежнее; выбрать замену` : "любые"),
+      { kind: "pick", key },
+    );
+    for (const item of selected)
+      chip(`${CATALOG_OPTION_LABELS[key]}: ${item.label}`, {
+        kind: "drop_option",
+        key,
+        value: item.value,
+      });
+  }
+  for (const key of RANGE_KEYS) {
+    const range = filter.ranges[key];
+    field(
+      key === "engine_volume" ? more : common,
+      CATALOG_RANGE_LABELS[key],
+      range
+        ? rangeLabel(key, range.min, range.max)
+        : legacyValues[key]
+          ? `${legacyValues[key]} · прежнее; задать замену`
+          : "без ограничения",
+      { kind: "range", key },
+    );
+    if (range)
+      chip(`${CATALOG_RANGE_LABELS[key]}: ${rangeLabel(key, range.min, range.max)}`, {
+        kind: "drop_range",
+        key,
+      });
+  }
+  field(
+    more,
+    "Ниже рынка Mashina",
+    filter.below_market_percent === null ? "без ограничения" : `от ${filter.below_market_percent}%`,
+    { kind: "go", state: "cat_below" },
+  );
+  if (filter.below_market_percent !== null)
+    chip(`Ниже рынка: от ${filter.below_market_percent}%`, { kind: "below", value: null });
+  const extra = section("Дополнительные условия и заметки");
+  const legacyFields: [string, string, string, unknown][] = [
+    ["city", "Город объявления · прежнее условие", String(data.city ?? ""), ""],
+    [
+      "body_type",
+      "Кузов · прежнее условие",
+      BODY_TYPES[data.body_type as keyof typeof BODY_TYPES] ?? "",
+      "",
+    ],
+    [
+      "year_min",
+      "Год от · прежнее условие",
+      data.year_min == null ? "" : String(data.year_min),
+      null,
+    ],
+    [
+      "mileage_max_km",
+      "Пробег до · прежнее условие",
+      data.mileage_max_km == null ? "" : `${data.mileage_max_km} км`,
+      null,
+    ],
+    [
+      "transmission",
+      "Коробка · прежнее условие",
+      TRANSMISSIONS[data.transmission as keyof typeof TRANSMISSIONS] ?? "",
+      "",
+    ],
+  ];
+  for (const [key, label, value, empty] of legacyFields) {
+    if (!value) continue;
+    field(extra, label, value, { kind: "field", key });
+    chip(`${label}: ${value}`, { kind: "drop_field", key, value: empty });
+  }
+  const optional: [string, string, string, unknown][] = [
+    ["query", "Текстовый запрос", String(data.query ?? ""), ""],
+    [
+      "allow_import",
+      "Готовность ждать импорт",
+      data.allow_import === true ? "готов ждать" : data.allow_import === false ? "без импорта" : "",
+      null,
+    ],
+    [
+      "use_case",
+      "Для чего автомобиль (заметка)",
+      USE_CASES[data.use_case as keyof typeof USE_CASES] ?? "",
+      "",
+    ],
+    ["purchase_by", "Планируемая дата (заметка)", String(data.purchase_by ?? ""), ""],
+  ];
+  for (const [key, label, value, empty] of optional) {
+    field(extra, label, value || "не задано", { kind: "field", key });
+    if (value) chip(`${label}: ${value}`, { kind: "drop_field", key, value: empty });
+  }
+  data.cat_actions = actions;
+  return {
+    text:
+      "<b>Условия поиска</b>\nНастройте поля кнопками. Необязательные параметры можно пропустить.\n\n" +
+      editor.sections
+        .map(
+          (group) =>
+            `<b>${group.title}</b>\n${group.fields.map((item) => `${escapeText(item.label)}: ${escapeText(item.value)}`).join("\n")}`,
+        )
+        .join("\n\n") +
+      "\n\nЦена — из объявления, не все расходы покупки. Неизвестный факт не проходит выбранный фильтр. Справочник шире собранных объявлений: совпадений может пока не быть.",
+    buttons,
+    filterEditor: editor,
+  };
+}
 function parentId(data: Draft, key: CatalogFieldKey): string | undefined {
   const index = VEHICLE_KEYS.indexOf(key as CatalogVehicleKey);
   if (index > 0) return selectedRow(data)?.[VEHICLE_KEYS[index - 1]!]?.id;
@@ -100,7 +293,7 @@ function parentId(data: Draft, key: CatalogFieldKey): string | undefined {
   return undefined;
 }
 function pickerBack(data: Draft): string {
-  return VEHICLE_KEYS.includes(data.cat_key as CatalogVehicleKey) ? "cat_row" : "cat_menu";
+  return VEHICLE_KEYS.includes(data.cat_key as CatalogVehicleKey) ? "cat_row" : "review";
 }
 
 export async function renderCatalog(
@@ -121,33 +314,30 @@ export async function renderCatalog(
   let buttons: Buttons = [];
   let input: Reply["input"];
   let picker: Reply["picker"];
-  if (state === "cat_menu") {
-    text = `<b>Все фильтры автомобиля</b>\n${catalogSummary(filter) || "Точные условия пока не выбраны."}\n\nВнутри поля варианты объединены ИЛИ, между полями — И. «Любые» снимает ограничение, а не выбирает неизвестные данные.\n${CATALOG_COVERAGE_NOTE}`;
-    buttons = [[go("Марка → модель → поколение → модификация", "cat_vehicles")]];
-    for (let index = 0; index < OPTION_KEYS.length; index += 2)
-      buttons = [
-        ...buttons,
-        OPTION_KEYS.slice(index, index + 2).map((key) =>
-          button(
-            `${CATALOG_OPTION_LABELS[key]}${filter.options[key]?.length ? ` · ${filter.options[key]!.length}` : ""}`,
-            { kind: "pick", key },
-          ),
-        ),
-      ];
-    buttons = [
-      ...buttons,
-      ...RANGE_KEYS.map((key) => [button(CATALOG_RANGE_LABELS[key], { kind: "range", key })]),
-      [go("Ниже рынка Mashina", "cat_below")],
-      [go("Бюджет и валюта", "refine")],
-      [button("Сбросить точные фильтры", { kind: "reset" })],
-      [go("К сохранению", "review")],
-    ];
-  } else if (state === "cat_vehicles") {
+  let filterEditor: Reply["filterEditor"];
+  if (state === "cat_menu") return renderFilterOverview(data, choice);
+  if (state === "cat_vehicles") {
     text =
       "<b>Автомобили — до пяти альтернатив</b>\nДостаточно марки; модель, поколение и модификацию можно не ограничивать. Варианты объединены ИЛИ. Текстовый запрос задаётся отдельно и, если оставлен, тоже обязателен.";
-    buttons = filter.vehicles.map((row, index) => [
-      button(`${index + 1}. ${vehicleLabel(row) || "Выбрать марку"}`, { kind: "row", index }),
-    ]);
+    filterEditor = {
+      description: "До пяти альтернатив. Достаточно марки; поколение и модификация необязательны.",
+      sections: [{ title: "Автомобили", fields: [] }],
+      chips: [],
+    };
+    buttons = filter.vehicles.map((row, index) => {
+      const edit = button(`${index + 1}. ${vehicleLabel(row) || "Выбрать марку"}`, {
+        kind: "row",
+        index,
+      });
+      filterEditor!.sections[0]!.fields.push({
+        label: `Автомобиль ${index + 1}`,
+        value: vehicleLabel(row),
+        command: edit[1],
+      });
+      const remove = button(`Убрать · ${vehicleLabel(row)}`, { kind: "drop_vehicle", index });
+      filterEditor!.chips.push({ label: vehicleLabel(row), command: remove[1] });
+      return [edit, remove];
+    });
     if (filter.vehicles.length < 5)
       buttons = [...buttons, [button("Добавить автомобиль", { kind: "add" })]];
     buttons = [
@@ -159,16 +349,32 @@ export async function renderCatalog(
   } else if (state === "cat_row") {
     const row = selectedRow(data);
     text = `<b>Автомобиль ${Number(data.cat_row_index) + 1}</b>\n${escapeText(row ? vehicleLabel(row) : "Новая альтернатива")}\nСмена родителя снимает дочерние условия.`;
+    filterEditor = {
+      description:
+        "Смена марки, модели или поколения снимает дочерние условия. Необязательные ступени можно пропустить кнопкой «Готово».",
+      sections: [{ title: `Автомобиль ${Number(data.cat_row_index) + 1}`, fields: [] }],
+      chips: [],
+    };
     buttons = VEHICLE_KEYS.filter((_, index) => index === 0 || row?.[VEHICLE_KEYS[index - 1]!]).map(
-      (key) => [
-        button(`${CATALOG_VEHICLE_LABELS[key]}: ${row?.[key]?.label ?? "любая"}`, {
+      (key) => {
+        const edit = button(`${CATALOG_VEHICLE_LABELS[key]}: ${row?.[key]?.label ?? "любая"}`, {
           kind: "pick",
           key,
-        }),
-      ],
+        });
+        filterEditor!.sections[0]!.fields.push({
+          label: CATALOG_VEHICLE_LABELS[key],
+          value: row?.[key]?.label ?? "любая",
+          command: edit[1],
+        });
+        return [edit];
+      },
     );
     if (row) buttons = [...buttons, [button("Удалить этот автомобиль", { kind: "remove" })]];
-    buttons = [...buttons, [go("Назад к автомобилям", "cat_vehicles")]];
+    buttons = [
+      ...buttons,
+      [go("Готово — к условиям поиска", "review")],
+      [go("Назад к автомобилям", "cat_vehicles")],
+    ];
   } else if (state === "cat_pick") {
     const key = data.cat_key as CatalogFieldKey;
     const vehicleIndex = VEHICLE_KEYS.indexOf(key as CatalogVehicleKey);
@@ -200,6 +406,8 @@ export async function renderCatalog(
       pages: 1,
       selected: selected.length,
       searchable: false,
+      options: [],
+      search: String(data.cat_search ?? ""),
     };
     text = `<b>${escapeText(title)}</b>\n${escapeText(subtitle ?? "")}\nВыбрано: ${selected.map((option) => escapeText(option.label)).join(", ") || "любые"}`;
     if (needsParent && !parent) {
@@ -234,6 +442,8 @@ export async function renderCatalog(
           pages,
           selected: selected.length,
           searchable: true,
+          options: [],
+          search: String(data.cat_search ?? ""),
         };
         input = {
           label: "Поиск по справочнику",
@@ -243,14 +453,15 @@ export async function renderCatalog(
         text += `\nСтраница ${page + 1} / ${pages}${query ? ` · поиск: ${escapeText(String(data.cat_search))}` : ""}. Отправьте часть названия для поиска.`;
         if (!filtered.length)
           text += "\nВарианты не найдены. Измените поиск или снимите ограничение.";
-        buttons = filtered
-          .slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
-          .map((option) => [
-            button(
-              `${selected.some((item) => item.value === option.value) ? "✓ " : ""}${option.label}`,
-              { kind: "option", choice: option },
-            ),
-          ]);
+        buttons = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map((option) => {
+          const isSelected = selected.some((item) => item.value === option.value);
+          const item = button(`${isSelected ? "✓ " : ""}${option.label}`, {
+            kind: "option",
+            choice: option,
+          });
+          picker!.options.push({ command: item[1], selected: isSelected });
+          return [item];
+        });
         const pagesRow: Button[] = [];
         if (page > 0)
           pagesRow.push(button("Предыдущая страница", { kind: "page", page: page - 1 }));
@@ -266,10 +477,12 @@ export async function renderCatalog(
         buttons = [[button("Повторить загрузку", { kind: "retry" })]];
       }
     }
+    const apply = go("Готово — к условиям поиска", "review");
+    picker.applyCommand = apply[1];
     buttons = [
       ...buttons,
       [button("Любые / снять ограничение", { kind: "clear" })],
-      [go("Готово", pickerBack(data))],
+      [apply],
       [go("Назад", pickerBack(data))],
     ];
   } else if (state === "cat_range" || state === "cat_bound") {
@@ -324,7 +537,7 @@ export async function renderCatalog(
           button("Задать максимум", { kind: "bound", bound: "max" }),
         ],
         [button("Любые / снять ограничение", { kind: "clear" })],
-        [go("Готово / назад", "cat_menu")],
+        [go("Готово / назад", "review")],
       ];
     }
   } else if (state === "cat_below") {
@@ -335,7 +548,7 @@ export async function renderCatalog(
     buttons = [
       ...buttons,
       [button("Любые / снять ограничение", { kind: "below", value: null })],
-      [go("Назад", "cat_menu")],
+      [go("Назад к условиям поиска", "review")],
     ];
   }
   data.cat_actions = actions;
@@ -344,6 +557,7 @@ export async function renderCatalog(
     buttons: [...buttons, [["Отмена всех изменений", "/cancel"]]],
     ...(input ? { input } : {}),
     ...(picker ? { picker } : {}),
+    ...(filterEditor ? { filterEditor } : {}),
   };
 }
 
@@ -445,6 +659,29 @@ export function updateCatalog(
     }
     return next(state, "Выберите действие кнопкой.");
   }
+  if (action.kind === "field") {
+    data.return_review = true;
+    return next(action.key);
+  }
+  if (action.kind === "drop_field") {
+    data[action.key] = action.value;
+    return next(state);
+  }
+  if (action.kind === "drop_vehicle") {
+    filter.vehicles.splice(action.index, 1);
+    return next(state);
+  }
+  if (action.kind === "drop_option") {
+    const selected = filter.options[action.key]?.filter((item) => item.value !== action.value);
+    if (selected?.length) filter.options[action.key] = selected;
+    else delete filter.options[action.key];
+    if (action.key === "region") delete filter.options.city;
+    return next(state);
+  }
+  if (action.kind === "drop_range") {
+    delete filter.ranges[action.key];
+    return next(state);
+  }
   if (action.kind === "go") return next(action.state);
   if (action.kind === "retry") return next();
   if (action.kind === "search_clear") {
@@ -462,7 +699,9 @@ export function updateCatalog(
   }
   if (action.kind === "row") {
     data.cat_row_index = action.index;
-    return next("cat_row");
+    return state === "review" || state === "refine" || state === "cat_menu"
+      ? openPick(selectedRow(data)?.make ? "model" : "make")
+      : next("cat_row");
   }
   if (action.kind === "add") {
     if (filter.vehicles.length >= 5)
@@ -486,7 +725,9 @@ export function updateCatalog(
   if (action.kind === "preset") return setRange(action.min, action.max);
   if (action.kind === "below") {
     filter.below_market_percent = action.value;
-    return next("cat_below");
+    return next(
+      state === "review" || state === "refine" || state === "cat_menu" ? state : "cat_below",
+    );
   }
   if (action.kind === "clear") {
     if (state === "cat_vehicles") {

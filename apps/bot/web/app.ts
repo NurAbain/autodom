@@ -547,17 +547,7 @@ function showDialogue(view: "buy" | "sell"): void {
   main.append(content, status, cancel);
   let busy = false;
   let inputContext = "";
-  const pickerControls: Record<string, true> = {
-    "Предыдущая страница": true,
-    "Следующая страница": true,
-    Готово: true,
-    Назад: true,
-    "Любые / снять ограничение": true,
-    "Сбросить поиск": true,
-    "Отмена всех изменений": true,
-    "Повторить загрузку": true,
-    "Выбрать регион / страну": true,
-  };
+  const expandedFilters = new Map<string, boolean>();
 
   function runAction(command: string): void {
     if (busy) return;
@@ -572,6 +562,8 @@ function showDialogue(view: "buy" | "sell"): void {
   function renderReply(reply: Reply): HTMLElement {
     const section = element("section", "panel dialogue-reply");
     section.tabIndex = -1;
+    const editor = view === "buy" ? reply.filterEditor : undefined;
+    const representedCommands = new Set<string>();
     if (reply.picker) {
       section.classList.add("dialogue-picker");
       const heading = element("header", "picker-heading");
@@ -602,7 +594,72 @@ function showDialogue(view: "buy" | "sell"): void {
       if (firstLine?.nodeType === Node.TEXT_NODE && firstLine.textContent?.startsWith(prefix))
         firstLine.textContent = firstLine.textContent.slice(prefix.length);
     }
-    section.append(text);
+    if (editor) {
+      section.classList.add("dialogue-filter-editor");
+      section.setAttribute("aria-label", "Условия поиска");
+      section.append(element("h2", "", "Условия поиска"));
+      if (editor.description)
+        section.append(element("p", "filter-description", editor.description));
+      if (editor.chips.length) {
+        const selected = element("div", "filter-selected");
+        selected.append(element("h3", "", "Выбранные условия"));
+        const chips = element("div", "filter-chips");
+        for (const chip of editor.chips) {
+          representedCommands.add(chip.command);
+          const control = button(
+            "",
+            () => runAction(chip.command),
+            "button button-quiet filter-chip",
+          );
+          control.setAttribute("aria-label", `Убрать условие: ${chip.label}`);
+          control.dataset.focusLabel = `chip:${chip.label}`;
+          const remove = element("span", "filter-chip-remove", "×");
+          remove.setAttribute("aria-hidden", "true");
+          control.append(element("span", "", chip.label), remove);
+          chips.append(control);
+        }
+        selected.append(chips);
+        section.append(selected);
+      }
+      for (const [index, group] of editor.sections.entries()) {
+        const fields = element("div", "filter-fields");
+        for (const field of group.fields) {
+          representedCommands.add(field.command);
+          const control = button(
+            "",
+            () => runAction(field.command),
+            "button button-quiet filter-field",
+          );
+          control.dataset.focusLabel = `field:${group.title}:${field.label}`;
+          const edit = element("span", "filter-field-edit", "Изменить");
+          edit.setAttribute("aria-hidden", "true");
+          control.append(
+            element("span", "filter-field-label", field.label),
+            element("span", "filter-field-value", field.value),
+            edit,
+          );
+          fields.append(control);
+        }
+        if (index === 0) {
+          const primary = element("fieldset", "filter-group");
+          primary.append(element("legend", "", group.title), fields);
+          section.append(primary);
+        } else {
+          const secondary = element("details", "filter-group filter-secondary");
+          secondary.open = expandedFilters.get(group.title) ?? index < 3;
+          secondary.addEventListener("toggle", () => {
+            if (secondary.isConnected) expandedFilters.set(group.title, secondary.open);
+          });
+          secondary.append(element("summary", "", group.title), fields);
+          section.append(secondary);
+        }
+      }
+      const summary = element("details", "filter-summary");
+      summary.append(element("summary", "", "Сводка и пояснения"), text);
+      section.append(summary);
+    } else {
+      section.append(text);
+    }
     if (reply.listingId) {
       section.append(
         button(
@@ -628,6 +685,7 @@ function showDialogue(view: "buy" | "sell"): void {
     }
     const actions = element("div", "dialogue-actions");
     const options = element("div", "picker-options");
+    const pickerOptions = new Map(reply.picker?.options.map((option) => [option.command, option]));
     if (reply.picker) {
       options.setAttribute("role", "group");
       options.setAttribute("aria-label", `Варианты: ${reply.picker.title}`);
@@ -635,6 +693,7 @@ function showDialogue(view: "buy" | "sell"): void {
     for (const row of reply.buttons) {
       const group = element("div", "button-row");
       for (const [label, command] of row) {
+        if (representedCommands.has(command)) continue;
         const url = safeUrl(command);
         let control: HTMLButtonElement | HTMLAnchorElement;
         if (command === "vin-report-example") {
@@ -646,16 +705,21 @@ function showDialogue(view: "buy" | "sell"): void {
           control = button(label, () => runAction(command), "button button-quiet");
         }
         control.dataset.focusLabel = label.replace(/^✓\s*/, "");
-        if (reply.picker && !Object.hasOwn(pickerControls, label)) {
+        const option = pickerOptions.get(command);
+        if (option) {
           control.classList.add("picker-option");
-          control.setAttribute("aria-pressed", String(label.startsWith("✓ ")));
+          control.setAttribute("aria-pressed", String(option.selected));
           options.append(control);
         } else {
-          if (reply.picker && label === "Готово") {
+          if (reply.picker?.applyCommand === command) {
             control.classList.remove("button-quiet");
             control.classList.add("picker-apply");
           }
-          if (reply.picker && /страница$/.test(label)) group.classList.add("picker-pagination");
+          if (editor?.applyCommand === command) {
+            control.classList.remove("button-quiet");
+            control.classList.add("filter-save");
+            group.classList.add("filter-save-row");
+          }
           group.append(control);
         }
       }
@@ -663,6 +727,14 @@ function showDialogue(view: "buy" | "sell"): void {
     }
     if (options.childElementCount) section.append(options);
     section.append(actions);
+    if (editor?.applyCommand)
+      section.append(
+        element(
+          "p",
+          "filter-save-note",
+          "Уведомления включатся только при выборе сохранения с мониторингом.",
+        ),
+      );
     return section;
   }
 
@@ -674,12 +746,14 @@ function showDialogue(view: "buy" | "sell"): void {
       form.remove();
       return;
     }
-    const context = reply.input
-      ? JSON.stringify([reply.picker?.title, reply.picker?.subtitle, reply.input])
-      : "";
-    if (!context || context !== inputContext) input.value = "";
-    inputContext = context;
     const searching = reply.picker?.searchable === true;
+    const context =
+      searching || reply.input
+        ? JSON.stringify([reply.picker?.title, reply.picker?.subtitle, reply.input])
+        : "";
+    if (searching) input.value = reply.picker!.search;
+    else if (!context || context !== inputContext) input.value = "";
+    inputContext = context;
     form.hidden = !reply.input && (view === "buy" || !!reply.picker) && !searching;
     label.textContent = reply.input?.label ?? (searching ? "Поиск по справочнику" : "Ваш ответ");
     input.placeholder =
@@ -690,7 +764,11 @@ function showDialogue(view: "buy" | "sell"): void {
     input.spellcheck = !reply.picker && input.inputMode === "text";
     submit.textContent = searching ? "Найти" : reply.input ? "Применить" : "Отправить";
     form.classList.toggle("dialogue-search", searching);
-    section.insertBefore(form, section.querySelector(".picker-options, .dialogue-actions"));
+    const searchPosition = searching ? section.querySelector(".picker-heading")?.nextSibling : null;
+    section.insertBefore(
+      form,
+      searchPosition ?? section.querySelector(".picker-options, .dialogue-actions"),
+    );
   }
 
   async function send(text: string): Promise<void> {
@@ -717,19 +795,19 @@ function showDialogue(view: "buy" | "sell"): void {
         content.append(
           element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
         );
-      if (focusLabel === "Сбросить поиск" || focusLabel === "Любые / снять ограничение")
-        input.value = "";
       const picker = result.replies.at(-1)?.picker;
       status.textContent = picker
         ? `${picker.title}. Выбрано: ${picker.selected}. Страница ${picker.page} из ${picker.pages}.`
         : "Шаг обновлён.";
       input.disabled = false;
-      if (restoreInput && !form.hidden && form.isConnected) {
+      const matching = focusLabel
+        ? Array.from(content.querySelectorAll<HTMLElement>("[data-focus-label]")).find(
+            (node) => node.dataset.focusLabel === focusLabel,
+          )
+        : undefined;
+      if (!form.hidden && form.isConnected && (restoreInput || (view === "buy" && !matching))) {
         input.focus({ preventScroll: true });
       } else if (focusLabel) {
-        const matching = Array.from(
-          content.querySelectorAll<HTMLElement>("[data-focus-label]"),
-        ).find((node) => node.dataset.focusLabel === focusLabel);
         if (matching instanceof HTMLButtonElement) matching.disabled = false;
         (matching ?? sections.at(-1))?.focus({ preventScroll: true });
       }
@@ -746,6 +824,10 @@ function showDialogue(view: "buy" | "sell"): void {
       status.textContent = `${errorText(error)} Ваш последний шаг оставлен на экране. Если ответ успел сохраниться, продолжите с актуального шага в чате.`;
       if (!content.childElementCount)
         content.append(button("Открыть шаг заново", () => void send(text), "button button-quiet"));
+      if (focused instanceof HTMLButtonElement || focused instanceof HTMLInputElement) {
+        focused.disabled = false;
+        if (focused.isConnected) focused.focus({ preventScroll: true });
+      }
     } finally {
       if (started === generation) {
         busy = false;

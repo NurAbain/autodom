@@ -110,18 +110,22 @@ async function review(
   budget = "15000",
 ) {
   await begin(conversation, user, currency);
-  const queries = await conversation.handle(user, user, budget);
-  return conversation.handle(user, user, query || button(queries, "Пока не знаю"));
+  const overview = await conversation.handle(user, user, budget);
+  if (!query) return overview;
+  await conversation.handle(user, user, button(overview, "Текстовый запрос"));
+  return conversation.handle(user, user, query);
 }
 async function field(replies: Reply[], label: string): Promise<Reply[]> {
-  const options = await conversation.handle(1, 1, button(replies, "Уточнить фильтры"));
-  return conversation.handle(1, 1, button(options, label));
+  const legacy = replies
+    .flatMap((reply) => reply.buttons.flat())
+    .find(([text]) => text.startsWith(label) && text.includes("прежнее условие"));
+  return conversation.handle(1, 1, legacy?.[1] ?? button(replies, label));
 }
 async function editModels(query: string, budget = "12000") {
   const current = await conversation.handle(1, 1, "/edit");
   await conversation.handle(1, 1, button(current, "Бюджет"));
   const updated = await conversation.handle(1, 1, budget);
-  await conversation.handle(1, 1, button(updated, "Марки"));
+  await conversation.handle(1, 1, button(updated, "Текстовый запрос"));
   return conversation.handle(1, 1, query);
 }
 async function save(
@@ -234,7 +238,8 @@ describe("explicit consent and save safety", () => {
     expect(await store.getDraft(1)).toEqual(buyerDraft);
     await restarted.handle(1, 1, "/cancel");
     expect(await store.getDraft(1)).toEqual(buyerDraft);
-    await restarted.handle(1, 1, "/buy");
+    const resumed = await restarted.handle(1, 1, "/buy");
+    await restarted.handle(1, 1, button(resumed, "Текстовый запрос"));
     await restarted.handle(1, 1, "Honda Fit");
     expect((await store.getDraft(1))?.[1].query).toBe("Honda Fit");
   });
@@ -273,7 +278,7 @@ describe("explicit consent and save safety", () => {
       await save(conversation);
       const current = await conversation.handle(1, 1, "/edit");
       const original = await store.getProfile(1);
-      await conversation.handle(1, 1, button(current, "Марки"));
+      await conversation.handle(1, 1, button(current, "Текстовый запрос"));
       await conversation.handle(1, 1, invalid);
       expect(await store.getProfile(1)).toEqual(original);
       expect((await store.getDraft(1))?.[0]).toBe("query");
@@ -282,11 +287,11 @@ describe("explicit consent and save safety", () => {
   it("binds review choices to user, current prompt and a single save, surviving restart", async () => {
     const first = await review(conversation, "Toyota");
     const oldSave = button(first, "Сохранить");
-    const options = await conversation.handle(1, 1, button(first, "Уточнить фильтры"));
-    const oldCity = button(options, "Город");
+    const options = await conversation.handle(1, 1, "/buy");
+    const oldCity = button(options, "Планируемая дата");
     const city = await conversation.handle(1, 1, oldCity);
     const current = await store.getDraft(1);
-    for (const stale of [oldSave, oldCity, oldCity.replace(":refine:", ":city:")]) {
+    for (const stale of [oldSave, oldCity, oldCity.replace(":review:", ":purchase_by:")]) {
       await conversation.handle(1, 1, stale);
       expect(await store.getDraft(1)).toEqual(current);
       expect(await store.getProfile(1)).toBeNull();
@@ -314,8 +319,9 @@ describe("explicit consent and save safety", () => {
     );
     const stale = button(currencies, "KGS");
     await conversation.handle(1, 1, button(currencies, "USD"));
-    await conversation.handle(1, 1, "15000");
-    for (const state of ["query", "city"]) {
+    const overview = await conversation.handle(1, 1, "15000");
+    await conversation.handle(1, 1, button(overview, "Текстовый запрос"));
+    for (const state of ["query", "purchase_by"]) {
       const draft = await store.getDraft(1);
       expect(draft?.[0]).toBe(state);
       for (const payload of ["unexpected:Toyota", "city:Ош", stale, "/unknown", "Toyota\u0000"]) {
@@ -324,7 +330,7 @@ describe("explicit consent and save safety", () => {
       }
       if (state === "query") {
         const current = await conversation.handle(1, 1, "Toyota");
-        await field(current, "Город");
+        await field(current, "Планируемая дата");
       }
     }
   });
@@ -345,10 +351,8 @@ describe("catalogue buyer filters", () => {
     let current = await begin(conversation);
     current = await conversation.handle(1, 1, button(current, "15"));
     current = await conversation.handle(1, 1, button(current, "Выбрать автомобиль"));
-    current = await conversation.handle(1, 1, button(current, "Добавить"));
     for (const label of ["Toyota", "Camry", "XV70", "2.5 AT"])
       current = await conversation.handle(1, 1, button(current, label));
-    current = await conversation.handle(1, 1, button(current, "Назад к автомобилям"));
     current = await conversation.handle(1, 1, button(current, "Готово"));
     expect(await store.getProfile(1)).toBeNull();
     await conversation.handle(1, 1, button(current, "Сохранить без"));
@@ -372,12 +376,10 @@ describe("catalogue buyer filters", () => {
       car("below", "Honda Fit", { catalog_numbers: { mileage: 0.16 } }),
     ];
     let current = await review(conversation, "");
-    current = await conversation.handle(1, 1, button(current, "Все фильтры"));
     current = await conversation.handle(1, 1, button(current, CATALOG_RANGE_LABELS.mileage));
     current = await conversation.handle(1, 1, button(current, "Задать минимум"));
     current = await conversation.handle(1, 1, "0.1 miles");
     current = await conversation.handle(1, 1, button(current, "Готово"));
-    current = await conversation.handle(1, 1, button(current, "К сохранению"));
     const saved = await conversation.handle(1, 1, button(current, "Сохранить без"));
     expect(saved.flatMap((reply) => reply.listingId ?? [])).toEqual(["boundary"]);
   });
@@ -385,6 +387,7 @@ describe("catalogue buyer filters", () => {
   it("replaces catalogue restrictions through equivalent legacy controls only on save", async () => {
     await save(conversation);
     const profile = (await store.getProfile(1))!;
+    profile.body_type = "sedan";
     profile.catalog_filter.options.body_type = [{ id: "1", value: "Седан", label: "Седан" }];
     await store.saveProfile(profile);
     store.listings = [car("suv", "Toyota Camry", { body_type: "suv" })];
@@ -409,9 +412,7 @@ describe("catalogue buyer filters", () => {
     };
     conversation = new Conversation(store, { catalog: lookup });
     let current = await review(conversation, "");
-    current = await conversation.handle(1, 1, button(current, "Все фильтры"));
-    current = await conversation.handle(1, 1, button(current, "Марка"));
-    current = await conversation.handle(1, 1, button(current, "Добавить"));
+    current = await conversation.handle(1, 1, button(current, "Выбрать автомобиль"));
     const oldToyota = button(current, "Toyota");
     current = await conversation.handle(1, 1, button(current, "Следующая страница"));
     const page = await store.getDraft(1);
@@ -445,9 +446,7 @@ describe("catalogue buyer filters", () => {
 
   it("clears descendants when changing a vehicle ancestor and enforces five alternatives", async () => {
     let current = await review(conversation, "");
-    current = await conversation.handle(1, 1, button(current, "Все фильтры"));
-    current = await conversation.handle(1, 1, button(current, "Марка"));
-    current = await conversation.handle(1, 1, button(current, "Добавить"));
+    current = await conversation.handle(1, 1, button(current, "Выбрать автомобиль"));
     for (const label of ["Toyota", "Camry", "XV70", "2.5 AT"])
       current = await conversation.handle(1, 1, button(current, label));
     current = await conversation.handle(1, 1, button(current, "Марка"));
@@ -456,20 +455,17 @@ describe("catalogue buyer filters", () => {
       catalogFilterSchema.parse((await store.getDraft(1))?.[1].catalog_filter).vehicles,
     ).toEqual([{ make: { id: "Honda", value: "honda", label: "Honda" } }]);
     current = await conversation.handle(1, 1, button(current, "Готово"));
-    current = await conversation.handle(1, 1, button(current, "Назад к автомобилям"));
     for (let index = 1; index < 5; index++) {
       current = await conversation.handle(1, 1, button(current, "Добавить"));
       current = await conversation.handle(1, 1, button(current, "Toyota"));
       current = await conversation.handle(1, 1, button(current, "Готово"));
-      current = await conversation.handle(1, 1, button(current, "Назад к автомобилям"));
     }
     expect(
       current
         .flatMap((reply) => reply.buttons.flat())
         .some(([label]) => label.includes("Добавить")),
     ).toBe(false);
-    current = await conversation.handle(1, 1, button(current, "1. Honda"));
-    current = await conversation.handle(1, 1, button(current, "Удалить"));
+    current = await conversation.handle(1, 1, button(current, "Убрать · Honda"));
     expect(
       catalogFilterSchema.parse((await store.getDraft(1))?.[1].catalog_filter).vehicles,
     ).toHaveLength(4);
@@ -483,7 +479,6 @@ describe("catalogue buyer filters", () => {
     profile.transmission = "manual";
     store.profiles.set(1, profile);
     let current = await conversation.handle(1, 1, "/edit");
-    current = await conversation.handle(1, 1, button(current, "Все фильтры"));
     current = await conversation.handle(1, 1, button(current, CATALOG_OPTION_LABELS.city));
     expect(
       current.flatMap((reply) => reply.buttons.flat()).some(([label]) => label === "Город А"),
@@ -527,7 +522,6 @@ describe("catalogue buyer filters", () => {
     ).toBe(false);
     current = await conversation.handle(1, 1, button(current, "Город Б"));
     current = await conversation.handle(1, 1, button(current, "Готово"));
-    current = await conversation.handle(1, 1, button(current, "К сохранению"));
     await conversation.handle(1, 1, button(current, "Сохранить без"));
     expect((await store.getProfile(1))?.catalog_filter.options.city?.[0]?.value).toBe(
       "city canonical b",
@@ -537,7 +531,6 @@ describe("catalogue buyer filters", () => {
 
   it("validates arbitrary range bounds, converts miles without rounding km, and persists source discount thresholds", async () => {
     let current = await review(conversation, "", 1, "USD", "10000.50–15000.75");
-    current = await conversation.handle(1, 1, button(current, "Все фильтры"));
     current = await conversation.handle(1, 1, button(current, CATALOG_RANGE_LABELS.mileage));
     current = await conversation.handle(1, 1, button(current, "Задать максимум"));
     current = await conversation.handle(1, 1, "100 miles");
@@ -562,7 +555,6 @@ describe("catalogue buyer filters", () => {
     current = await conversation.handle(1, 1, button(current, "Ниже рынка"));
     current = await conversation.handle(1, 1, button(current, "От 15%"));
     current = await conversation.handle(1, 1, button(current, "Назад"));
-    current = await conversation.handle(1, 1, button(current, "К сохранению"));
     await conversation.handle(1, 1, button(current, "Сохранить +"));
     const saved = await store.getProfile(1);
     expect(saved?.catalog_filter.ranges.engine_volume).toEqual({ min: 1.6, max: 2.5 });
@@ -615,7 +607,8 @@ describe("editing, monitoring and deletion", () => {
     await conversation.handle(1, 1, "/cancel");
     await conversation.handle(1, 1, deletion);
     expect(await store.getDraft(1)).toEqual(original);
-    await conversation.handle(1, 1, "15000");
+    const overview = await conversation.handle(1, 1, "15000");
+    await conversation.handle(1, 1, button(overview, "Текстовый запрос"));
     const current = await conversation.handle(1, 1, "Toyota");
     await conversation.handle(1, 1, button(current, "Сохранить"));
     expect((await store.getProfile(1))?.query).toBe("Toyota");
@@ -637,21 +630,21 @@ describe("editing, monitoring and deletion", () => {
     expect((await store.getProfile(1))?.quiet_end_minute).toBeNull();
   });
   it("preserves optional values until deliberately cleared, rejecting malformed numeric/date/city input", async () => {
-    let current = await review(conversation, "не знаю");
-    for (const [label, value] of Object.entries({
-      "Что входит": "total",
-      Город: "Бишкек",
-      Кузов: "suv",
-      "Год от": "2015",
-      "Пробег до": "90 000",
-      Коробка: "automatic",
-      "Для чего": "family",
-      Готовность: "no",
-      Планируемая: "29.02.2024",
-    })) {
-      await field(current, label);
-      current = await conversation.handle(1, 1, value);
-    }
+    await save(conversation, "");
+    const seeded = (await store.getProfile(1))!;
+    Object.assign(seeded, {
+      budget_scope: "total",
+      city: "Бишкек",
+      body_type: "suv",
+      year_min: 2015,
+      mileage_max_km: 90000,
+      transmission: "automatic",
+      use_case: "family",
+      allow_import: false,
+      purchase_by: "2024-02-29",
+    });
+    await store.saveProfile(seeded);
+    let current = await conversation.handle(1, 1, "/edit");
     await conversation.handle(1, 1, button(current, "Сохранить"));
     const before = await store.getProfile(1);
     current = await editModels("Honda");
@@ -709,16 +702,26 @@ describe("search and safe rendering", () => {
   it("shows review corrections only after explicit save", async () => {
     store.listings = [
       car("toyota", "Toyota Camry", { city: "Бишкек" }),
-      car("honda-local", "Honda Accord", { city: "Бишкек" }),
-      car("honda-other", "Honda Accord", { city: "Ош" }),
+      car("honda-local", "Honda Accord", {
+        city: "Бишкек",
+        catalog_attributes: { region: "region canonical a", city: "city canonical a" },
+      }),
+      car("honda-other", "Honda Accord", {
+        city: "Ош",
+        catalog_attributes: { region: "region canonical a", city: "city canonical b" },
+      }),
     ];
     await save(conversation);
     let current = await editModels("Honda Accord", "15000");
     expect(
       (await conversation.handle(1, 1, "/search")).flatMap((reply) => reply.listingId ?? []),
     ).toEqual(["toyota"]);
-    await field(current, "Город");
-    current = await conversation.handle(1, 1, "Бишкек");
+    current = await field(current, "Регион");
+    current = await conversation.handle(1, 1, button(current, "Регион А"));
+    current = await conversation.handle(1, 1, button(current, "Готово"));
+    current = await field(current, "Город");
+    current = await conversation.handle(1, 1, button(current, "Город А"));
+    current = await conversation.handle(1, 1, button(current, "Готово"));
     expect(
       (await conversation.handle(1, 1, "/search")).flatMap((reply) => reply.listingId ?? []),
     ).toEqual(["toyota"]);
@@ -814,9 +817,11 @@ describe("search and safe rendering", () => {
     expect((await store.getProfile(1))?.monitoring).toBe(false);
   });
   it("escapes free text in both review and saved profile", async () => {
-    let current = await review(conversation, "<b>Toyota</b>");
-    await field(current, "Город");
-    current = await conversation.handle(1, 1, "<i>Бишкек</i>");
+    await save(conversation, "<b>Toyota</b>");
+    const seeded = (await store.getProfile(1))!;
+    seeded.city = "<i>Бишкек</i>";
+    await store.saveProfile(seeded);
+    const current = await conversation.handle(1, 1, "/edit");
     await conversation.handle(1, 1, button(current, "Сохранить"));
     for (const output of [
       rendered(current),
@@ -1999,10 +2004,6 @@ describe("grammY transport boundaries", () => {
       await Promise.all([currency, budget]);
     }
     await bot.handleUpdate({
-      update_id: 6,
-      message: { ...message, text: "Toyota Camry" },
-    });
-    await bot.handleUpdate({
       update_id: 7,
       callback_query: {
         id: "save",
@@ -2015,7 +2016,7 @@ describe("grammY transport boundaries", () => {
     expect(await store.getProfile(1)).toMatchObject({
       currency: "USD",
       budget_max_minor: 1_500_000,
-      query: "Toyota Camry",
+      query: "",
     });
   });
 });
