@@ -32,6 +32,7 @@ import {
   VIN_DISCLOSURE,
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
+  VIN_PHOTOS_LABEL,
   VIN_SOURCE_NAMES,
   vinArchiveLotText,
   vinArchiveTime,
@@ -98,7 +99,7 @@ async function loadConfig(): Promise<void> {
   config = { mode: value.mode, ...(reportBotUrl ? { reportBotUrl } : {}) };
   document.documentElement.dataset.botMode = config.mode;
   document.title =
-    config.mode === "vin" ? "АвтоКГ — VIN и корейские отчёты" : "Автодом — автомобили";
+    config.mode === "vin" ? "АвтоКГ — бесплатная проверка VIN" : "Автодом — автомобили";
 }
 
 function cancelRequests(): void {
@@ -394,12 +395,7 @@ function showHome(): void {
   const goals = element("nav", "goals");
   goals.setAttribute("aria-label", "Выберите цель");
   for (const [view, number, title, description] of [
-    [
-      "vin",
-      "01",
-      "Проверить VIN",
-      "Бесплатная проверка корейских источников. VIN или фото в чате.",
-    ],
+    ["vin", "01", "Проверить VIN", "Бесплатные данные об автомобиле. VIN или фото в чате."],
     [
       "sell",
       "02",
@@ -445,16 +441,16 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
   const notice = element("p", "footnote");
   notice.setAttribute("role", "status");
   panel.append(
-    element("p", "eyebrow", "Корейская история · PDF"),
+    element("p", "muted", "Дополнительно · платный PDF"),
     element("h2", "", preview.title),
   );
   if (config?.reportBotUrl) {
-    actions.append(reportBotLink(`vin_${result.vin}`, "Купить отчёт в VIN-боте"));
+    actions.append(reportBotLink(`vin_${result.vin}`, "Условия отчёта в VIN-боте"));
     notice.textContent = "Цена и доступность — в VIN-боте. Оплата, PDF и поддержка остаются там.";
   } else if (result.reportSalesEnabled && result.reportPrice) {
     const price = paymentAmountText(result.reportPrice);
     panel.append(element("p", "report-price", price));
-    const buy = button(`КУПИТЬ ОТЧЁТ · ${price}`, () => {
+    const buy = button(`Заказать отчёт · ${price}`, () => {
       if (buy.disabled) return;
       buy.disabled = true;
       buy.textContent = "Открываем заказ…";
@@ -469,7 +465,7 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
         .finally(() => {
           if (started === generation && panel.isConnected) {
             buy.disabled = false;
-            buy.textContent = `КУПИТЬ ОТЧЁТ · ${price}`;
+            buy.textContent = `Заказать отчёт · ${price}`;
           }
         });
     });
@@ -486,8 +482,6 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
     button("Посмотреть образец PDF", () => navigate("report-example"), "button button-quiet"),
     element("p", "footnote", preview.limitations),
   );
-  if (result.carhistory.status === "available")
-    panel.append(element("p", "vin-observation", vinSourceText("carhistory", result)));
   return panel;
 }
 
@@ -553,17 +547,7 @@ function showDialogue(view: "buy" | "sell"): void {
   main.append(content, status, cancel);
   let busy = false;
   let inputContext = "";
-  const pickerControls: Record<string, true> = {
-    "Предыдущая страница": true,
-    "Следующая страница": true,
-    Готово: true,
-    Назад: true,
-    "Любые / снять ограничение": true,
-    "Сбросить поиск": true,
-    "Отмена всех изменений": true,
-    "Повторить загрузку": true,
-    "Выбрать регион / страну": true,
-  };
+  const expandedFilters = new Map<string, boolean>();
 
   function runAction(command: string): void {
     if (busy) return;
@@ -578,6 +562,8 @@ function showDialogue(view: "buy" | "sell"): void {
   function renderReply(reply: Reply): HTMLElement {
     const section = element("section", "panel dialogue-reply");
     section.tabIndex = -1;
+    const editor = view === "buy" ? reply.filterEditor : undefined;
+    const representedCommands = new Set<string>();
     if (reply.picker) {
       section.classList.add("dialogue-picker");
       const heading = element("header", "picker-heading");
@@ -608,7 +594,72 @@ function showDialogue(view: "buy" | "sell"): void {
       if (firstLine?.nodeType === Node.TEXT_NODE && firstLine.textContent?.startsWith(prefix))
         firstLine.textContent = firstLine.textContent.slice(prefix.length);
     }
-    section.append(text);
+    if (editor) {
+      section.classList.add("dialogue-filter-editor");
+      section.setAttribute("aria-label", "Условия поиска");
+      section.append(element("h2", "", "Условия поиска"));
+      if (editor.description)
+        section.append(element("p", "filter-description", editor.description));
+      if (editor.chips.length) {
+        const selected = element("div", "filter-selected");
+        selected.append(element("h3", "", "Выбранные условия"));
+        const chips = element("div", "filter-chips");
+        for (const chip of editor.chips) {
+          representedCommands.add(chip.command);
+          const control = button(
+            "",
+            () => runAction(chip.command),
+            "button button-quiet filter-chip",
+          );
+          control.setAttribute("aria-label", `Убрать условие: ${chip.label}`);
+          control.dataset.focusLabel = `chip:${chip.label}`;
+          const remove = element("span", "filter-chip-remove", "×");
+          remove.setAttribute("aria-hidden", "true");
+          control.append(element("span", "", chip.label), remove);
+          chips.append(control);
+        }
+        selected.append(chips);
+        section.append(selected);
+      }
+      for (const [index, group] of editor.sections.entries()) {
+        const fields = element("div", "filter-fields");
+        for (const field of group.fields) {
+          representedCommands.add(field.command);
+          const control = button(
+            "",
+            () => runAction(field.command),
+            "button button-quiet filter-field",
+          );
+          control.dataset.focusLabel = `field:${group.title}:${field.label}`;
+          const edit = element("span", "filter-field-edit", "Изменить");
+          edit.setAttribute("aria-hidden", "true");
+          control.append(
+            element("span", "filter-field-label", field.label),
+            element("span", "filter-field-value", field.value),
+            edit,
+          );
+          fields.append(control);
+        }
+        if (index === 0) {
+          const primary = element("fieldset", "filter-group");
+          primary.append(element("legend", "", group.title), fields);
+          section.append(primary);
+        } else {
+          const secondary = element("details", "filter-group filter-secondary");
+          secondary.open = expandedFilters.get(group.title) ?? index < 3;
+          secondary.addEventListener("toggle", () => {
+            if (secondary.isConnected) expandedFilters.set(group.title, secondary.open);
+          });
+          secondary.append(element("summary", "", group.title), fields);
+          section.append(secondary);
+        }
+      }
+      const summary = element("details", "filter-summary");
+      summary.append(element("summary", "", "Сводка и пояснения"), text);
+      section.append(summary);
+    } else {
+      section.append(text);
+    }
     if (reply.listingId) {
       section.append(
         button(
@@ -634,6 +685,7 @@ function showDialogue(view: "buy" | "sell"): void {
     }
     const actions = element("div", "dialogue-actions");
     const options = element("div", "picker-options");
+    const pickerOptions = new Map(reply.picker?.options.map((option) => [option.command, option]));
     if (reply.picker) {
       options.setAttribute("role", "group");
       options.setAttribute("aria-label", `Варианты: ${reply.picker.title}`);
@@ -641,6 +693,7 @@ function showDialogue(view: "buy" | "sell"): void {
     for (const row of reply.buttons) {
       const group = element("div", "button-row");
       for (const [label, command] of row) {
+        if (representedCommands.has(command)) continue;
         const url = safeUrl(command);
         let control: HTMLButtonElement | HTMLAnchorElement;
         if (command === "vin-report-example") {
@@ -652,16 +705,21 @@ function showDialogue(view: "buy" | "sell"): void {
           control = button(label, () => runAction(command), "button button-quiet");
         }
         control.dataset.focusLabel = label.replace(/^✓\s*/, "");
-        if (reply.picker && !Object.hasOwn(pickerControls, label)) {
+        const option = pickerOptions.get(command);
+        if (option) {
           control.classList.add("picker-option");
-          control.setAttribute("aria-pressed", String(label.startsWith("✓ ")));
+          control.setAttribute("aria-pressed", String(option.selected));
           options.append(control);
         } else {
-          if (reply.picker && label === "Готово") {
+          if (reply.picker?.applyCommand === command) {
             control.classList.remove("button-quiet");
             control.classList.add("picker-apply");
           }
-          if (reply.picker && /страница$/.test(label)) group.classList.add("picker-pagination");
+          if (editor?.applyCommand === command) {
+            control.classList.remove("button-quiet");
+            control.classList.add("filter-save");
+            group.classList.add("filter-save-row");
+          }
           group.append(control);
         }
       }
@@ -669,6 +727,14 @@ function showDialogue(view: "buy" | "sell"): void {
     }
     if (options.childElementCount) section.append(options);
     section.append(actions);
+    if (editor?.applyCommand)
+      section.append(
+        element(
+          "p",
+          "filter-save-note",
+          "Уведомления включатся только при выборе сохранения с мониторингом.",
+        ),
+      );
     return section;
   }
 
@@ -680,12 +746,14 @@ function showDialogue(view: "buy" | "sell"): void {
       form.remove();
       return;
     }
-    const context = reply.input
-      ? JSON.stringify([reply.picker?.title, reply.picker?.subtitle, reply.input])
-      : "";
-    if (!context || context !== inputContext) input.value = "";
-    inputContext = context;
     const searching = reply.picker?.searchable === true;
+    const context =
+      searching || reply.input
+        ? JSON.stringify([reply.picker?.title, reply.picker?.subtitle, reply.input])
+        : "";
+    if (searching) input.value = reply.picker!.search;
+    else if (!context || context !== inputContext) input.value = "";
+    inputContext = context;
     form.hidden = !reply.input && (view === "buy" || !!reply.picker) && !searching;
     label.textContent = reply.input?.label ?? (searching ? "Поиск по справочнику" : "Ваш ответ");
     input.placeholder =
@@ -696,7 +764,11 @@ function showDialogue(view: "buy" | "sell"): void {
     input.spellcheck = !reply.picker && input.inputMode === "text";
     submit.textContent = searching ? "Найти" : reply.input ? "Применить" : "Отправить";
     form.classList.toggle("dialogue-search", searching);
-    section.insertBefore(form, section.querySelector(".picker-options, .dialogue-actions"));
+    const searchPosition = searching ? section.querySelector(".picker-heading")?.nextSibling : null;
+    section.insertBefore(
+      form,
+      searchPosition ?? section.querySelector(".picker-options, .dialogue-actions"),
+    );
   }
 
   async function send(text: string): Promise<void> {
@@ -723,19 +795,19 @@ function showDialogue(view: "buy" | "sell"): void {
         content.append(
           element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
         );
-      if (focusLabel === "Сбросить поиск" || focusLabel === "Любые / снять ограничение")
-        input.value = "";
       const picker = result.replies.at(-1)?.picker;
       status.textContent = picker
         ? `${picker.title}. Выбрано: ${picker.selected}. Страница ${picker.page} из ${picker.pages}.`
         : "Шаг обновлён.";
       input.disabled = false;
-      if (restoreInput && !form.hidden && form.isConnected) {
+      const matching = focusLabel
+        ? Array.from(content.querySelectorAll<HTMLElement>("[data-focus-label]")).find(
+            (node) => node.dataset.focusLabel === focusLabel,
+          )
+        : undefined;
+      if (!form.hidden && form.isConnected && (restoreInput || (view === "buy" && !matching))) {
         input.focus({ preventScroll: true });
       } else if (focusLabel) {
-        const matching = Array.from(
-          content.querySelectorAll<HTMLElement>("[data-focus-label]"),
-        ).find((node) => node.dataset.focusLabel === focusLabel);
         if (matching instanceof HTMLButtonElement) matching.disabled = false;
         (matching ?? sections.at(-1))?.focus({ preventScroll: true });
       }
@@ -752,6 +824,10 @@ function showDialogue(view: "buy" | "sell"): void {
       status.textContent = `${errorText(error)} Ваш последний шаг оставлен на экране. Если ответ успел сохраниться, продолжите с актуального шага в чате.`;
       if (!content.childElementCount)
         content.append(button("Открыть шаг заново", () => void send(text), "button button-quiet"));
+      if (focused instanceof HTMLButtonElement || focused instanceof HTMLInputElement) {
+        focused.disabled = false;
+        if (focused.isConnected) focused.focus({ preventScroll: true });
+      }
     } finally {
       if (started === generation) {
         busy = false;
@@ -776,6 +852,7 @@ function gallery(
   title: string,
   photoUrls: readonly string[],
   archive?: { request: Omit<VinArchivePhotoRequest, "photo_url">; signal: AbortSignal },
+  signal: AbortSignal | undefined = archive?.signal,
 ): HTMLElement {
   const section = element("section", "gallery");
   section.setAttribute("aria-label", `Фотографии: ${title}`);
@@ -795,11 +872,12 @@ function gallery(
     if (blobUrl) URL.revokeObjectURL(blobUrl);
     blobUrl = undefined;
   };
-  archive?.signal.addEventListener(
+  signal?.addEventListener(
     "abort",
     () => {
       observer?.disconnect();
       releasePhoto();
+      for (const image of section.querySelectorAll("img")) image.removeAttribute("src");
     },
     { once: true },
   );
@@ -832,7 +910,7 @@ function gallery(
   }
   function renderPhoto(): void {
     releasePhoto();
-    if (archive?.signal.aborted) return;
+    if (signal?.aborted) return;
     const index = selected;
     const imageUrl = photos[index];
     if (imageUrl === undefined) throw new RangeError("Photo index is out of bounds");
@@ -923,7 +1001,7 @@ function gallery(
   }
   if (photoNotice && photoLink) section.append(photoNotice, photoLink);
   renderPhoto();
-  if (archive && !archive.signal.aborted) {
+  if (archive && !signal?.aborted) {
     if (typeof IntersectionObserver === "undefined") {
       visible = true;
       queueMicrotask(renderPhoto);
@@ -949,7 +1027,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element(
       "p",
       "muted",
-      "Сначала проверим корейские источники. Покажем найденные записи и доступные характеристики.",
+      "Введите VIN — бесплатно покажем найденные сведения об автомобиле и доступную историю.",
     ),
   );
   if (car) {
@@ -970,7 +1048,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   }
   const disclosure = element("details", "disclosure");
   disclosure.append(
-    element("summary", "", "Какие источники проверяем и куда передаём VIN"),
+    element("summary", "", "Конфиденциальность проверки"),
     element("p", "footnote", VIN_DISCLOSURE),
   );
   const form = element("form", "vin-form");
@@ -1071,6 +1149,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         element("p", "vin", `VIN ${result.vin}`),
         element("p", "footnote", `Ответ получен: ${vinArchiveTime(result.checked_at)}`),
       ];
+      const revealPhotos: Array<() => void> = [];
       for (const source of result.sources) {
         const section = element("section", "vin-source");
         section.dataset.status = source.status;
@@ -1137,6 +1216,14 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             once: true,
           });
           const showGallery = (index: number): void => {
+            if (
+              started !== generation ||
+              revision !== archiveRevision ||
+              controller.signal.aborted ||
+              classifiedVin !== vin ||
+              normalizeVin(input.value) !== vin
+            )
+              return;
             galleryController?.abort();
             galleryController = new AbortController();
             if (controller.signal.aborted) galleryController.abort();
@@ -1171,19 +1258,41 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               choices.push(choice);
               controls.append(choice);
             });
+            controls.hidden = true;
             lotSection.append(controls);
           }
-          lotSection.append(galleryHost);
-          showGallery(
-            Math.max(
-              0,
-              galleries.findIndex(
-                (candidate) => candidate.provider === group.photo_source.provider,
+          lotSection.append(element("p", "footnote", "Найдены архивные фотографии."), galleryHost);
+          revealPhotos.push(() => {
+            controls.hidden = false;
+            showGallery(
+              Math.max(
+                0,
+                galleries.findIndex(
+                  (candidate) => candidate.provider === group.photo_source.provider,
+                ),
               ),
-            ),
-          );
+            );
+          });
         }
         sections.push(lotSection);
+      }
+      if (revealPhotos.length) {
+        const getPhotos = button(VIN_PHOTOS_LABEL, () => {
+          if (
+            getPhotos.disabled ||
+            !getPhotos.isConnected ||
+            started !== generation ||
+            revision !== archiveRevision ||
+            controller.signal.aborted ||
+            classifiedVin !== vin ||
+            normalizeVin(input.value) !== vin
+          )
+            return;
+          getPhotos.disabled = true;
+          for (const reveal of revealPhotos) reveal();
+          getPhotos.remove();
+        });
+        sections.push(getPhotos);
       }
       archiveResults.replaceChildren(...sections);
     } catch (error) {
@@ -1207,6 +1316,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   }
   async function lookup(): Promise<void> {
     if (started !== generation || submit.disabled) return;
+    lookupController?.abort();
+    lookupController = undefined;
     resetFollowUp();
     const vin = normalizeVin(input.value);
     if (!vin) {
@@ -1224,13 +1335,14 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     input.removeAttribute("aria-invalid");
     results.setAttribute("aria-busy", "true");
     const revision = ++lookupRevision;
-    lookupController?.abort();
     const controller = new AbortController();
     lookupController = controller;
+    pending.add(controller);
+    controller.signal.addEventListener("abort", () => pending.delete(controller), { once: true });
     input.value = vin;
     submit.disabled = true;
     submit.textContent = "Проверяем…";
-    results.replaceChildren(element("p", "", `Проверяем VIN ${vin} у подключённых провайдеров…`));
+    results.replaceChildren(element("p", "", `Проверяем VIN ${vin}…`));
     try {
       const result = await request<MiniAppVinResult>(
         "/miniapp/api/vin",
@@ -1253,7 +1365,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       disclosure.hidden = korean;
       const notice = vinResultNotice(result);
       if (notice) results.append(element("p", "notice", notice));
-      if (korean) results.append(premiumPanel(result));
+      const revealPhotos: Array<() => void> = [];
       for (const provider of vinVisibleProviders(result)) {
         if (provider === "carhistory") continue;
         const observation = result[provider];
@@ -1328,13 +1440,29 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               fact.append(element("dt", "", label), element("dd", "", value));
               facts.append(fact);
             }
-            advertisement.append(
-              facts,
-              gallery(
-                `Объявление №${listing.id} · ${listing.model ?? listing.vin}`,
-                listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)),
-              ),
-            );
+            advertisement.append(facts);
+            const photoUrls = [
+              ...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id))),
+            ];
+            if (photoUrls.length) {
+              advertisement.append(
+                element("p", "footnote", `Найдены фотографии: ${photoUrls.length}.`),
+              );
+              revealPhotos.push(() => {
+                advertisement.append(
+                  gallery(
+                    `Объявление №${listing.id} · ${listing.model ?? listing.vin}`,
+                    photoUrls,
+                    undefined,
+                    controller.signal,
+                  ),
+                );
+              });
+            } else {
+              advertisement.append(
+                element("p", "footnote", "Фотографии не предоставлены источником."),
+              );
+            }
             section.append(advertisement);
           }
           section.append(
@@ -1351,6 +1479,26 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         }
         results.append(section);
       }
+      if (result.carhistory.status === "available")
+        results.append(element("p", "vin-observation", vinSourceText("carhistory", result)));
+      if (revealPhotos.length) {
+        const getPhotos = button(VIN_PHOTOS_LABEL, () => {
+          if (
+            getPhotos.disabled ||
+            !getPhotos.isConnected ||
+            started !== generation ||
+            revision !== lookupRevision ||
+            controller.signal.aborted ||
+            normalizeVin(input.value) !== vin
+          )
+            return;
+          getPhotos.disabled = true;
+          for (const reveal of revealPhotos) reveal();
+          getPhotos.remove();
+        });
+        results.append(getPhotos);
+      }
+      if (korean) results.append(premiumPanel(result));
       if (!korean) {
         classifiedVin = vin;
         const url = vinGoogleSearchUrl(vin);
@@ -1371,7 +1519,6 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       );
     } finally {
       if (started === generation && revision === lookupRevision) {
-        lookupController = undefined;
         submit.disabled = false;
         submit.textContent = "Проверить VIN";
         results.setAttribute("aria-busy", "false");

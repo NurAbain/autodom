@@ -20,6 +20,7 @@ import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_PREVIEW } from "./korean-report-example.js";
 
 export const VIN_ARCHIVE_LABEL = "Архивные фото США / ОАЭ";
+export const VIN_PHOTOS_LABEL = "Получить фото авто";
 export const VIN_ARCHIVE_CARWAY_NOTICE =
   "Архив ОАЭ — сторонний, не официальная история аукциона. В записях возможны противоречия; полнота поиска и фотографий не подтверждена.";
 export const VIN_ARCHIVE_DISCLOSURE = `«${VIN_ARCHIVE_LABEL}» — отдельный поиск сохранившихся записей и фотографий. VIN передаётся подключённым архивам только по нажатию этой кнопки. Архивы неполные; отсутствие результата не означает отсутствие ДТП.`;
@@ -92,9 +93,10 @@ export function vinArchiveSourceUrl(
 }
 
 export const VIN_DISCLOSURE =
-  "VIN передаётся подключённым сервисам: сначала проверяем корейские записи, если их нет — характеристики. Бесплатная проверка не покупает платный отчёт. Google и аукционные архивы — только по отдельному нажатию. VIN не сохраняется в поиске или профиле.";
+  "Для проверки VIN передаётся сервисам истории авто. В профиле поиска он не сохраняется.";
 export const VIN_NOT_ENABLED = "Бесплатная проверка VIN пока не подключена. Запрос не отправлен.";
-export const VIN_HELP = `Пришлите VIN: 17 латинских букв и цифр, без I, O, Q.\nМожно без команды или так: /vin KMHDU41DBAU123456.\n\n${VIN_DISCLOSURE}`;
+export const VIN_HELP =
+  "Пришлите VIN — 17 латинских букв и цифр, без I, O, Q — или фото номера. Покажем доступные сведения об автомобиле бесплатно.";
 export const VIN_CAUTION =
   "Нет записей ≠ нет ДТП или ограничений. Пробег в записи — не текущий пробег. Сверьте VIN с авто и документами.";
 export const VIN_GOOGLE_SEARCH_LABEL = "Искать VIN в Google";
@@ -172,9 +174,9 @@ export function encarHistorySummary(result: VinCheckResult): string {
   const listings = confirmedEncarListings(result);
   if (!listings.length) return "Объявления с подтверждённым VIN недоступны. История неизвестна.";
   return [
-    `Объявлений с подтверждённым VIN: ${listings.length}. Архив неполный.`,
-    ...(result.encar?.data?.partial ? ["Часть найденных записей не удалось проверить."] : []),
-    "Фото и пробег относятся к объявлениям, не к текущему состоянию. Даты публикаций указаны в местном времени архива; это не даты продажи.",
+    `Найдены объявления Encar: ${listings.length}.`,
+    ...(result.encar?.data?.partial ? ["Архив неполный."] : []),
+    "Пробег, фото и даты относятся к объявлениям, не к текущему состоянию или подтверждённой продаже.",
   ].join("\n");
 }
 
@@ -243,7 +245,7 @@ function vinSourceDescription(provider: VinProvider, result: VinCheckResult): st
     case "available": {
       if (provider === "carhistory") {
         description =
-          "Наличие отчёта подтверждено. Сам отчёт не получен и не куплен; ДТП, ремонт и владельцы неизвестны.";
+          "Отчёт CarHistory доступен. Историю ДТП, ремонта и владельцев можно получить отдельно.";
         break;
       }
       if (provider === "encar") {
@@ -340,6 +342,11 @@ export function vinResultActions(result: VinCheckResult) {
         },
       ]
     : [];
+  const photos: VinButton[] = confirmedEncarListings(result).some((listing) =>
+    listing.photo_urls.some((url) => isEncarPhotoUrl(url, listing.id)),
+  )
+    ? [{ text: VIN_PHOTOS_LABEL, callback_data: `vinphotos:${result.vin}` }]
+    : [];
   const additional: { button: VinButton; notice: string }[] = [];
   if (!koreanRecord) {
     additional.push({
@@ -357,12 +364,16 @@ export function vinResultActions(result: VinCheckResult) {
   const navigation: VinButton[] = [{ text: "Новая проверка", callback_data: "/vin" }];
   return {
     report,
+    photos,
     additional,
     navigation,
     keyboard: {
-      inline_keyboard: [...report, ...additional.map(({ button }) => button), ...navigation].map(
-        (button) => [button],
-      ),
+      inline_keyboard: [
+        ...photos,
+        ...report,
+        ...additional.map(({ button }) => button),
+        ...navigation,
+      ].map((button) => [button]),
     },
   };
 }
@@ -424,6 +435,13 @@ export function vinResultPresentation(
       checked: vinCheckedText(observation.checked_at),
     });
   }
+  if (actions.photos.length) {
+    sections.push({
+      title: "Фото автомобиля",
+      body: "Найдены фотографии. Нажмите «Получить фото авто», чтобы посмотреть.",
+      buttons: actions.photos,
+    });
+  }
   if (hasKoreanVinRecord(result)) {
     const preview = KOREAN_REPORT_PREVIEW;
     sections.push({
@@ -433,7 +451,6 @@ export function vinResultPresentation(
           ? [`<b>${escapeHtml(vinSourceDescription("carhistory", result))}</b>`]
           : []),
         escapeHtml(preview.limitations),
-        escapeHtml(preview.exampleNotice),
       ].join("\n\n"),
       ...(result.carhistory.status === "available"
         ? { checked: vinCheckedText(result.carhistory.checked_at) }
@@ -454,7 +471,6 @@ export function vinResultPresentation(
           `<b>${title}</b>\n${body}${checked ? `\n<i>${checked}</i>` : ""}`,
       ),
       `<b>Важно</b>\n${caution}`,
-      ...actions.additional.map(({ notice }) => escapeHtml(notice)),
       received,
     ].join("\n\n"),
     richHtml:

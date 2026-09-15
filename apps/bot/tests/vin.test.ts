@@ -47,7 +47,6 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).toContain("0 км");
     expect(text).toContain("2024-05-02");
     expect(text).toContain("2010-01-15");
-    expect(text).toMatch(/не куплен/);
     expect(text).toMatch(/полной гибели.*неизвестны/);
     expect(text).toMatch(/не текущий/);
     expect(text).not.toContain("attacker.invalid");
@@ -256,10 +255,21 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).not.toMatch(
       /39711062|40122438|OTHER VIN|UNKNOWN VIN|INVALID ID|attacker\.invalid/,
     );
+    expect(vinResultActions(history).photos).toEqual([]);
+    listing.photo_urls.push(
+      "https://ci.encar.com/carpicture/carpicture01/pic3972/39720103_001.jpg",
+    );
+    expect(vinResultActions(history).photos).toEqual([
+      expect.objectContaining({ callback_data: `vinphotos:${result.vin}` }),
+    ]);
+    const photoPresentation = load(vinResultPresentation(history).richHtml);
+    expect(photoPresentation('tg-button[data^="vinphotos:"]')).toHaveLength(1);
+    expect(photoPresentation("img, video, source")).toHaveLength(0);
     for (const status of ["disabled", "unavailable", "not_found"] as const) {
       const stale = { ...history, encar: { ...history.encar, status } };
       expect(hasKoreanVinRecord(stale)).toBe(false);
       expect(vinResultActions(stale).report).toEqual([]);
+      expect(vinResultActions(stale).photos).toEqual([]);
       expect(
         vinSourceText("encar", { ...history, encar: { ...history.encar, status } }),
       ).not.toContain("39720103");
@@ -268,6 +278,7 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinSourceText("encar", history)).not.toContain("39720103");
     expect(hasKoreanVinRecord(history)).toBe(false);
     expect(vinVisibleProviders(history)).toEqual([]);
+    expect(vinResultActions(history).photos).toEqual([]);
     expect(vinResultNotice(history)).toMatch(/неполная/);
   });
 

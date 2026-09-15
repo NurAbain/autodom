@@ -25,6 +25,7 @@ import {
   catalogActionAllowed,
   catalogSummary,
   renderCatalog,
+  renderFilterOverview,
   updateCatalog,
 } from "./catalog-dialogue.js";
 import { escapeHtml } from "./html.js";
@@ -43,6 +44,15 @@ export interface Reply {
   richHtml?: string;
   miniAppView?: "vin" | "buy" | "sell" | "report-example" | "orders";
   input?: { label: string; placeholder: string; mode: "text" | "numeric" | "decimal" };
+  filterEditor?: {
+    applyCommand?: string;
+    description: string;
+    sections: {
+      title: string;
+      fields: { label: string; value: string; command: string }[];
+    }[];
+    chips: { label: string; command: string }[];
+  };
   picker?: {
     title: string;
     subtitle?: string;
@@ -50,6 +60,9 @@ export interface Reply {
     pages: number;
     selected: number;
     searchable: boolean;
+    options: { command: string; selected: boolean }[];
+    applyCommand?: string;
+    search: string;
   };
 }
 export type ConversationStore = Pick<
@@ -309,6 +322,7 @@ export function packReplies(
   header: string,
   sections: readonly string[],
   buttons: Buttons = [],
+  metadata: Pick<Reply, "input" | "picker" | "filterEditor"> = {},
 ): Reply[] {
   const chunks: Reply[] = [];
   let current = "";
@@ -321,7 +335,7 @@ export function packReplies(
       } else current += (current ? "\n\n" : "") + piece;
     }
   }
-  if (current) chunks.push({ text: current, buttons });
+  if (current) chunks.push({ text: current, buttons, ...metadata });
   return chunks;
 }
 
@@ -448,6 +462,7 @@ export class Conversation {
     original: Draft,
     error = "",
   ): Promise<Reply[]> {
+    if (state === "refine" || state === "cat_menu") state = "review";
     const data: Draft = { ...original, nonce: randomBytes(12).toString("base64url") };
     const choice = (label: string, value: string): Button => [
       label,
@@ -462,69 +477,34 @@ export class Conversation {
       );
       await this.store.setDraft(userId, state, data);
       if (error) reply.text = escapeHtml(error) + "\n\n" + reply.text;
-      const replies = packReplies(reply.text, [], reply.buttons);
-      if (replies.length)
-        Object.assign(replies[replies.length - 1]!, {
-          ...(reply.input ? { input: reply.input } : {}),
-          ...(reply.picker ? { picker: reply.picker } : {}),
-        });
-      return replies;
+      return packReplies(reply.text, [], reply.buttons, {
+        ...(reply.input ? { input: reply.input } : {}),
+        ...(reply.picker ? { picker: reply.picker } : {}),
+        ...(reply.filterEditor ? { filterEditor: reply.filterEditor } : {}),
+      });
     }
-    await this.store.setDraft(userId, state, data);
     let text: string;
     let buttons: Buttons;
     let input: Reply["input"];
+    let filterEditor: Reply["filterEditor"];
     if (state === "review") {
-      const candidate = this.draftProfile(userId, data, await this.store.getProfile(userId));
+      const overview = renderFilterOverview(data, choice);
+      const monitor = choice("Сохранить + бесплатный мониторинг", "save.monitor");
+      filterEditor = overview.filterEditor!;
+      filterEditor.applyCommand = monitor[1];
       text =
-        "<b>Проверьте поиск</b>\n\n" +
-        `Рынок: ${MARKETS[candidate.market as keyof typeof MARKETS]}\n` +
-        `Бюджет: ${candidate.budget_min_minor ? money(candidate.budget_min_minor, candidate.currency) + " — " : "до "}${money(candidate.budget_max_minor, candidate.currency)} · ${BUDGET_SCOPES[candidate.budget_scope as keyof typeof BUDGET_SCOPES]}\n` +
-        `Текстовый запрос: ${candidate.query ? escapeHtml(candidate.query) : "не задан"}\n` +
-        (candidate.city ? `Город: ${escapeHtml(candidate.city)}\n` : "") +
-        [
-          candidate.body_type ? BODY_TYPES[candidate.body_type as keyof typeof BODY_TYPES] : "",
-          candidate.year_min ? `от ${candidate.year_min} г.` : "",
-          candidate.mileage_max_km !== null ? `до ${candidate.mileage_max_km} км` : "",
-          candidate.transmission
-            ? TRANSMISSIONS[candidate.transmission as keyof typeof TRANSMISSIONS]
-            : "",
-          candidate.allow_import === false ? "без импорта" : "",
-        ]
-          .filter(Boolean)
-          .join(" · ") +
-        `\nЦель (заметка): ${USE_CASES[candidate.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${candidate.purchase_by ? escapeHtml(candidate.purchase_by) : "не задана"}.` +
-        "\n" +
-        catalogSummary(candidate.catalog_filter) +
-        "\n\n" +
-        CATALOG_COVERAGE_NOTE +
-        "\nМожно сохранить сейчас или уточнить фильтры. Бюджет сравнивается с ценой объявления, не со всеми расходами покупки. Неизвестные данные не проходят выбранный фильтр. /profile — подробные условия после сохранения.\n\n" +
-        "Выберите, присылать ли новые совпадения и снижение цены. Оба варианта бесплатны. /cancel — отменить изменения.";
+        overview.text +
+        "\n\nВыберите, присылать ли новые совпадения и снижение цены. Оба варианта бесплатны. /cancel — отменить изменения.";
       buttons = [
-        [choice("Сохранить + бесплатный мониторинг", "save.monitor")],
+        [monitor],
         [choice("Сохранить без уведомлений", "save.silent")],
-        [choice("Бюджет", "edit.budget"), choice("Марки и модели", "edit.query")],
-        [choice("Все фильтры автомобиля", "catalog")],
-        [choice("Уточнить фильтры", "refine")],
+        ...overview.buttons,
+        [choice("Как работают условия и источники", "limitations")],
         [["Отмена", "/cancel"]],
       ];
-    } else if (state === "refine") {
-      text =
-        "<b>Дополнительные условия</b>\nВсе поля необязательны. Выберите только важное; остальные не ограничивают поиск.\n\n" +
-        profileText(this.draftProfile(userId, data, await this.store.getProfile(userId)));
-      const fields = Object.entries(FIELD_LABELS);
-      buttons = [];
-      for (let index = 0; index < fields.length; index += 2)
-        buttons = [
-          ...buttons,
-          fields.slice(index, index + 2).map(([field, label]) => choice(label, `edit.${field}`)),
-        ];
-      buttons = [
-        [choice("Все фильтры автомобиля · справочник", "catalog")],
-        ...buttons,
-        [choice("Назад к сохранению", "back")],
-        [["Отмена", "/cancel"]],
-      ];
+    } else if (state === "limitations") {
+      text = `<b>Как работает поиск</b>\n${FILTER_NOTE}\n\n${CATALOG_COVERAGE_NOTE}`;
+      buttons = [[choice("Назад к условиям поиска", "back")], [["Отмена", "/cancel"]]];
     } else {
       const prompts: Record<string, string> = {
         market:
@@ -532,7 +512,7 @@ export class Conversation {
         currency: "В какой валюте задать бюджет? Значение бюджета уточняется перед сохранением.",
         budget: `Какой бюджет в ${data.pending_currency ?? data.currency ?? "USD"}? Например: 15000, 15к или 10000–15000. Без обозначения валюты.`,
         query:
-          "Выберите автомобиль из справочника кнопками: марка → модель → поколение → модификация. Или намеренно задайте текстовый запрос: Toyota Camry, Honda Accord. Запятая разделяет альтернативы; внутри варианта все слова обязательны. Текстовый запрос вместе со справочником ограничивает поиск дополнительно.",
+          "Дополнительный текстовый запрос: Toyota Camry, Honda Accord. Запятая разделяет альтернативы; внутри варианта все слова обязательны. Запрос применяется вместе с условиями справочника. Можно оставить пустым, нажав «Пока не знаю».",
         budget_scope:
           "Что входит в бюджет? Цена автомобиля — сравнение с ценой объявления. Под ключ — иностранные объявления исключены, пока нет полной стоимости ввоза; для местных проверяется только цена машины, дополнительные расходы не рассчитаны.",
         city: "Город объявления (до 80 символов), например Бишкек. Это место автомобиля в источнике, не адрес доставки. При выборе города объявления без известного города исключаются.",
@@ -569,11 +549,7 @@ export class Conversation {
           placeholder: "Toyota Camry, Honda Accord",
           mode: "text",
         };
-        buttons = [
-          [choice("Выбрать автомобиль кнопками", "catalog")],
-          [choice("Ввести текстовый запрос", "manual")],
-          ...buttons,
-        ];
+        buttons = [[choice("Выбрать автомобиль кнопками", "catalog")], ...buttons];
       } else if (state === "budget") {
         const currency = data.pending_currency ?? data.currency;
         const presets =
@@ -619,9 +595,11 @@ export class Conversation {
       buttons = [...buttons, [["Отмена", "/cancel"]]];
       text += "\n/cancel — отменить весь ввод. Мониторинг на время изменений приостановлен.";
     }
-    const replies = packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons);
-    if (input && replies.length) replies[replies.length - 1]!.input = input;
-    return replies;
+    await this.store.setDraft(userId, state, data);
+    return packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons, {
+      ...(input ? { input } : {}),
+      ...(filterEditor ? { filterEditor } : {}),
+    });
   }
   private async advance(userId: number, state: string, data: Draft): Promise<Reply[]> {
     const filter = data.catalog_filter as CatalogFilter | undefined;
@@ -639,7 +617,7 @@ export class Conversation {
     const next: Record<string, string> = {
       market: "currency",
       currency: "budget",
-      budget: "query",
+      budget: "review",
     };
     return this.prompt(userId, returnReview ? "review" : (next[state] ?? "review"), data);
   }
@@ -746,10 +724,18 @@ export class Conversation {
       let allowed = Object.keys(CHOICES[state] ?? {});
       if (state.startsWith("cat_"))
         allowed = Object.keys((draft[1].cat_actions as Record<string, unknown> | undefined) ?? {});
-      else if (state === "review")
-        allowed = ["save.monitor", "save.silent", "refine", "edit.budget", "edit.query", "catalog"];
-      else if (state === "refine")
-        allowed = ["back", "catalog", ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`)];
+      else if (state === "review" || state === "refine")
+        allowed = [
+          "save.monitor",
+          "save.silent",
+          "refine",
+          "catalog",
+          "limitations",
+          "back",
+          ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`),
+          ...Object.keys((draft[1].cat_actions as Record<string, unknown> | undefined) ?? {}),
+        ];
+      else if (state === "limitations") allowed = ["back"];
       else if (state === "currency") allowed.push("USD", "KGS");
       else if (state === "query") allowed.push("catalog", "manual");
       else if (state === "budget") {
@@ -858,7 +844,7 @@ export class Conversation {
     }
     if (command === "/help")
       return packReplies(
-        "/start — три цели: VIN, продажа/обмен, покупка\n/vin — бесплатные корейские данные; можно отправить фото VIN\n/sell — продать или обменять своё авто на недвижимость / первоначальный взнос\n/mycar — сохранённое авто\n/orders — мои заказы, оплата и поддержка услуг\n/buy — открыть поиск или продолжить черновик\n/search — подходящие автомобили с фото\n/profile — сохранённые фильтры и их ограничения\n/edit — изменить фильтры\n/resume — включить бесплатный мониторинг\n/pause — остановить уведомления\n/quiet HH:MM-HH:MM — тихие часы (Бишкек); /quiet off — отключить\n/privacy — данные и согласие\n/tips — советы\n/status — каталог\n/cancel — отменить текущий ввод; сохранённые данные остаются\n/delete — удалить данные с подтверждением\n\nПокупка: валюта → бюджет → модели → проверка. Остальные фильтры необязательны. Уведомления — только по вашему выбору. Переключение целей сохраняет черновик покупки; незавершённый ввод своего авто сбрасывается, сохранённая карточка остаётся.",
+        "/start — три цели: VIN, продажа/обмен, покупка\n/vin — бесплатные корейские данные; можно отправить фото VIN\n/sell — продать или обменять своё авто на недвижимость / первоначальный взнос\n/mycar — сохранённое авто\n/orders — мои заказы, оплата и поддержка услуг\n/buy — открыть поиск или продолжить черновик\n/search — подходящие автомобили с фото\n/profile — сохранённые фильтры и их ограничения\n/edit — изменить фильтры\n/resume — включить бесплатный мониторинг\n/pause — остановить уведомления\n/quiet HH:MM-HH:MM — тихие часы (Бишкек); /quiet off — отключить\n/privacy — данные и согласие\n/tips — советы\n/status — каталог\n/cancel — отменить текущий ввод; сохранённые данные остаются\n/delete — удалить данные с подтверждением\n\nПокупка: валюта → бюджет → условия поиска → сохранение. Марка, модель и остальные фильтры необязательны. Уведомления — только по вашему выбору. Переключение целей сохраняет черновик покупки; незавершённый ввод своего авто сбрасывается, сохранённая карточка остаётся.",
         [],
         profile ? menu(profile) : START_BUTTONS,
       );
@@ -1024,12 +1010,18 @@ export class Conversation {
         "Команда или кнопка не может быть значением поля. Продолжите ввод или /cancel.",
         [],
       );
-    if (state.startsWith("cat_")) {
+    if (
+      state.startsWith("cat_") ||
+      ((state === "review" || state === "refine") &&
+        action !== null &&
+        catalogActionAllowed(data, action))
+    ) {
       if (action !== null && !catalogActionAllowed(data, action))
         return packReplies("Эта кнопка не относится к текущему шагу.", [], []);
       const updated = updateCatalog(state, data, action, text);
       return this.prompt(userId, updated.state, updated.data, updated.error);
     }
+    if (state === "limitations" && action === "back") return this.prompt(userId, "review", data);
     if (action === "catalog")
       return this.prompt(userId, state === "query" ? "cat_vehicles" : "cat_menu", {
         ...data,
@@ -1059,6 +1051,7 @@ export class Conversation {
           ...(await this.search(profile)),
         ];
       }
+      if (action === "limitations") return this.prompt(userId, "limitations", data);
       if (action === "refine") return this.prompt(userId, "refine", data);
       if (action === "back") return this.prompt(userId, "review", data);
       if (action?.startsWith("edit."))
