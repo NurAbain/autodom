@@ -179,6 +179,7 @@ export const paymentOrders = pgTable(
     id: text("id").primaryKey(),
     user_id: money("user_id").notNull(),
     product: text("product").$type<PaymentOrder["product"]>().notNull(),
+    report_kind: text("report_kind").$type<PaymentOrder["reportKind"]>(),
     provider: text("provider").$type<PaymentOrder["provider"]>().notNull(),
     channel: text("channel").$type<PaymentOrder["channel"]>().notNull(),
     currency: text("currency").$type<PaymentOrder["currency"]>().notNull(),
@@ -216,6 +217,7 @@ export const paymentOrders = pgTable(
       table.vin,
       table.provider,
       table.channel,
+      sql`coalesce(${table.report_kind}, 'korea')`,
     ),
     check(
       "payment_orders_channel",
@@ -224,6 +226,12 @@ export const paymentOrders = pgTable(
     check(
       "payment_orders_kind",
       sql`(${table.provider} = 'finik' AND ${table.currency} = 'KGS' AND ((${table.product} = 'inspection' AND ${table.vin} IS NULL) OR (${table.product} = 'vin_report' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'))) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
+    ),
+    check(
+      "payment_orders_report_kind",
+      sql`(${table.product} = 'inspection' AND ${table.report_kind} IS NULL)
+        OR (${table.product} = 'vin_report' AND (coalesce(${table.report_kind}, 'korea') = 'korea'
+          OR (${table.report_kind} = 'carfax' AND ${table.provider} = 'finik' AND ${table.channel} = 'telegram')))`,
     ),
     check(
       "payment_orders_amount",

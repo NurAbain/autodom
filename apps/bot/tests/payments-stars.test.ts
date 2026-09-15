@@ -56,6 +56,7 @@ function paidOrder(): PaymentOrder {
     userId: 42,
     vin,
     product: "vin_report",
+    reportKind: "korea",
     provider: "telegram_stars",
     channel: "telegram",
     currency: "XTR",
