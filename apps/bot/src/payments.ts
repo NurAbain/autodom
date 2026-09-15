@@ -1,5 +1,10 @@
 import { isIP } from "node:net";
-import { finikPaymentId, isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
+import {
+  finikPaymentId,
+  isWebVinReport,
+  type PaymentOrder,
+  type VinReportKind,
+} from "@autodom/core/payments";
 import { normalizeVin, type VinCheckResult } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import { PaymentStore } from "@autodom/storage/payments";
@@ -7,6 +12,8 @@ import { AbortController as TelegramAbortController } from "abort-controller";
 import { type Api, GrammyError } from "grammy";
 import type { PreCheckoutQuery, Update } from "grammy/types";
 import {
+  CARFAX_REPORT_FINIK_MINOR,
+  CARFAX_REPORT_TELEGRAM_FINIK_TERMS,
   paymentAmountText,
   paymentOrderStatus,
   VIN_REPORT_FINIK_MINOR,
@@ -39,6 +46,13 @@ export function loadVinReportTelegramFinikEnabled(env: NodeJS.ProcessEnv = proce
   if (value === undefined || value === "false") return false;
   if (value === "true") return true;
   throw new Error("AUTODOM_VIN_REPORT_TELEGRAM_FINIK_ENABLED must be true or false");
+}
+
+export function loadCarfaxReportEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.AUTODOM_CARFAX_REPORT_ENABLED;
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new Error("AUTODOM_CARFAX_REPORT_ENABLED must be true or false");
 }
 
 export class PaymentRequestError extends Error {
@@ -178,6 +192,12 @@ export class PaymentService {
     return this.finikEnabled && !!this.gateway && !!this.telegramApi;
   }
 
+  get carfaxReportSalesEnabled(): boolean {
+    return this.carfaxEnabled && this.nativeFinikEnabled && !!this.gateway && !!this.telegramApi;
+  }
+
+  readonly carfaxReportPrice = { amount: CARFAX_REPORT_FINIK_MINOR, currency: "KGS" } as const;
+
   forgetVinResult(userId: number, vin: string, channel: "telegram" | "web" = "telegram"): number {
     const now = Date.now();
     for (const [id, result] of this.koreanResults) {
@@ -211,58 +231,83 @@ export class PaymentService {
     userId: number,
     value: string,
     channel: "telegram" | "web" = "telegram",
+    reportKind: VinReportKind = "korea",
   ): Promise<PaymentOrder> {
+    if (reportKind !== "korea" && reportKind !== "carfax")
+      throw new PaymentRequestError(400, "Неизвестный вид отчёта.");
+    const carfax = reportKind === "carfax";
     const web = channel === "web";
     const finik = web || this.nativeFinikEnabled;
-    if (web ? !this.webReportSalesEnabled : !this.reportSalesEnabled)
-      throw new PaymentRequestError(503, "Покупка PDF сейчас отключена.");
+    if (
+      carfax
+        ? web || !this.carfaxReportSalesEnabled
+        : web
+          ? !this.webReportSalesEnabled
+          : !this.reportSalesEnabled
+    )
+      throw new PaymentRequestError(503, "Покупка этого PDF сейчас отключена.");
     const vin = normalizeVin(value);
+    if (!vin) throw new PaymentRequestError(400, "Нужен корректный VIN из 17 символов.");
     const key = `${channel}:${userId}:${vin}`;
-    const eligibility = vin ? this.koreanResults.get(key) : undefined;
-    if (!vin || !eligibility?.eligible || eligibility.expiresAt <= Date.now())
+    const eligibility = carfax ? undefined : this.koreanResults.get(key);
+    if (!carfax && (!eligibility?.eligible || eligibility.expiresAt <= Date.now()))
       throw new PaymentRequestError(
         409,
         "Сначала выполните свежую проверку этого VIN с корейской записью.",
       );
-    return this.store.withLock(`autodom:report:offer:${channel}:${userId}:${vin}`, async () => {
-      const existing = await this.ledger.findOpenVinReport(
-        userId,
-        vin,
-        finik ? "finik" : "telegram_stars",
-        channel,
-      );
-      if (existing) return existing;
-      const me = await this.requireTelegramApi().getMe();
-      if (
-        this.koreanResults.get(key) !== eligibility ||
-        !eligibility.eligible ||
-        eligibility.expiresAt <= Date.now()
-      )
-        throw new PaymentRequestError(
-          409,
-          "Проверка VIN обновилась. Повторите проверку перед покупкой.",
+    return this.store.withLock(
+      `autodom:report:offer:${channel}:${userId}:${vin}:${reportKind}`,
+      async () => {
+        const existing = await this.ledger.findOpenVinReport(
+          userId,
+          vin,
+          finik ? "finik" : "telegram_stars",
+          channel,
+          reportKind,
         );
-      const input = {
-        userId,
-        vin,
-        product: "vin_report" as const,
-        amount: finik ? VIN_REPORT_FINIK_MINOR : VIN_REPORT_STARS,
-        title: "Полный корейский PDF",
-        description: `Полный корейский PDF по VIN ${vin}. Ручная выдача в течение ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты.`,
-        seller: `Autodom · владелец ${VIN_REPORT_OWNER}`,
-        executor: `Владелец Autodom · ${VIN_REPORT_OWNER}`,
-        supportUrl: `https://t.me/${me.username}?start=paysupport`,
-        terms: web
-          ? VIN_REPORT_WEB_TERMS
-          : finik
-            ? VIN_REPORT_TELEGRAM_FINIK_TERMS
-            : VIN_REPORT_TERMS,
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      };
-      return finik
-        ? this.ledger.createFinikReportOffer(input, channel)
-        : this.ledger.createOffer(input);
-    });
+        if (existing) return existing;
+        const me = await this.requireTelegramApi().getMe();
+        if (
+          !carfax &&
+          (!eligibility ||
+            this.koreanResults.get(key) !== eligibility ||
+            !eligibility.eligible ||
+            eligibility.expiresAt <= Date.now())
+        )
+          throw new PaymentRequestError(
+            409,
+            "Проверка VIN обновилась. Повторите проверку перед покупкой.",
+          );
+        const title = carfax ? "CARFAX · PDF" : "Полный корейский PDF";
+        const input = {
+          userId,
+          vin,
+          product: "vin_report" as const,
+          reportKind,
+          amount: carfax
+            ? CARFAX_REPORT_FINIK_MINOR
+            : finik
+              ? VIN_REPORT_FINIK_MINOR
+              : VIN_REPORT_STARS,
+          title,
+          description: `${title} по VIN ${vin}. Ручная выдача в течение ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты.`,
+          seller: `Autodom · владелец ${VIN_REPORT_OWNER}`,
+          executor: `Владелец Autodom · ${VIN_REPORT_OWNER}`,
+          supportUrl: `https://t.me/${me.username}?start=paysupport`,
+          terms: carfax
+            ? CARFAX_REPORT_TELEGRAM_FINIK_TERMS
+            : web
+              ? VIN_REPORT_WEB_TERMS
+              : finik
+                ? VIN_REPORT_TELEGRAM_FINIK_TERMS
+                : VIN_REPORT_TERMS,
+          expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        };
+        return finik
+          ? this.ledger.createFinikReportOffer(input, channel)
+          : this.ledger.createOffer(input);
+      },
+    );
   }
 
   private requireTelegramApi(): Api {
@@ -444,7 +489,7 @@ export class PaymentService {
           : `Выдача приостановлена. Сначала проверьте состояние:\n/report ${current.id}`;
         await api.sendMessage(
           VIN_REPORT_OWNER,
-          `Оплачен корейский PDF\nЗаказ: ${current.id}\nVIN: ${current.vin}\nПокупатель: ${current.userId}\nСумма: ${paymentAmountText(current)}\nВыдать до: ${deadline}\n${paymentOrderStatus(current)}\n\n${instructions}\nСтатус: /report ${current.id}`,
+          `Оплачен отчёт: ${current.title}\nЗаказ: ${current.id}\nVIN: ${current.vin}\nПокупатель: ${current.userId}\nСумма: ${paymentAmountText(current)}\nВыдать до: ${deadline}\n${paymentOrderStatus(current)}\n\n${instructions}\nСтатус: /report ${current.id}`,
         );
         await this.ledger.markReportNotified(current.id);
       });
@@ -481,7 +526,7 @@ export class PaymentService {
       let messageId: number;
       try {
         const message = await api.sendDocument(order.userId, fileId, {
-          caption: `Ваш полный корейский PDF\nVIN ${order.vin}\nЗаказ ${order.id}\nПоддержка: /paysupport`,
+          caption: `${order.title}\nVIN ${order.vin}\nЗаказ ${order.id}\nПоддержка: /paysupport`,
         });
         messageId = message.message_id;
       } catch (error) {
@@ -592,6 +637,7 @@ export class PaymentService {
     private readonly fetcher: typeof fetch = fetch,
     private readonly finikEnabled = false,
     private readonly nativeFinikEnabled = false,
+    private readonly carfaxEnabled = false,
   ) {
     this.ledger = new PaymentStore(store);
   }
@@ -763,6 +809,7 @@ export class PaymentService {
           throw new PaymentRequestError(503, "Покупка PDF за Stars сейчас отключена.");
         if (
           order.channel !== "telegram" ||
+          order.reportKind === "carfax" ||
           order.currency !== "XTR" ||
           order.amount !== VIN_REPORT_STARS ||
           !order.vin
@@ -804,9 +851,16 @@ export class PaymentService {
         const enabled = isWebVinReport(order)
           ? this.webReportSalesEnabled
           : this.nativeFinikEnabled && this.reportSalesEnabled;
+        if (
+          order.reportKind === "carfax" &&
+          (order.channel !== "telegram" || (!this.carfaxReportSalesEnabled && !order.invoiceUrl))
+        )
+          throw new PaymentRequestError(503, "Новые заказы CARFAX сейчас отключены.");
         if (!enabled)
           throw new PaymentRequestError(503, "Покупка PDF через Finik сейчас отключена.");
-        if (order.amount !== VIN_REPORT_FINIK_MINOR || !order.vin)
+        const expectedAmount =
+          order.reportKind === "carfax" ? CARFAX_REPORT_FINIK_MINOR : VIN_REPORT_FINIK_MINOR;
+        if (order.amount !== expectedAmount || !order.vin)
           throw new PaymentRequestError(409, "Некорректное предложение PDF.");
       }
       if (

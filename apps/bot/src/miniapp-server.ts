@@ -434,6 +434,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
                       ...result,
                       reportSalesEnabled: payments?.reportSalesEnabled ?? false,
                       reportPrice: payments?.reportPrice ?? null,
+                      carfaxReportSalesEnabled: payments?.carfaxReportSalesEnabled ?? false,
+                      carfaxReportPrice: payments?.carfaxReportPrice ?? null,
                     },
               );
           } catch {

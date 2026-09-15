@@ -4,6 +4,8 @@ import type { VinCheckResult } from "@autodom/core/vin";
 export type MiniAppVinResult = VinCheckResult & {
   reportSalesEnabled: boolean;
   reportPrice: Pick<PaymentOrder, "amount" | "currency"> | null;
+  carfaxReportSalesEnabled: boolean;
+  carfaxReportPrice: Pick<PaymentOrder, "amount" | "currency"> | null;
 };
 
 export interface MiniAppFinikMethods {

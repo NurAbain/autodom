@@ -2,6 +2,7 @@ import { isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
 
 export const VIN_REPORT_STARS = 500;
 export const VIN_REPORT_FINIK_MINOR = 49900;
+export const CARFAX_REPORT_FINIK_MINOR = 49900;
 export const VIN_REPORT_OWNER = 706854211;
 export const VIN_REPORT_SLA_MS = 60 * 60 * 1000;
 export const VIN_REPORT_MAX_BYTES = 20 * 1024 * 1024;
@@ -40,6 +41,22 @@ export const VIN_REPORT_WEB_TERMS = `Полный корейский PDF · ${VI
 
 Продавец и исполнитель: владелец Autodom, Telegram ID ${VIN_REPORT_OWNER}. По покупке отвечает Autodom.
 Поддержка и полный возврат — через форму заказа. Ответ придёт в личный чат бота.
+
+Нажимая кнопку согласия перед оплатой, вы подтверждаете VIN, цену, срок и все эти условия.`;
+
+export const CARFAX_REPORT_TELEGRAM_FINIK_TERMS = `CARFAX · PDF · ${CARFAX_REPORT_FINIK_MINOR / 100} сом (KGS)
+Разовая покупка отчёта CARFAX по указанному VIN через Finik в боте, не подписка.
+
+Владелец Autodom получает и выдаёт настоящий PDF вручную в этот бот — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если получить отчёт невозможно — полный возврат через Finik.
+
+Это заказ отчёта, а не подтверждение найденной истории. Состав и количество записей зависят от данных CARFAX. Отсутствие записей не означает отсутствие ДТП, ремонта или других проблем.
+
+Публичный образец показывает формат документа. Это не отчёт по вашему VIN и не результат вашей покупки.
+
+Возврат выполняет владелец в кабинете Finik. Заявка на возврат ещё не означает, что деньги возвращены.
+
+Продавец и исполнитель: владелец Autodom, Telegram ID ${VIN_REPORT_OWNER}. По покупке отвечает Autodom, не поддержка Telegram.
+Поддержка и полный возврат: /paysupport текст.
 
 Нажимая кнопку согласия перед оплатой, вы подтверждаете VIN, цену, срок и все эти условия.`;
 
