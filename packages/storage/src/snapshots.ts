@@ -8,6 +8,7 @@ import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-veh
 import {
   finikPaymentId,
   type PaymentEvent,
+  VIN_REPORT_KINDS,
   validatePaymentAmount,
   validatePaymentEvent,
   validatePaymentOffer,
@@ -31,7 +32,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -118,6 +119,12 @@ export async function insertSnapshotRow(
     validateOwnerVehicle(card as unknown as OwnerVehicle);
   }
   if (table === "payment_orders") {
+    if (
+      row.product === "vin_report"
+        ? !VIN_REPORT_KINDS.some((kind) => row.report_kind === kind)
+        : row.report_kind !== null
+    )
+      throw new Error("Invalid snapshot report kind");
     const order = decodePaymentOrder({
       ...row,
       user_id: safeNumber(row.user_id),
@@ -252,6 +259,8 @@ export async function backup(store: Store, destination: string): Promise<void> {
             const result = await store.database.execute(sql`FETCH FORWARD 200 FROM snapshot_rows`);
             if (result.rows.length === 0) break;
             for (const row of result.rows) {
+              if (table === "payment_orders" && row.product === "vin_report")
+                row.report_kind ??= "korea";
               await emit({ table, row });
               counts[table]++;
             }
@@ -304,7 +313,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, 7, 8, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
           (header.schema_version as number) >= 8
@@ -439,6 +448,11 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
             ...row,
             channel: row.provider === "finik" && row.product === "vin_report" ? "web" : "telegram",
           };
+        }
+        if ((header.schema_version as number) < 10 && table === "payment_orders") {
+          if (Object.hasOwn(row, "report_kind"))
+            throw new Error("Unexpected report kind in historical snapshot");
+          row = { ...row, report_kind: row.product === "vin_report" ? "korea" : null };
         }
         await insertSnapshotRow(target, table, row);
         counts[table]++;
