@@ -55,6 +55,10 @@ describe("Stars rail validation", () => {
     expect(() => validatePaymentOffer({ ...report, vin: report.vin.toLowerCase() })).toThrow();
     expect(() => validatePaymentOffer({ ...report, vin: null })).toThrow();
     expect(() => validatePaymentOffer({ ...report, amount: 0.5 })).toThrow();
+    expect(() => validatePaymentOffer({ ...report, reportKind: "other" as never })).toThrow();
+    expect(() =>
+      validatePaymentOffer({ ...report, product: "inspection", vin: null, reportKind: "carfax" }),
+    ).toThrow();
     expect(() => validatePaymentOffer({ ...report, product: "inspection" })).toThrow();
     expect(() =>
       validatePaymentOffer({

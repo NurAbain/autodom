@@ -8,6 +8,8 @@ import {
   type PaymentOrder,
   type PaymentProvider,
   type PaymentRefund,
+  VIN_REPORT_KINDS,
+  type VinReportKind,
   validatePaymentAmount,
   validatePaymentEvent,
   validatePaymentOffer,
@@ -48,6 +50,7 @@ export function decodePaymentOrder(
     id: row.id,
     userId: row.user_id,
     product: row.product,
+    reportKind: row.product === "vin_report" ? (row.report_kind ?? "korea") : null,
     provider: row.provider,
     channel: row.channel,
     currency: row.currency,
@@ -137,10 +140,19 @@ export class PaymentStore {
   ): Promise<PaymentOrder> {
     validatePaymentOffer(input);
     if (channel !== "telegram" && channel !== "web") throw new Error("Invalid payment channel");
+    const reportKind = input.product === "vin_report" ? (input.reportKind ?? "korea") : null;
+    if (reportKind === "carfax" && (provider !== "finik" || channel !== "telegram"))
+      throw new Error("CARFAX reports require Finik and Telegram");
     if (Date.parse(input.expiresAt) <= Date.now()) throw new Error("Payment offer has expired");
     return this.store.transaction(async () => {
       if (input.product === "vin_report") {
-        const existing = await this.findOpenVinReport(input.userId, input.vin!, provider, channel);
+        const existing = await this.findOpenVinReport(
+          input.userId,
+          input.vin!,
+          provider,
+          channel,
+          reportKind!,
+        );
         if (existing) return existing;
       }
       const [row] = await this.store.database
@@ -149,6 +161,7 @@ export class PaymentStore {
           id: randomUUID(),
           user_id: input.userId,
           product: input.product,
+          report_kind: reportKind,
           provider,
           channel,
           currency: provider === "telegram_stars" ? "XTR" : "KGS",
@@ -622,12 +635,15 @@ export class PaymentStore {
     vin: string,
     provider: PaymentProvider,
     channel: PaymentChannel,
+    reportKind: VinReportKind = "korea",
   ): Promise<PaymentOrder | null> {
     if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(vin))
       throw new Error("Invalid report buyer or VIN");
     if (
       (provider !== "finik" && provider !== "telegram_stars") ||
-      (channel !== "telegram" && channel !== "web")
+      (channel !== "telegram" && channel !== "web") ||
+      !VIN_REPORT_KINDS.includes(reportKind) ||
+      (reportKind === "carfax" && (provider !== "finik" || channel !== "telegram"))
     )
       throw new Error("Invalid report provider or channel");
     const rows = await this.store.database
@@ -640,6 +656,7 @@ export class PaymentStore {
           eq(paymentOrders.product, "vin_report"),
           eq(paymentOrders.provider, provider),
           eq(paymentOrders.channel, channel),
+          sql`coalesce(${paymentOrders.report_kind}, 'korea') = ${reportKind}`,
           ne(paymentOrders.payment_status, "refunded"),
           ne(paymentOrders.invoice_status, "cancelled"),
           ne(paymentOrders.fulfillment_status, "cancelled"),

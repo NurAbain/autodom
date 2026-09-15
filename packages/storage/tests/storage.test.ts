@@ -137,6 +137,11 @@ async function rewriteSnapshot(
     for (const record of records)
       if (record.table === "payment_orders") delete (record.row as Record<string, unknown>).channel;
   }
+  if (Number(records[0]?.schema_version) < 10) {
+    for (const record of records)
+      if (record.table === "payment_orders")
+        delete (record.row as Record<string, unknown>).report_kind;
+  }
   const body = records.map((record) => `${JSON.stringify(record)}\n`).join("");
   footer.sha256 = createHash("sha256").update(body).digest("hex");
   await writeFile(destination, `${body}${JSON.stringify(footer)}\n`);
@@ -538,6 +543,162 @@ describe("Independent Finik website reports", () => {
     expect(await restored.getWebSessionUser(hash)).toBe(1);
     vi.setSystemTime((NOW + 3600) * 1000);
     expect(await restored.getWebSessionUser(hash)).toBeNull();
+  });
+});
+
+describe("Explicit VIN report identity", () => {
+  it("deduplicates within each SKU and preserves CARFAX capture, delivery and refund on restore", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    const quote = { ...reportOffer(), amount: 49900 };
+    const carfaxQuote = { ...quote, reportKind: "carfax" as const };
+    const [korea, carfax, koreaRetry, carfaxRetry] = await Promise.all([
+      payments.createFinikReportOffer(quote, "telegram"),
+      peer.createFinikReportOffer(carfaxQuote, "telegram"),
+      peer.createFinikReportOffer(quote, "telegram"),
+      payments.createFinikReportOffer(carfaxQuote, "telegram"),
+    ]);
+    expect(koreaRetry.id).toBe(korea.id);
+    expect(carfaxRetry.id).toBe(carfax.id);
+    expect(carfax.id).not.toBe(korea.id);
+    expect((await payments.findOpenVinReport(1, korea.vin!, "finik", "telegram"))?.id).toBe(
+      korea.id,
+    );
+    expect(
+      (await payments.findOpenVinReport(1, carfax.vin!, "finik", "telegram", "carfax"))?.id,
+    ).toBe(carfax.id);
+    await expect(payments.createOffer(carfaxQuote)).rejects.toThrow();
+    await expect(payments.createFinikReportOffer(carfaxQuote, "web")).rejects.toThrow();
+    await payments.acceptOrder(carfax.id, 1);
+    const capture = { ...receipt(carfax.id), amount: carfax.amount };
+    expect(await payments.ingestEvent(capture)).toBe("applied");
+    await expect(payments.requestRefund(carfax.id, 100, "Partial report refund")).rejects.toThrow();
+    await payments.beginReportDelivery(carfax.id, "carfax-document");
+    await expect(payments.requestRefund(carfax.id, carfax.amount, "Racing send")).rejects.toThrow();
+    await payments.finishReportDelivery(carfax.id, 77);
+    const refund = await payments.requestRefund(carfax.id, carfax.amount, "Full report refund");
+    await payments.confirmFinikReportRefund(carfax.id, 706854211, "carfax-bank-return");
+    const source = join(directory, "report-kinds.ndjson");
+    await backup(db, source);
+    const restoredUrl = await database();
+    await restore(source, restoredUrl);
+    const restored = new PaymentStore(await open(restoredUrl));
+    expect(await restored.getOrder(korea.id)).toEqual(await payments.getOrder(korea.id));
+    expect(await restored.getOrder(carfax.id)).toEqual(await payments.getOrder(carfax.id));
+    expect(await restored.getOrder(carfax.id)).toMatchObject({
+      reportKind: "carfax",
+      paymentStatus: "refunded",
+      fulfillmentStatus: "fulfilled",
+      reportMessageId: 77,
+    });
+    expect(await restored.getRefund(refund.id)).toEqual(await payments.getRefund(refund.id));
+    expect(await restored.ingestEvent(capture)).toBe("duplicate");
+  });
+
+  it("keeps legacy NULL reports Korean, freezes SKU identity and rejects malformed schema 10 kinds", async () => {
+    const payments = new PaymentStore(db);
+    const korea = await payments.createFinikReportOffer(
+      { ...reportOffer(), amount: 35000, terms: "Historical report terms" },
+      "telegram",
+    );
+    const inspection = await payments.createOffer(inspectionOffer());
+    const carfax = await payments.createFinikReportOffer(
+      { ...reportOffer(), amount: 49900, reportKind: "carfax" },
+      "telegram",
+    );
+    const client = new pg.Client({ connectionString: url });
+    await client.connect();
+    try {
+      await client.query("UPDATE payment_orders SET report_kind = NULL WHERE id = $1", [korea.id]);
+      expect(
+        (await payments.createFinikReportOffer({ ...reportOffer(), amount: 49900 }, "telegram")).id,
+      ).toBe(korea.id);
+      for (const [id, kind] of [
+        [korea.id, "carfax"],
+        [carfax.id, "korea"],
+        [carfax.id, null],
+      ]) {
+        await expect(
+          client.query("UPDATE payment_orders SET report_kind = $2 WHERE id = $1", [id, kind]),
+        ).rejects.toThrow();
+      }
+      await expect(
+        client.query(
+          "UPDATE payment_orders SET product = 'inspection', vin = NULL, report_kind = NULL WHERE id = $1",
+          [korea.id],
+        ),
+      ).rejects.toThrow();
+      await expect(
+        client.query("UPDATE payment_orders SET channel = 'web' WHERE id = $1", [carfax.id]),
+      ).rejects.toThrow();
+      await expect(
+        client.query(
+          "UPDATE payment_orders SET provider = 'telegram_stars', currency = 'XTR' WHERE id = $1",
+          [carfax.id],
+        ),
+      ).rejects.toThrow();
+      // A legacy writer omits the new column; neither report nor inspection inserts may break.
+      for (const order of [korea, inspection]) {
+        const { rows } = await client.query("SELECT * FROM payment_orders WHERE id = $1", [
+          order.id,
+        ]);
+        const legacy = { ...rows[0], id: randomUUID() };
+        delete legacy.report_kind;
+        await client.query(
+          "INSERT INTO payment_orders SELECT * FROM json_populate_record(NULL::payment_orders, $1::json)",
+          [JSON.stringify(legacy)],
+        );
+        expect((await payments.getOrder(legacy.id))?.reportKind).toBe(order.reportKind);
+      }
+    } finally {
+      await client.end();
+    }
+    expect(await payments.getOrder(korea.id)).toMatchObject({
+      reportKind: "korea",
+      amount: 35000,
+      terms: "Historical report terms",
+    });
+    const source = join(directory, "legacy-null-kind.ndjson");
+    await backup(db, source);
+    const restoredUrl = await database();
+    await restore(source, restoredUrl);
+    expect(await new PaymentStore(await open(restoredUrl)).getOrder(korea.id)).toEqual(
+      await payments.getOrder(korea.id),
+    );
+    for (const damage of ["missing", "null", "unknown", "web", "stars"]) {
+      const damaged = join(directory, `kind-${damage}.ndjson`);
+      await rewriteSnapshot(source, damaged, (record) => {
+        const row = record.row as Record<string, unknown> | undefined;
+        if (record.table !== "payment_orders" || row?.id !== carfax.id) return;
+        if (damage === "missing") delete row.report_kind;
+        if (damage === "null") row.report_kind = null;
+        if (damage === "unknown") row.report_kind = "other";
+        if (damage === "web") row.channel = "web";
+        if (damage === "stars") {
+          row.provider = "telegram_stars";
+          row.currency = "XTR";
+        }
+      });
+      await expect(restore(damaged, await database())).rejects.toThrow();
+    }
+    // Schema 9 predates CARFAX; use a separate Korean-only journal rather than relabeling CARFAX.
+    const oldStore = await open(await database());
+    const oldPayments = new PaymentStore(oldStore);
+    const oldOrder = await oldPayments.createFinikReportOffer(
+      { ...reportOffer(), amount: 35000, terms: "Historical schema 9 terms" },
+      "web",
+    );
+    const current = join(directory, "korean-only.ndjson");
+    const historical = join(directory, "schema-9.ndjson");
+    await backup(oldStore, current);
+    await rewriteSnapshot(current, historical, (record) => {
+      if (Object.hasOwn(record, "schema_version")) record.schema_version = 9;
+    });
+    const historicalUrl = await database();
+    await restore(historical, historicalUrl);
+    expect(await new PaymentStore(await open(historicalUrl)).getOrder(oldOrder.id)).toEqual(
+      oldOrder,
+    );
   });
 });
 

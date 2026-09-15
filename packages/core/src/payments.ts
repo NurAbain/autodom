@@ -1,12 +1,15 @@
 export type PaymentProvider = "finik" | "telegram_stars";
 export type PaymentChannel = "telegram" | "web";
 export type PaymentProduct = "inspection" | "vin_report";
+export const VIN_REPORT_KINDS = ["korea", "carfax"] as const;
+export type VinReportKind = (typeof VIN_REPORT_KINDS)[number];
 export type PaymentCurrency = "KGS" | "XTR";
 
 export interface PaymentOfferInput {
   userId: number;
   product: PaymentProduct;
   vin?: string | null;
+  reportKind?: VinReportKind | null;
   amount: number;
   title: string;
   description: string;
@@ -19,6 +22,7 @@ export interface PaymentOfferInput {
 export interface PaymentOrder extends PaymentOfferInput {
   id: string;
   vin: string | null;
+  reportKind: VinReportKind | null;
   paidAt: string | null;
   reportFileId: string | null;
   reportMessageId: number | null;
@@ -127,6 +131,12 @@ export function validatePaymentOffer(input: PaymentOfferInput): void {
       : input.vin != null
   )
     throw new Error("Invalid payment VIN");
+  if (
+    input.product === "vin_report"
+      ? input.reportKind != null && !VIN_REPORT_KINDS.includes(input.reportKind)
+      : input.reportKind != null
+  )
+    throw new Error("Invalid payment report kind");
   validatePaymentAmount(input.amount, input.product === "inspection");
   validatePaymentText(input.title, "title", 300);
   validatePaymentText(input.description, "description", 300);
