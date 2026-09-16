@@ -9,11 +9,7 @@ import {
   catalogFilterSchema,
 } from "@autodom/core/catalog-filter";
 import type { VinLookup } from "@autodom/core/vin";
-import type {
-  VinArchiveLookup,
-  VinArchivePhotoLookup,
-  VinArchiveResult,
-} from "@autodom/core/vin-archive";
+import type { VinArchivePhotoLookup, VinArchiveResult } from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
 import { load } from "cheerio";
 import { InputFile } from "grammy";
@@ -1000,14 +996,12 @@ describe("grammY transport boundaries", () => {
   };
   function telegram(
     checkVin?: VinLookup,
-    checkVinArchive?: VinArchiveLookup,
     getVinArchivePhoto?: VinArchivePhotoLookup,
     options: TelegramBotOptions = {},
   ) {
     const bot = createTelegramBot(store as unknown as Store, "100:test-token", {
       ...options,
       ...(checkVin ? { checkVin } : {}),
-      ...(checkVinArchive ? { checkVinArchive } : {}),
       ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
     });
     const calls: { method: string; payload: Record<string, unknown> }[] = [];
@@ -1024,30 +1018,6 @@ describe("grammY transport boundaries", () => {
       return { ok: true, result } as never;
     });
     return { bot, calls };
-  }
-  function photoCallback(
-    calls: { method: string; payload: Record<string, unknown> }[],
-    vin: string,
-    archive = false,
-  ) {
-    const data = `${archive ? "vinarchivephotos" : "vinphotos"}:${vin}`;
-    const index = calls.findLastIndex(
-      (call) =>
-        ["sendMessage", "sendRichMessage"].includes(call.method) &&
-        JSON.stringify(call.payload).includes(data),
-    );
-    if (index === -1) throw new Error("No photo offer was delivered");
-    return {
-      id: `photos-${index}`,
-      from: { id: 1, is_bot: false, first_name: "Buyer" },
-      chat_instance: "private",
-      message: {
-        message_id: index + 1,
-        date: 1,
-        chat: { id: 1, type: "private" as const, first_name: "Buyer" },
-      },
-      data,
-    };
   }
   async function uploadedBytes(photo: unknown): Promise<unknown> {
     expect(photo).toBeInstanceOf(InputFile);
@@ -1072,7 +1042,7 @@ describe("grammY transport boundaries", () => {
       },
       car365: { status: "not_found", source_url: "", checked_at: null, data: null },
     });
-    const { bot, calls } = telegram(lookup, undefined, undefined, {
+    const { bot, calls } = telegram(lookup, undefined, {
       analytics,
       reportBotUrl: "https://t.me/autokgbot",
     });
@@ -1150,7 +1120,7 @@ describe("grammY transport boundaries", () => {
       },
       car365: { status: "not_found", source_url: "", checked_at: null, data: null },
     });
-    const { bot } = telegram(lookup, undefined, undefined, {
+    const { bot } = telegram(lookup, undefined, {
       analytics: {
         record: async (event) => {
           events.push(event);
@@ -1190,7 +1160,7 @@ describe("grammY transport boundaries", () => {
 
   it("requires confirmed VIN-bot deletion before analytics erasure", async () => {
     const forget = vi.fn(async () => true);
-    const { bot, calls } = telegram(undefined, undefined, undefined, {
+    const { bot, calls } = telegram(undefined, undefined, {
       mode: "vin",
       analytics: { record: async () => {}, forget },
     });
@@ -1222,7 +1192,7 @@ describe("grammY transport boundaries", () => {
     expect(forget).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the report purchase offer usable without inert feedback when analytics is disabled", async () => {
+  it("keeps the report purchase offer usable when automatic photos fail and analytics is disabled", async () => {
     const vin = "KMHDU41DBAU123456";
     const { bot, calls } = telegram(
       async () => ({
@@ -1234,11 +1204,45 @@ describe("grammY transport boundaries", () => {
           checked_at: 1_789_000_000,
         },
         car365: { status: "not_found", source_url: "", checked_at: null, data: null },
+        encar: {
+          status: "available",
+          source_url: "https://fem.encar.com/",
+          checked_at: 1_789_000_000,
+          data: {
+            vin,
+            discovery_url: `https://carcheck.by/auto/${vin}`,
+            partial: false,
+            listings: [
+              {
+                id: "39720103",
+                vin,
+                source_url: "https://fem.encar.com/cars/detail/39720103",
+                model: "Avante",
+                mileage_km: 12345,
+                advertisement_status: "SOLD",
+                created_at: null,
+                first_advertised_at: null,
+                modified_at: null,
+                re_registered: null,
+                photo_urls: [
+                  "https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg",
+                ],
+              },
+            ],
+          },
+        },
       }),
-      undefined,
       undefined,
       { reportBotUrl: "https://t.me/autokgbot" },
     );
+    let photoAttempts = 0;
+    bot.api.config.use(async (previous, method, payload, signal) => {
+      if (method === "sendPhoto") {
+        photoAttempts += 1;
+        throw new Error("Uncertain photo delivery");
+      }
+      return previous(method, payload, signal);
+    });
     await bot.init();
     await bot.handleUpdate({
       update_id: 1,
@@ -1250,6 +1254,16 @@ describe("grammY transport boundaries", () => {
         text: `/vin ${vin}`,
       },
     });
+    expect(photoAttempts).toBe(1);
+    const freeText = calls
+      .filter((call) => call.method === "sendMessage")
+      .map((call) => String(call.payload.text))
+      .join("\n");
+    expect(freeText).toContain("Avante");
+    expect(freeText).toContain("39720103");
+    expect(calls.some((call) => ["sendRichMessage", "sendDocument"].includes(call.method))).toBe(
+      false,
+    );
     const markup = calls.at(-1)!.payload.reply_markup as {
       inline_keyboard: { callback_data?: string; url?: string }[][];
     };
@@ -1284,7 +1298,7 @@ describe("grammY transport boundaries", () => {
       ledger: { listOrders: async () => [order] },
       ownedOrder: async () => order,
     } as unknown as NonNullable<TelegramBotOptions["payments"]>;
-    const { bot, calls } = telegram(undefined, undefined, undefined, {
+    const { bot, calls } = telegram(undefined, undefined, {
       mode: "vin",
       payments,
       analytics: {
@@ -1341,308 +1355,231 @@ describe("grammY transport boundaries", () => {
     expect(events.filter((event) => event.event === "payment_succeeded")).toEqual([]);
   });
 
-  it("acknowledges archive clicks during photo delivery without overlapping the searches", async () => {
-    const vin = "WBA51AG03NCK98884";
-    const archive = vi.fn<VinArchiveLookup>(async () => ({
-      vin,
-      checked_at: 1_789_000_000,
-      coverage: "indexed_lots_only",
-      sources: [],
-    }));
-    const { bot, calls } = telegram(
-      async () => ({
+  it.each(["command", "confirmed OCR"] as const)(
+    "automatically sends archive facts and validated bytes after one owned %s VIN check, keeping photos separated by lot",
+    async (entry) => {
+      const vin = "KMHDU41DBAU123456";
+      const firstPhotos = Array.from(
+        { length: 12 },
+        (_, index) => `https://cs.copart.com/v1/AUTH_svc.pdoc00001/first/${index}.jpg`,
+      );
+      const secondPhoto = "https://cs.copart.com/v1/AUTH_svc.pdoc00001/second/0.jpg";
+      const result: VinArchiveResult = {
         vin,
         checked_at: 1_789_000_000,
-        carhistory: { status: "disabled", source_url: "", checked_at: null },
-        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
-        encar: {
-          status: "available",
-          source_url: "https://fem.encar.com/",
-          checked_at: 1_789_000_000,
-          data: {
-            vin,
-            discovery_url: `https://carcheck.by/auto/${vin}`,
+        coverage: "indexed_lots_only",
+        sources: [
+          {
+            provider: "copart",
+            status: "available",
+            source_url: "https://www.copart.com/",
+            checked_at: 1_789_000_000,
             partial: false,
-            listings: [
+            lots: [
               {
-                id: "39720103",
-                vin,
-                source_url: "https://fem.encar.com/cars/detail/39720103",
-                model: "BMW",
-                mileage_km: null,
-                advertisement_status: "SOLD",
-                created_at: null,
-                first_advertised_at: null,
-                modified_at: null,
-                re_registered: null,
-                photo_urls: [
-                  "https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg",
+                auction: "copart",
+                lot_id: "12345678",
+                source_url: "https://www.copart.com/lot/12345678",
+                events: [
+                  {
+                    status: "sold",
+                    auction_at: null,
+                    auction_date: null,
+                    final_bid_usd_minor: null,
+                  },
                 ],
+                photos: [...firstPhotos, "https://attacker.invalid/photo.jpg"],
+                photos_complete: true,
+              },
+              {
+                auction: "copart",
+                lot_id: "23456789",
+                source_url: "https://www.copart.com/lot/23456789",
+                events: [
+                  {
+                    status: "sold",
+                    auction_at: null,
+                    auction_date: null,
+                    final_bid_usd_minor: null,
+                  },
+                ],
+                photos: [secondPhoto],
+                photos_complete: true,
               },
             ],
           },
-        },
-      }),
-      archive,
-    );
-    const photoEntered = Promise.withResolvers<void>();
-    const photoReleased = Promise.withResolvers<void>();
-    bot.api.config.use(async (previous, method, payload, signal) => {
-      if (method === "sendPhoto") {
-        photoEntered.resolve();
-        await photoReleased.promise;
-      }
-      return previous(method, payload, signal);
-    });
-    await bot.init();
-    const message = {
-      message_id: 1,
-      date: 1,
-      from: { id: 1, is_bot: false, first_name: "Buyer" },
-      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
-    };
-    await bot.handleUpdate({
-      update_id: 1,
-      message: { ...message, text: `/vin ${vin}` },
-    });
-    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
-      [],
-    );
-    const vinWork = bot.handleUpdate({
-      update_id: 2,
-      callback_query: photoCallback(calls, vin),
-    });
-    await photoEntered.promise;
-    const archiveWork = bot.handleUpdate({
-      update_id: 2,
-      callback_query: {
-        id: "archive-during-photo",
-        from: message.from,
-        chat_instance: "private",
-        message,
-        data: `vinarchive:${vin}`,
-      },
-    });
-    try {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(calls.filter((call) => call.method === "answerCallbackQuery")).toEqual([
-        {
-          method: "answerCallbackQuery",
-          payload: { callback_query_id: photoCallback(calls, vin).id },
-        },
-        {
-          method: "answerCallbackQuery",
-          payload: { callback_query_id: "archive-during-photo" },
-        },
-      ]);
-      expect(archive).not.toHaveBeenCalled();
-    } finally {
-      photoReleased.resolve();
-      await Promise.all([vinWork, archiveWork]);
-    }
-    expect(archive).toHaveBeenCalledExactlyOnceWith(vin);
-  });
-
-  it("requires a valid owner callback before archive lookup and keeps all photos separated by lot", async () => {
-    const vin = "KMHDU41DBAU123456";
-    const firstPhotos = Array.from(
-      { length: 12 },
-      (_, index) => `https://cs.copart.com/v1/AUTH_svc.pdoc00001/first/${index}.jpg`,
-    );
-    const secondPhoto = "https://cs.copart.com/v1/AUTH_svc.pdoc00001/second/0.jpg";
-    const result: VinArchiveResult = {
-      vin,
-      checked_at: 1_789_000_000,
-      coverage: "indexed_lots_only",
-      sources: [
-        {
-          provider: "copart",
-          status: "available",
-          source_url: "https://www.copart.com/",
-          checked_at: 1_789_000_000,
-          partial: false,
-          lots: [
-            {
-              auction: "copart",
-              lot_id: "12345678",
-              source_url: "https://www.copart.com/lot/12345678",
-              events: [
-                { status: "sold", auction_at: null, auction_date: null, final_bid_usd_minor: null },
-              ],
-              photos: firstPhotos,
-              photos_complete: true,
-            },
-            {
-              auction: "copart",
-              lot_id: "23456789",
-              source_url: "https://www.copart.com/lot/23456789",
-              events: [
-                { status: "sold", auction_at: null, auction_date: null, final_bid_usd_minor: null },
-              ],
-              photos: [secondPhoto],
-              photos_complete: true,
-            },
-          ],
-        },
-        {
-          provider: "bidcars",
-          status: "available",
-          source_url: "https://bid.cars/",
-          checked_at: 1_789_000_000,
-          partial: false,
-          lots: [
-            {
-              auction: "copart",
-              lot_id: "12345678",
-              source_url: `https://bid.cars/en/lot/1-12345678/2011-Hyundai-Elantra-${vin}`,
-              events: [
-                {
-                  status: "ended",
-                  auction_at: null,
-                  auction_date: "2026-08-01",
-                  final_bid_usd_minor: 1250000,
-                },
-              ],
-              photos: [`https://mercury.bid.cars/1-12345678/2011-Hyundai-Elantra-${vin}-1.jpg`],
-              photos_complete: true,
-            },
-          ],
-        },
-      ],
-    };
-    const entered = Promise.withResolvers<void>();
-    const released = Promise.withResolvers<VinArchiveResult>();
-    const archive = vi.fn<VinArchiveLookup>(async () => {
-      entered.resolve();
-      return released.promise;
-    });
-    const firstBytes = firstPhotos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
-    const secondBytes = new Uint8Array([255, 216, 99, 255, 217]);
-    const downloaded: string[] = [];
-    const { bot, calls } = telegram(
-      async () => ({
+          {
+            provider: "bidcars",
+            status: "available",
+            source_url: "https://bid.cars/",
+            checked_at: 1_789_000_000,
+            partial: false,
+            lots: [
+              {
+                auction: "copart",
+                lot_id: "12345678",
+                source_url: `https://bid.cars/en/lot/1-12345678/2011-Hyundai-Elantra-${vin}`,
+                events: [
+                  {
+                    status: "ended",
+                    auction_at: null,
+                    auction_date: "2026-08-01",
+                    final_bid_usd_minor: 1250000,
+                  },
+                ],
+                photos: [`https://mercury.bid.cars/1-12345678/2011-Hyundai-Elantra-${vin}-1.jpg`],
+                photos_complete: true,
+              },
+            ],
+          },
+        ],
+      };
+      const events: AnalyticsEvent[] = [];
+      const lookup = vi.fn<VinLookup>(async () => ({
         vin,
-        checked_at: 1_789_000_000,
-        carhistory: { status: "disabled", source_url: "", checked_at: null },
+        checked_at: result.checked_at,
+        carhistory: { status: "not_found", source_url: "", checked_at: result.checked_at },
         car365: { status: "disabled", source_url: "", checked_at: null, data: null },
-      }),
-      archive,
-      async (request) => {
-        downloaded.push(request.photo_url);
-        if (request.vin !== vin || request.provider !== "copart" || request.auction !== "copart")
-          throw new Error("Unknown archive photo");
-        const index = firstPhotos.indexOf(request.photo_url);
-        const bytes =
-          request.lot_id === "12345678" && index !== -1
-            ? firstBytes[index]
-            : request.lot_id === "23456789" && request.photo_url === secondPhoto
-              ? secondBytes
-              : undefined;
-        if (!bytes) throw new Error("Unknown archive photo");
-        return { bytes, content_type: "image/jpeg" };
-      },
-    );
-    await bot.init();
-    const message = {
-      message_id: 1,
-      date: 1,
-      from: { id: 1, is_bot: false, first_name: "Buyer" },
-      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
-    };
-    await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${vin}` } });
-    expect(archive).not.toHaveBeenCalled();
-    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        [expect.objectContaining({ callback_data: `vinarchive:${vin}` })],
-      ]),
-    });
-    for (const [data, from] of [
-      ["vinarchive:invalid", message.from],
-      [`vinarchive:${vin}`, { ...message.from, id: 2 }],
-    ] as const) {
-      await bot.handleUpdate({
-        update_id: 2,
-        callback_query: { id: "invalid", from, chat_instance: "private", message, data },
-      });
-    }
-    expect(archive).not.toHaveBeenCalled();
-    const work = bot.handleUpdate({
-      update_id: 3,
-      callback_query: {
-        id: "archive",
-        from: message.from,
-        chat_instance: "private",
-        message,
-        data: `vinarchive:${vin}`,
-      },
-    });
-    await entered.promise;
-    expect(calls.at(-1)).toMatchObject({
-      method: "answerCallbackQuery",
-      payload: { callback_query_id: "archive" },
-    });
-    released.resolve(result);
-    await work;
-    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
-      [],
-    );
-    expect(downloaded).toEqual([]);
-    const photos = photoCallback(calls, vin, true);
-    for (const forged of [
-      { ...photos, data: "vinarchivephotos:WBA51AG03NCK98884" },
-      { ...photos, message: { ...photos.message, message_id: 9999 } },
-      {
-        ...photos,
-        from: { ...photos.from, id: 2 },
-        message: { ...photos.message, chat: { ...photos.message.chat, id: 2 } },
-      },
-    ]) {
-      await bot.handleUpdate({ update_id: 4, callback_query: forged });
-    }
-    expect(downloaded).toEqual([]);
-    await bot.handleUpdate({
-      update_id: 4,
-      callback_query: photos,
-    });
-    const albums = await Promise.all(
-      calls
-        .filter((call) => call.method === "sendMediaGroup")
-        .map((call) =>
-          Promise.all(
-            (call.payload.media as { media: unknown }[]).map((photo) => uploadedBytes(photo.media)),
-          ),
-        ),
-    );
-    expect(albums).toEqual([firstBytes.slice(0, 10), firstBytes.slice(10)]);
-    expect(
-      await Promise.all(
+        archives: result,
+      }));
+      const firstBytes = firstPhotos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
+      const secondBytes = new Uint8Array([255, 216, 99, 255, 217]);
+      const downloaded: string[] = [];
+      const { bot, calls } = telegram(
+        lookup,
+        async (request) => {
+          downloaded.push(request.photo_url);
+          if (request.vin !== vin || request.provider !== "copart" || request.auction !== "copart")
+            throw new Error("Unknown archive photo");
+          const index = firstPhotos.indexOf(request.photo_url);
+          const bytes =
+            request.lot_id === "12345678" && index !== -1
+              ? firstBytes[index]
+              : request.lot_id === "23456789" && request.photo_url === secondPhoto
+                ? secondBytes
+                : undefined;
+          if (!bytes) throw new Error("Unknown archive photo");
+          return { bytes, content_type: "image/jpeg" };
+        },
+        {
+          mode: "vin",
+          photoRecognizer: async () => [vin],
+          analytics: {
+            record: async (event) => {
+              events.push(event);
+            },
+            forget: async () => true,
+          },
+        },
+      );
+      bot.api.config.use(async (previous, method, payload, signal) =>
+        method === "getFile"
+          ? ({
+              ok: true,
+              result: { file_id: "vin", file_unique_id: "vin", file_path: "photos/vin.jpg" },
+            } as never)
+          : previous(method, payload, signal),
+      );
+      await bot.init();
+      const message = {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+      };
+      for (const chat of [
+        { id: -100, type: "group" as const, title: "Group" },
+        { ...message.chat, id: 2 },
+      ]) {
+        await bot.handleUpdate({
+          update_id: 1,
+          message: { ...message, chat, text: `/vin ${vin}` },
+        });
+      }
+      expect(downloaded).toEqual([]);
+      if (entry === "command") {
+        await bot.handleUpdate({ update_id: 2, message: { ...message, text: `/vin ${vin}` } });
+      } else {
+        await bot.handleUpdate({
+          update_id: 2,
+          message: {
+            ...message,
+            photo: [{ file_id: "vin", file_unique_id: "vin", width: 1000, height: 200 }],
+          },
+        });
+        expect(lookup).not.toHaveBeenCalled();
+        expect(downloaded).toEqual([]);
+        const markup = calls.at(-1)?.payload.reply_markup as {
+          inline_keyboard: { callback_data?: string }[][];
+        };
+        const data = markup.inline_keyboard
+          .flat()
+          .find((button) => button.callback_data?.endsWith(":yes:0"))!.callback_data!;
+        await bot.handleUpdate({
+          update_id: 3,
+          callback_query: {
+            id: "confirm-vin",
+            chat_instance: "private",
+            from: message.from,
+            message,
+            data,
+          },
+        });
+      }
+      expect(lookup).toHaveBeenCalledExactlyOnceWith(vin);
+      const firstPhoto = calls.findIndex((call) =>
+        ["sendPhoto", "sendMediaGroup"].includes(call.method),
+      );
+      const priorText = calls
+        .slice(0, firstPhoto)
+        .map((call) => String(call.payload.text ?? ""))
+        .join("\n");
+      expect(priorText).toContain("12345678");
+      expect(priorText).toContain("23456789");
+      expect(priorText).toContain("2026-08-01");
+      expect(priorText).not.toMatch(/записи по VIN не найдены|пока не подключена/);
+      expect(JSON.stringify(calls.map((call) => call.payload.reply_markup))).not.toMatch(
+        /vinarchive|vinphotos/,
+      );
+      expect(events.filter((event) => event.event === "vin_completed")).toMatchObject([
+        { outcome: "available" },
+      ]);
+      const albums = await Promise.all(
         calls
-          .filter((call) => call.method === "sendPhoto")
-          .map((call) => uploadedBytes(call.payload.photo)),
-      ),
-    ).toEqual([secondBytes]);
-    const archiveText = calls
-      .filter((call) => call.method === "sendMessage")
-      .map((call) => String(call.payload.text))
-      .join("\n");
-    expect(archiveText).toContain("2026-08-01");
-    expect(await store.getProfile(1)).toBeNull();
-    expect(downloaded).toEqual([...firstPhotos, secondPhoto]);
-    await bot.handleUpdate({
-      update_id: 5,
-      message: { ...message, text: "/cancel" },
-    });
-    await bot.handleUpdate({ update_id: 6, callback_query: photos });
-    expect(downloaded).toEqual([...firstPhotos, secondPhoto]);
-  });
+          .filter((call) => call.method === "sendMediaGroup")
+          .map((call) =>
+            Promise.all(
+              (call.payload.media as { media: unknown }[]).map((photo) =>
+                uploadedBytes(photo.media),
+              ),
+            ),
+          ),
+      );
+      expect(albums).toEqual([firstBytes.slice(0, 10), firstBytes.slice(10)]);
+      expect(
+        await Promise.all(
+          calls
+            .filter((call) => call.method === "sendPhoto")
+            .map((call) => uploadedBytes(call.payload.photo)),
+        ),
+      ).toEqual([secondBytes]);
+      const archiveText = calls
+        .filter((call) => call.method === "sendMessage")
+        .map((call) => String(call.payload.text))
+        .join("\n");
+      expect(archiveText).toContain("2026-08-01");
+      expect(await store.getProfile(1)).toBeNull();
+      expect(downloaded).toEqual([...firstPhotos, secondPhoto]);
+    },
+  );
 
-  it.each(["missing", "expired"] as const)(
+  it.each(["missing", "expired", "invalid-bytes"] as const)(
     "retains proven events when the photo loader is %s",
     async (failure) => {
       const vin = "KMHDU41DBAU123456";
       const photo = "https://cs.copart.com/v1/AUTH_svc.pdoc00001/expired.jpg";
       const sourceUrl = "https://www.copart.com/lot/12345678";
-      const lookup: VinArchiveLookup = async () => ({
+      const archive: VinArchiveResult = {
         vin,
         checked_at: 1_789_000_000,
         coverage: "indexed_lots_only",
@@ -1672,34 +1609,33 @@ describe("grammY transport boundaries", () => {
             ],
           },
         ],
-      });
+      };
       const { bot, calls } = telegram(
-        undefined,
-        lookup,
+        async () => ({
+          vin,
+          checked_at: archive.checked_at,
+          carhistory: { status: "not_found", source_url: "", checked_at: archive.checked_at },
+          car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+          archives: archive,
+        }),
         failure === "expired"
           ? async () => {
               throw new Error("Photo grant expired");
             }
-          : undefined,
+          : failure === "invalid-bytes"
+            ? async () => ({ bytes: new Uint8Array(), content_type: "image/jpeg" })
+            : undefined,
       );
       await bot.init();
       await bot.handleUpdate({
         update_id: 1,
-        callback_query: {
-          id: "archive",
+        message: {
+          message_id: 1,
+          date: 1,
           from: { id: 1, is_bot: false, first_name: "Buyer" },
-          chat_instance: "private",
-          data: `vinarchive:${vin}`,
-          message: {
-            message_id: 1,
-            date: 1,
-            chat: { id: 1, type: "private", first_name: "Buyer" },
-          },
+          chat: { id: 1, type: "private", first_name: "Buyer" },
+          text: `/vin ${vin}`,
         },
-      });
-      await bot.handleUpdate({
-        update_id: 2,
-        callback_query: photoCallback(calls, vin, true),
       });
       const fallback = calls
         .filter((call) => call.method === "sendMessage")
@@ -1722,37 +1658,42 @@ describe("grammY transport boundaries", () => {
       const bytes = photos.map((_, index) => new Uint8Array([255, 216, index, 255, 217]));
       const sourceUrl = "https://www.copart.com/lot/12345678";
       const { bot, calls } = telegram(
-        undefined,
         async () => ({
           vin,
           checked_at: 1_789_000_000,
-          coverage: "indexed_lots_only",
-          sources: [
-            {
-              provider: "copart",
-              status: "available",
-              source_url: "https://www.copart.com/",
-              checked_at: 1_789_000_000,
-              partial: false,
-              lots: [
-                {
-                  auction: "copart",
-                  lot_id: "12345678",
-                  source_url: sourceUrl,
-                  events: [
-                    {
-                      status: "sold",
-                      auction_at: null,
-                      auction_date: null,
-                      final_bid_usd_minor: null,
-                    },
-                  ],
-                  photos,
-                  photos_complete: true,
-                },
-              ],
-            },
-          ],
+          carhistory: { status: "not_found", source_url: "", checked_at: 1_789_000_000 },
+          car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+          archives: {
+            vin,
+            checked_at: 1_789_000_000,
+            coverage: "indexed_lots_only",
+            sources: [
+              {
+                provider: "copart",
+                status: "available",
+                source_url: "https://www.copart.com/",
+                checked_at: 1_789_000_000,
+                partial: false,
+                lots: [
+                  {
+                    auction: "copart",
+                    lot_id: "12345678",
+                    source_url: sourceUrl,
+                    events: [
+                      {
+                        status: "sold",
+                        auction_at: null,
+                        auction_date: null,
+                        final_bid_usd_minor: null,
+                      },
+                    ],
+                    photos,
+                    photos_complete: true,
+                  },
+                ],
+              },
+            ],
+          },
         }),
         async (request) => {
           const index = photos.indexOf(request.photo_url);
@@ -1776,24 +1717,13 @@ describe("grammY transport boundaries", () => {
       await bot.init();
       await bot.handleUpdate({
         update_id: 1,
-        callback_query: {
-          id: "archive",
+        message: {
+          message_id: 1,
+          date: 1,
           from: { id: 1, is_bot: false, first_name: "Buyer" },
-          chat_instance: "private",
-          data: `vinarchive:${vin}`,
-          message: {
-            message_id: 1,
-            date: 1,
-            chat: { id: 1, type: "private", first_name: "Buyer" },
-          },
+          chat: { id: 1, type: "private", first_name: "Buyer" },
+          text: `/vin ${vin}`,
         },
-      });
-      expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
-        [],
-      );
-      await bot.handleUpdate({
-        update_id: 2,
-        callback_query: photoCallback(calls, vin, true),
       });
       const delivered = calls.flatMap((call) =>
         call.method === "sendMediaGroup"
@@ -2016,21 +1946,21 @@ describe("grammY transport boundaries", () => {
       expect(html).toContain(String(39720103 + index));
       expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
     }
-    expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
-    expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
+    const controls = sent.filter((call) => call.payload.reply_markup !== undefined);
+    expect(controls).toHaveLength(1);
+    expect(controls[0]?.payload.reply_markup).toMatchObject({
       inline_keyboard: expect.arrayContaining([
-        [expect.objectContaining({ callback_data: "vinphotos:KMHDU41DBAU123456" })],
         [expect.objectContaining({ callback_data: "/vin" })],
       ]),
     });
-    expect(JSON.stringify(sent.at(-1)?.payload.reply_markup)).not.toMatch(
+    expect(JSON.stringify(controls[0]?.payload.reply_markup)).not.toMatch(
       /vin-report-example|vinarchive:|google\.com|web_app/,
     );
   });
   it("keeps VIN photo albums bound to their verified advertisements across Telegram batch boundaries", async () => {
     const photo = (id: string, index: number) =>
       `https://ci.encar.com/carpicture/carpicture02/pic3972/${id}_${String(index).padStart(3, "0")}.jpg`;
-    const firstPhotos = Array.from({ length: 21 }, (_, index) => photo("39720103", index + 1));
+    const firstPhotos = Array.from({ length: 33 }, (_, index) => photo("39720103", index + 1));
     const secondPhotos = [photo("39720104", 1), photo("39720104", 2)];
     const { bot, calls } = telegram(async (vin) => {
       const listing = {
@@ -2093,26 +2023,6 @@ describe("grammY transport boundaries", () => {
         text: "/vin KMHDU41DBAU123456",
       },
     });
-    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
-      [],
-    );
-    const callback = photoCallback(calls, "KMHDU41DBAU123456");
-    for (const forged of [
-      { ...callback, data: "vinphotos:WBA51AG03NCK98884" },
-      { ...callback, message: { ...callback.message, message_id: 9999 } },
-      { ...callback, from: { ...callback.from, id: 2 } },
-      {
-        ...callback,
-        from: { ...callback.from, id: 2 },
-        message: { ...callback.message, chat: { ...callback.message.chat, id: 2 } },
-      },
-    ]) {
-      await bot.handleUpdate({ update_id: 2, callback_query: forged });
-    }
-    expect(calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method))).toEqual(
-      [],
-    );
-    await bot.handleUpdate({ update_id: 3, callback_query: callback });
     const albums = calls
       .filter((call) => call.method === "sendPhoto" || call.method === "sendMediaGroup")
       .map((call) =>
@@ -2120,33 +2030,17 @@ describe("grammY transport boundaries", () => {
           ? [String(call.payload.photo)]
           : (call.payload.media as { media: string }[]).map((item) => item.media),
       );
-    expect(albums.map((album) => album.length)).toEqual([10, 10, 1, 2]);
-    expect(albums.flat()).toEqual([...firstPhotos, ...secondPhotos]);
-    const deliveredCount = calls.filter((call) =>
+    expect(albums.map((album) => album.length)).toEqual([10, 10, 10, 2, 2]);
+    expect(albums.flat()).toEqual([...firstPhotos.slice(0, 32), ...secondPhotos]);
+    const firstPhoto = calls.findIndex((call) =>
       ["sendPhoto", "sendMediaGroup"].includes(call.method),
-    ).length;
-    await bot.handleUpdate({
-      update_id: 4,
-      message: {
-        ...callback.message,
-        from: callback.from,
-        text: "/vin KMHDU41DBAU123456",
-      },
-    });
-    await bot.handleUpdate({ update_id: 5, callback_query: callback });
+    );
     expect(
-      calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method)),
-    ).toHaveLength(deliveredCount);
-    const current = photoCallback(calls, "KMHDU41DBAU123456");
-    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10 * 60 * 1000 + 1);
-    try {
-      await bot.handleUpdate({ update_id: 6, callback_query: current });
-      expect(
-        calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method)),
-      ).toHaveLength(deliveredCount);
-    } finally {
-      clock.mockRestore();
-    }
+      calls.slice(0, firstPhoto).some((call) => String(call.payload.text).includes("39720104")),
+    ).toBe(true);
+    expect(JSON.stringify(calls.map((call) => call.payload.reply_markup))).not.toMatch(
+      /vinarchive|vinphotos/,
+    );
   });
   it("rejects a result for another VIN before attributing its photographs to the requested car", async () => {
     const otherVin = "WBA51AG03NCK98884";

@@ -5,12 +5,12 @@ import {
   parseVinArchivePhotoRequest,
   VIN_ARCHIVE_PROVIDERS,
   VIN_ARCHIVE_SOURCE_URLS,
-  type VinArchiveLookup,
   type VinArchiveLot,
   type VinArchiveObservation,
   type VinArchivePhotoLookup,
   type VinArchivePhotoRequest,
   type VinArchiveProvider,
+  type VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import pLimit from "p-limit";
 import { type Dispatcher, fetch, ProxyAgent, type Response } from "undici";
@@ -213,7 +213,12 @@ export class VinArchiveService {
       this.#carway = new CarwayArchive(options.requestDelaySeconds);
   }
 
-  readonly check: VinArchiveLookup = async (value, signal) => {
+  readonly check = async (
+    value: string,
+    signal?: AbortSignal,
+    // A caller's workflow deadline preserves partial evidence; cancellation still rejects.
+    budget = AbortSignal.timeout(this.#options.timeoutMs ?? 40_000),
+  ): Promise<VinArchiveResult> => {
     const vin = normalizeVin(value);
     if (!vin) throw new RangeError("Invalid VIN");
     const cancellation = AbortSignal.any([
@@ -221,12 +226,12 @@ export class VinArchiveService {
       ...(this.#options.signal ? [this.#options.signal] : []),
       ...(signal ? [signal] : []),
     ]);
-    const budget = AbortSignal.timeout(this.#options.timeoutMs ?? 40_000);
     const combined = AbortSignal.any([cancellation, budget]);
     cancellation.throwIfAborted();
     const task = Promise.all(
       this.#options.providers.map(async (provider): Promise<VinArchiveObservation> => {
         try {
+          combined.throwIfAborted();
           if (provider === "copart") return await this.#lookup(vin, combined);
           if (provider === "carway") {
             if (!this.#carway) throw new SourceError("Carway archive requests are disabled");

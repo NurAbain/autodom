@@ -19,7 +19,6 @@ import {
   VIN_ARCHIVE_PHOTO_MAX_BYTES,
   VIN_ARCHIVE_PROVIDERS,
   VIN_ARCHIVE_SOURCE_URLS,
-  type VinArchiveLookup,
   type VinArchivePhoto,
   type VinArchivePhotoLookup,
   type VinArchiveResult,
@@ -196,44 +195,6 @@ const encarRecord = z
     )
       context.addIssue({ code: "custom", message: "Encar history identity mismatch" });
   });
-const resultSchema = z
-  .object({
-    vin: z.string(),
-    checked_at: instant,
-    carhistory: observation.extend({ source_url: z.literal(VIN_SOURCE_URLS.carhistory) }).strict(),
-    car365: observation
-      .extend({ source_url: z.literal(VIN_SOURCE_URLS.car365), data: record.nullable() })
-      .strict(),
-    encar: observation
-      .extend({ source_url: z.literal(VIN_SOURCE_URLS.encar), data: encarRecord.nullable() })
-      .strict()
-      .optional(),
-    nhtsa_vpic: observation
-      .extend({ source_url: z.literal(VIN_SOURCE_URLS.nhtsa_vpic), data: nhtsaRecord.nullable() })
-      .strict()
-      .optional(),
-    autodev: observation
-      .extend({ source_url: z.literal(VIN_SOURCE_URLS.autodev), data: autoDevRecord.nullable() })
-      .strict()
-      .optional(),
-  })
-  .strict();
-
-function parseVinResult(value: unknown, vin: string): VinCheckResult {
-  const result = resultSchema.parse(value);
-  for (const provider of VIN_PROVIDERS) {
-    const item = result[provider];
-    if (
-      item !== undefined &&
-      ((item.status === "disabled") !== (item.checked_at === null) ||
-        ("data" in item &&
-          ((item.status === "available") !== (item.data !== null) ||
-            (item.data !== null && item.data.vin !== vin))))
-    )
-      throw new Error("VIN API observation identity or state mismatch");
-  }
-  return result;
-}
 
 function createApiTransport(
   path: string,
@@ -386,8 +347,7 @@ const archiveResultSchema = z
   })
   .strict();
 
-function parseVinArchiveResult(value: unknown, vin: string): VinArchiveResult {
-  const result = archiveResultSchema.parse(value);
+function validateVinArchiveResult(result: VinArchiveResult, vin: string): void {
   if (
     result.vin !== vin ||
     new Set(result.sources.map((source) => source.provider)).size !== result.sources.length
@@ -447,6 +407,53 @@ function parseVinArchiveResult(value: unknown, vin: string): VinArchiveResult {
       lotIds.add(key);
     }
   }
+}
+const resultSchema = z
+  .object({
+    vin: z.string(),
+    checked_at: instant,
+    carhistory: observation.extend({ source_url: z.literal(VIN_SOURCE_URLS.carhistory) }).strict(),
+    car365: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.car365), data: record.nullable() })
+      .strict(),
+    encar: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.encar), data: encarRecord.nullable() })
+      .strict()
+      .optional(),
+    nhtsa_vpic: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.nhtsa_vpic), data: nhtsaRecord.nullable() })
+      .strict()
+      .optional(),
+    autodev: observation
+      .extend({ source_url: z.literal(VIN_SOURCE_URLS.autodev), data: autoDevRecord.nullable() })
+      .strict()
+      .optional(),
+    archives: archiveResultSchema.optional(),
+  })
+  .strict();
+
+function parseVinResult(value: unknown, vin: string): VinCheckResult {
+  const result = resultSchema.parse(value);
+  for (const provider of VIN_PROVIDERS) {
+    const item = result[provider];
+    if (
+      item !== undefined &&
+      ((item.status === "disabled") !== (item.checked_at === null) ||
+        ("data" in item &&
+          ((item.status === "available") !== (item.data !== null) ||
+            (item.data !== null && item.data.vin !== vin))))
+    )
+      throw new Error("VIN API observation identity or state mismatch");
+    if (
+      result.archives &&
+      (provider === "carhistory" || provider === "car365" || provider === "encar") &&
+      item !== undefined &&
+      item.status !== "disabled" &&
+      item.status !== "not_found"
+    )
+      throw new Error("VIN API archives violate Korean-first routing");
+  }
+  if (result.archives) validateVinArchiveResult(result.archives, vin);
   return result;
 }
 
@@ -454,14 +461,7 @@ export function createVinApiLookup(
   env: Readonly<Record<string, string | undefined>> = process.env,
   signal?: AbortSignal,
 ): VinLookup | undefined {
-  return createApiLookup("/v1/vin/check", parseVinResult, env, signal, 1024 * 1024);
-}
-
-export function createVinArchiveApiLookup(
-  env: Readonly<Record<string, string | undefined>> = process.env,
-  signal?: AbortSignal,
-): VinArchiveLookup | undefined {
-  return createApiLookup("/v1/vin/archive-photos", parseVinArchiveResult, env, signal, 1024 * 1024);
+  return createApiLookup("/v1/vin/check", parseVinResult, env, signal, 2 * 1024 * 1024);
 }
 
 export function createVinArchivePhotoApiLookup(

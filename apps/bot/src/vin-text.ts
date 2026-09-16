@@ -21,11 +21,11 @@ import {
 } from "@autodom/core/vin-archive";
 import { escapeHtml } from "./html.js";
 
-export const VIN_ARCHIVE_LABEL = "Архивные фото США / ОАЭ";
-export const VIN_PHOTOS_LABEL = "Получить фото авто";
+export const VIN_ARCHIVE_LABEL = "Архивные сведения и фото";
 export const VIN_ARCHIVE_CARWAY_NOTICE =
   "Архив ОАЭ — сторонний, не официальная история аукциона. В записях возможны противоречия; полнота поиска и фотографий не подтверждена.";
-export const VIN_ARCHIVE_DISCLOSURE = `«${VIN_ARCHIVE_LABEL}» — отдельный поиск сохранившихся записей и фотографий. VIN передаётся подключённым архивам только по нажатию этой кнопки. Архивы неполные; отсутствие результата не означает отсутствие ДТП.`;
+export const VIN_ARCHIVE_DISCLOSURE =
+  "Если подключённые корейские источники не находят записей, VIN автоматически передаётся подключённым архивам для поиска сохранившихся сведений и фотографий. Если корейские источники не подключены, поиск начинается с доступных архивов. Архивы неполные; отсутствие результата не означает отсутствие ДТП.";
 export const VIN_ARCHIVE_STATUS_TEXT: Record<VinArchiveStatus, string> = {
   available: "Найдены сохранившиеся фотографии.",
   no_photos: "Архивные записи найдены, но фотографии недоступны.",
@@ -257,11 +257,13 @@ export function vinResultNotice(result: VinCheckResult): string | null {
   const observations = VIN_PROVIDERS.flatMap((provider) =>
     result[provider] ? [result[provider]] : [],
   );
-  if (observations.every((observation) => observation.status === "disabled")) {
+  const archives = result.archives?.vin === result.vin ? result.archives.sources : [];
+  if ([...observations, ...archives].every((observation) => observation.status === "disabled")) {
     return VIN_NOT_ENABLED;
   }
   if (
     observations.some((observation) => observation.status === "unavailable") ||
+    archives.some((source) => source.status === "unavailable" || source.partial) ||
     (result.encar?.status === "available" &&
       (result.encar.data?.partial ||
         confirmedEncarListings(result).some((listing) =>
@@ -271,7 +273,7 @@ export function vinResultNotice(result: VinCheckResult): string | null {
   ) {
     return "Проверка неполная: часть записей не удалось получить или подтвердить. Недоступные данные неизвестны; это не отсутствие истории.";
   }
-  if (!vinVisibleProviders(result).length) {
+  if (!vinVisibleProviders(result).length && !archives.some((source) => source.lots.length)) {
     return (
       "В проверенных источниках записи по VIN не найдены. Это не подтверждает отсутствие ДТП или ограничений." +
       (observations.some((observation) => observation.status === "disabled")
@@ -463,17 +465,8 @@ type VinButton = { text: string; style?: "primary" } & (
 
 export function vinResultActions(result: VinCheckResult) {
   const koreanRecord = hasKoreanVinRecord(result);
-  const photos: VinButton[] = confirmedEncarListings(result).some((listing) =>
-    listing.photo_urls.some((url) => isEncarPhotoUrl(url, listing.id)),
-  )
-    ? [{ text: VIN_PHOTOS_LABEL, callback_data: `vinphotos:${result.vin}` }]
-    : [];
   const additional: { button: VinButton; notice: string }[] = [];
   if (!koreanRecord) {
-    additional.push({
-      button: { text: VIN_ARCHIVE_LABEL, callback_data: `vinarchive:${result.vin}` },
-      notice: VIN_ARCHIVE_DISCLOSURE,
-    });
     const searchUrl = vinGoogleSearchUrl(result.vin);
     if (searchUrl) {
       additional.push({
@@ -484,22 +477,18 @@ export function vinResultActions(result: VinCheckResult) {
   }
   const navigation: VinButton[] = [{ text: "Новая проверка", callback_data: "/vin" }];
   return {
-    photos,
     additional,
     navigation,
     keyboard: {
-      inline_keyboard: [...photos, ...additional.map(({ button }) => button), ...navigation].map(
-        (button) => [button],
-      ),
+      inline_keyboard: [...additional.map(({ button }) => button), ...navigation].map((button) => [
+        button,
+      ]),
     },
   };
 }
 
 /** Free VIN facts only; confirmed report access is sent separately. */
-export function vinResultPresentation(
-  result: VinCheckResult,
-  actions = vinResultActions(result),
-): { text: string } {
+export function vinResultPresentation(result: VinCheckResult): { text: string } {
   const sections: string[] = [];
   for (const provider of vinVisibleProviders(result)) {
     const observation = result[provider];
@@ -518,14 +507,13 @@ export function vinResultPresentation(
         : escapeHtml(vinSourceDescription(provider, result));
     sections.push(`<b>${title}</b>\n${body}\n<i>${vinCheckedText(observation.checked_at)}</i>`);
   }
-  if (actions.photos.length)
-    sections.push("Найдены фотографии. Нажмите «Получить фото авто», чтобы посмотреть.");
   const notice = vinResultNotice(result);
   return {
     text: [
       `<b>Бесплатная проверка VIN</b>\n<code>${escapeHtml(result.vin)}</code>`,
       ...(notice ? [escapeHtml(notice)] : []),
       ...sections,
+      ...(result.archives ? [escapeHtml(VIN_ARCHIVE_DISCLOSURE)] : []),
     ].join("\n\n"),
   };
 }

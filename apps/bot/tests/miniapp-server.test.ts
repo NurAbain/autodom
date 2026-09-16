@@ -7,7 +7,6 @@ import { makeListing, makeProfile, money } from "@autodom/core";
 import type { PaymentOrder } from "@autodom/core/payments";
 import type { VinCheckResult, VinLookup } from "@autodom/core/vin";
 import type {
-  VinArchiveLookup,
   VinArchivePhotoLookup,
   VinArchivePhotoRequest,
   VinArchiveResult,
@@ -98,7 +97,6 @@ const archiveResult: VinArchiveResult = {
     },
   ],
 };
-const checkVinArchive = vi.fn<VinArchiveLookup>(async () => archiveResult);
 const photoRequest: VinArchivePhotoRequest = {
   vin: "1FTFW1ED9NFB06106",
   provider: "bidcars",
@@ -151,7 +149,6 @@ beforeAll(async () => {
     port: 0,
     assetsDirectory: directory,
     checkVin,
-    checkVinArchive,
     getVinArchivePhoto,
     analytics: {
       async record(event) {
@@ -385,7 +382,6 @@ it("returns a retryable service error without disclosing internal storage failur
 });
 
 it("checks VIN without a buyer profile and preserves partial provider failures", async () => {
-  checkVinArchive.mockClear();
   getVinArchivePhoto.mockClear();
   const response = await fetch(`${base}/miniapp/api/vin`, {
     method: "POST",
@@ -403,13 +399,18 @@ it("checks VIN without a buyer profile and preserves partial provider failures",
     car365: { status: "unavailable" },
   });
   expect(response.headers.get("cache-control")).toBe("no-store");
-  expect(checkVinArchive).not.toHaveBeenCalled();
   expect(getVinArchivePhoto).not.toHaveBeenCalled();
 });
 
-it("keeps a confirmed archive lot without photos accessible independently of buyer profiles and normal decoding", async () => {
-  checkVin.mockClear();
-  const response = await fetch(`${base}/miniapp/api/vin/archive-photos`, {
+it("returns automatic archive evidence without a buyer profile or a paid-report offer", async () => {
+  const before = analyticsEvents.length;
+  checkVin.mockResolvedValueOnce({
+    ...vinResult,
+    carhistory: { ...vinResult.carhistory, status: "not_found" },
+    car365: { ...vinResult.car365, status: "not_found" },
+    archives: archiveResult,
+  });
+  const response = await fetch(`${base}/miniapp/api/vin`, {
     method: "POST",
     headers: {
       Authorization: authorization(44),
@@ -419,60 +420,63 @@ it("keeps a confirmed archive lot without photos accessible independently of buy
     body: JSON.stringify({ vin: vinResult.vin }),
   });
   expect(response.status).toBe(200);
-  expect(await response.json()).toEqual(archiveResult);
-  expect(checkVin).not.toHaveBeenCalled();
+  expect(await response.json()).toMatchObject({
+    archives: archiveResult,
+    reportKind: null,
+  });
+  expect(
+    analyticsEvents.slice(before).find((event) => event.event === "vin_completed"),
+  ).toMatchObject({
+    outcome: "partial",
+  });
 });
 
-it.each(["/miniapp/api/vin", "/miniapp/api/vin/archive-photos"])(
-  "never sends unauthorized, ambiguous or invalid requests to %s",
-  async (path) => {
-    checkVin.mockClear();
-    checkVinArchive.mockClear();
-    const valid = JSON.stringify({ vin: vinResult.vin });
-    for (const [headers, body, expected] of [
-      [{}, valid, 401],
-      [{ Authorization: authorization(), Origin: "https://other.example" }, valid, 403],
-      [{ Authorization: authorization(), "Sec-Fetch-Site": "cross-site" }, valid, 403],
-      [
-        { Authorization: authorization() },
-        '{"vin":"KMHDU41DBAU123456","vin":"JTDBR32E720000001"}',
-        400,
-      ],
-      [
-        { Authorization: authorization() },
-        '{"vin":"KMHDU41DBAU123456","v\\u0069n":"JTDBR32E720000001"}',
-        400,
-      ],
-      [{ Authorization: authorization() }, '{"vin":42}', 400],
-      [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU12345I"}', 400],
-      [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU123456","extra":true}', 400],
-      [{ Authorization: authorization() }, `{"vin":"${"A".repeat(2048)}"}`, 413],
-      [{ Authorization: authorization(), "Content-Type": "text/plain" }, valid, 415],
-    ] as const) {
-      const response = await fetch(`${base}${path}`, {
+it("never sends unauthorized, ambiguous or invalid VIN requests upstream", async () => {
+  const path = "/miniapp/api/vin";
+  checkVin.mockClear();
+  const valid = JSON.stringify({ vin: vinResult.vin });
+  for (const [headers, body, expected] of [
+    [{}, valid, 401],
+    [{ Authorization: authorization(), Origin: "https://other.example" }, valid, 403],
+    [{ Authorization: authorization(), "Sec-Fetch-Site": "cross-site" }, valid, 403],
+    [
+      { Authorization: authorization() },
+      '{"vin":"KMHDU41DBAU123456","vin":"JTDBR32E720000001"}',
+      400,
+    ],
+    [
+      { Authorization: authorization() },
+      '{"vin":"KMHDU41DBAU123456","v\\u0069n":"JTDBR32E720000001"}',
+      400,
+    ],
+    [{ Authorization: authorization() }, '{"vin":42}', 400],
+    [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU12345I"}', 400],
+    [{ Authorization: authorization() }, '{"vin":"KMHDU41DBAU123456","extra":true}', 400],
+    [{ Authorization: authorization() }, `{"vin":"${"A".repeat(2048)}"}`, 413],
+    [{ Authorization: authorization(), "Content-Type": "text/plain" }, valid, 415],
+  ] as const) {
+    const response = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body,
+    });
+    expect(response.status).toBe(expected);
+  }
+  const headers = { Authorization: authorization(), "Content-Type": "application/json" };
+  const method = await fetch(`${base}${path}`, { headers });
+  expect(method.status).toBe(405);
+  expect(method.headers.get("allow")).toBe("POST");
+  expect(
+    (
+      await fetch(`${base}${path}?vin=${vinResult.vin}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...headers },
-        body,
-      });
-      expect(response.status).toBe(expected);
-    }
-    const headers = { Authorization: authorization(), "Content-Type": "application/json" };
-    const method = await fetch(`${base}${path}`, { headers });
-    expect(method.status).toBe(405);
-    expect(method.headers.get("allow")).toBe("POST");
-    expect(
-      (
-        await fetch(`${base}${path}?vin=${vinResult.vin}`, {
-          method: "POST",
-          headers,
-          body: valid,
-        })
-      ).status,
-    ).toBe(400);
-    expect(checkVin).not.toHaveBeenCalled();
-    expect(checkVinArchive).not.toHaveBeenCalled();
-  },
-);
+        headers,
+        body: valid,
+      })
+    ).status,
+  ).toBe(400);
+  expect(checkVin).not.toHaveBeenCalled();
+});
 
 it("reports an unconfigured VIN service without fabricating observations", async () => {
   const disabled = await startMiniAppServer({
@@ -504,18 +508,6 @@ it("reports an unconfigured VIN service without fabricating observations", async
     });
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ code: "vin_not_enabled" });
-    const archiveResponse = await fetch(
-      `http://127.0.0.1:${address.port}/miniapp/api/vin/archive-photos`,
-      {
-        method: "POST",
-        headers: { Authorization: authorization(44), "Content-Type": "application/json" },
-        body: JSON.stringify({ vin: vinResult.vin }),
-      },
-    );
-    expect(archiveResponse.status).toBe(200);
-    const archive = (await archiveResponse.json()) as VinArchiveResult;
-    for (const source of archive.sources)
-      expect(source).toMatchObject({ status: "disabled", checked_at: null, lots: [] });
     const photoResponse = await fetch(
       `http://127.0.0.1:${address.port}/miniapp/api/vin/archive-photo`,
       {
@@ -556,18 +548,36 @@ it("keeps car access and readiness independent of VIN API transport failure", as
   expect((await fetch(`${base}/ready`)).status).toBe(200);
 });
 
-it("does not turn archive transport failure into an empty successful history", async () => {
-  checkVinArchive.mockRejectedValueOnce(new Error("private-archive-token"));
-  const response = await fetch(`${base}/miniapp/api/vin/archive-photos`, {
+it("preserves archive failure as unknown instead of an empty successful history", async () => {
+  const before = analyticsEvents.length;
+  const archives: VinArchiveResult = {
+    ...archiveResult,
+    sources: [
+      {
+        ...archiveResult.sources[0]!,
+        status: "unavailable",
+        lots: [],
+      },
+    ],
+  };
+  checkVin.mockResolvedValueOnce({
+    ...vinResult,
+    carhistory: { ...vinResult.carhistory, status: "not_found" },
+    car365: { ...vinResult.car365, status: "not_found" },
+    archives,
+  });
+  const response = await fetch(`${base}/miniapp/api/vin`, {
     method: "POST",
     headers: { Authorization: authorization(44), "Content-Type": "application/json" },
     body: JSON.stringify({ vin: vinResult.vin }),
   });
-  expect(response.status).toBe(503);
-  const body = await response.json();
-  expect(body).toMatchObject({ code: "vin_archive_unavailable" });
-  expect(body).not.toHaveProperty("sources");
-  expect(JSON.stringify(body)).not.toContain("private-archive-token");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ archives, reportKind: null });
+  expect(
+    analyticsEvents.slice(before).find((event) => event.event === "vin_completed"),
+  ).toMatchObject({
+    outcome: "unavailable",
+  });
 });
 
 it("reports refused dialogue admission as retryable without confusing an empty successful reply", async () => {
@@ -606,33 +616,29 @@ it("reports refused dialogue admission as retryable without confusing an empty s
   }
 });
 
-it.each(["/miniapp/api/vin", "/miniapp/api/vin/archive-photos"])(
-  "cancels %s when the authenticated client disconnects",
-  async (path) => {
-    const entered = Promise.withResolvers<void>();
-    const aborted = Promise.withResolvers<void>();
-    const lookup = path.endsWith("archive-photos") ? checkVinArchive : checkVin;
-    lookup.mockImplementationOnce(async (_vin, signal) => {
-      if (!signal) throw new Error("Missing cancellation signal");
-      signal.addEventListener("abort", () => aborted.resolve(), { once: true });
-      entered.resolve();
-      await aborted.promise;
-      throw signal.reason;
-    });
-    const controller = new AbortController();
-    const response = fetch(`${base}${path}`, {
-      method: "POST",
-      headers: { Authorization: authorization(44), "Content-Type": "application/json" },
-      body: JSON.stringify({ vin: vinResult.vin }),
-      signal: controller.signal,
-    });
-    const rejection = expect(response).rejects.toMatchObject({ name: "AbortError" });
-    await entered.promise;
-    controller.abort();
-    await rejection;
+it("cancels VIN lookup when the authenticated client disconnects", async () => {
+  const entered = Promise.withResolvers<void>();
+  const aborted = Promise.withResolvers<void>();
+  checkVin.mockImplementationOnce(async (_vin, signal) => {
+    if (!signal) throw new Error("Missing cancellation signal");
+    signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+    entered.resolve();
     await aborted.promise;
-  },
-);
+    throw signal.reason;
+  });
+  const controller = new AbortController();
+  const response = fetch(`${base}/miniapp/api/vin`, {
+    method: "POST",
+    headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+    body: JSON.stringify({ vin: vinResult.vin }),
+    signal: controller.signal,
+  });
+  const rejection = expect(response).rejects.toMatchObject({ name: "AbortError" });
+  await entered.promise;
+  controller.abort();
+  await rejection;
+  await aborted.promise;
+});
 
 it("serves private archive photo bytes without a profile and never exposes a CDN redirect", async () => {
   const response = await fetch(`${base}/miniapp/api/vin/archive-photo`, {

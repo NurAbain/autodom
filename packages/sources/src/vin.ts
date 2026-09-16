@@ -8,6 +8,7 @@ import {
   type VinLookup,
   type VinProvider,
 } from "@autodom/core";
+import type { VinArchivePhotoLookup, VinArchiveProvider } from "@autodom/core/vin-archive";
 import { checkAutoDev } from "./autodev.js";
 import { checkCar365 } from "./car365.js";
 import { CarcheckSession } from "./carcheck-session.js";
@@ -15,6 +16,7 @@ import { checkCarHistory } from "./carhistory.js";
 import { EncarHistoryLookup } from "./encar-cache.js";
 import { abortable } from "./http-response.js";
 import { checkNhtsaVpic } from "./nhtsa-vpic.js";
+import { VinArchiveService } from "./vin-archive.js";
 import { VinTransport, type VinTransportOptions } from "./vin-session.js";
 
 export class VinCheckService {
@@ -34,10 +36,12 @@ export class VinCheckService {
   readonly #carcheck: CarcheckSession | undefined;
   readonly #encarLookup: EncarHistoryLookup | undefined;
   readonly #encarRequests = new Map<string, Promise<EncarHistory | null>>();
+  readonly #archives: VinArchiveService | undefined;
 
   constructor(
     options: VinTransportOptions & {
       providers: readonly VinProvider[];
+      archiveProviders?: readonly VinArchiveProvider[] | undefined;
       autoDevApiKey?: string | undefined;
       riskBypassApiKey?: string | undefined;
       encarCachePath?: string | undefined;
@@ -83,6 +87,12 @@ export class VinCheckService {
       });
     }
     this.#timeoutMs = options.timeoutMs ?? 40_000;
+    if (options.archiveProviders?.length)
+      this.#archives = new VinArchiveService({
+        ...options,
+        providers: options.archiveProviders,
+        signal: this.#signal,
+      });
     if (
       (this.#enabled.nhtsa_vpic || this.#enabled.autodev) &&
       (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 1)
@@ -116,15 +126,10 @@ export class VinCheckService {
     const vin = normalizeVin(value);
     if (!vin) throw new RangeError("VIN must contain 17 letters and digits, without I, O or Q");
     signal?.throwIfAborted();
-    // Both phases share the existing lookup budget; fallback must not extend it.
-    const fallbackSignal =
-      this.#enabled.nhtsa_vpic || this.#enabled.autodev
-        ? AbortSignal.any([
-            this.#signal,
-            AbortSignal.timeout(this.#timeoutMs),
-            ...(signal ? [signal] : []),
-          ])
-        : undefined;
+    // Korea, decoders and archives share one deadline, never a fresh fallback budget.
+    const deadline = AbortSignal.timeout(this.#timeoutMs);
+    const cancellation = AbortSignal.any([this.#signal, ...(signal ? [signal] : [])]);
+    const workflowSignal = AbortSignal.any([cancellation, deadline]);
     const result: VinCheckResult = {
       vin,
       checked_at: Date.now() / 1000,
@@ -145,7 +150,7 @@ export class VinCheckService {
           result.carhistory.status = await transport.run(
             "carhistory",
             (session) => checkCarHistory(vin, session),
-            signal,
+            workflowSignal,
           );
         } catch {
           signal?.throwIfAborted();
@@ -159,7 +164,7 @@ export class VinCheckService {
           result.car365.data = await transport.run(
             "car365",
             (session) => checkCar365(vin, session),
-            signal,
+            workflowSignal,
           );
           result.car365.status = result.car365.data ? "available" : "not_found";
         } catch {
@@ -177,7 +182,8 @@ export class VinCheckService {
         };
         result.encar = observation;
         try {
-          observation.data = await this.#checkEncar(vin, signal);
+          // The shared task's deadline preserves facts when optional reports time out.
+          observation.data = await this.#checkEncar(vin, cancellation);
           observation.status = observation.data ? "available" : "not_found";
         } catch {
           signal?.throwIfAborted();
@@ -186,9 +192,8 @@ export class VinCheckService {
       })(),
     ]);
     signal?.throwIfAborted();
-    // A failed Korean lookup is not absence and must not trigger decoder egress.
+    // A failed Korean lookup is not absence and must not trigger fallback egress.
     if (
-      !fallbackSignal ||
       this.#signal.aborted ||
       (this.#enabled.carhistory && result.carhistory.status !== "not_found") ||
       (this.#enabled.car365 && result.car365.status !== "not_found") ||
@@ -206,7 +211,8 @@ export class VinCheckService {
           data: null,
         };
         result.nhtsa_vpic = observation;
-        const task = checkNhtsaVpic(vin, fallbackSignal, this.#timeoutMs);
+        if (workflowSignal.aborted) return;
+        const task = checkNhtsaVpic(vin, workflowSignal, this.#timeoutMs);
         this.#active.add(task);
         try {
           observation.data = await task;
@@ -227,7 +233,8 @@ export class VinCheckService {
           data: null,
         };
         result.autodev = observation;
-        const task = checkAutoDev(vin, this.#autoDevApiKey, fallbackSignal, this.#timeoutMs);
+        if (workflowSignal.aborted) return;
+        const task = checkAutoDev(vin, this.#autoDevApiKey, workflowSignal, this.#timeoutMs);
         this.#active.add(task);
         try {
           observation.data = await task;
@@ -239,8 +246,17 @@ export class VinCheckService {
           this.#active.delete(task);
         }
       })(),
+      (async () => {
+        if (!this.#archives) return;
+        result.archives = await this.#archives.check(vin, cancellation, deadline);
+      })(),
     ]);
     return result;
+  };
+
+  readonly getArchivePhoto: VinArchivePhotoLookup = async (request, signal) => {
+    if (!this.#archives) throw new SourceError("VIN archives are not configured");
+    return this.#archives.getPhoto(request, signal);
   };
 
   async close(): Promise<void> {
@@ -248,6 +264,7 @@ export class VinCheckService {
     await Promise.all([
       this.#transport?.close(),
       this.#carcheck?.close(),
+      this.#archives?.close(),
       Promise.allSettled(this.#active),
     ]);
     await this.#encarLookup?.close();

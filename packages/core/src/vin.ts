@@ -1,3 +1,5 @@
+import type { VinArchiveResult } from "./vin-archive.js";
+
 export const VIN_PROVIDERS = ["carhistory", "car365", "encar", "nhtsa_vpic", "autodev"] as const;
 export type VinProvider = (typeof VIN_PROVIDERS)[number];
 export type VinSourceStatus = "available" | "not_found" | "unavailable" | "disabled";
@@ -143,6 +145,8 @@ export interface VinCheckResult {
   nhtsa_vpic?: (VinObservation & { data: NhtsaVpicRecord | null }) | undefined;
   /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
   autodev?: (VinObservation & { data: AutoDevRecord | null }) | undefined;
+  /** Automatic non-Korean fallback; omitted when not configured, skipped, or absent in an older API. */
+  archives?: VinArchiveResult | undefined;
 }
 
 export type VinLookup = (vin: string, signal?: AbortSignal) => Promise<VinCheckResult>;

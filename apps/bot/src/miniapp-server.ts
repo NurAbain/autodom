@@ -12,12 +12,7 @@ import {
   money,
 } from "@autodom/core";
 import { normalizeVin, VIN_PROVIDERS, type VinLookup } from "@autodom/core/vin";
-import {
-  disabledVinArchiveResult,
-  VIN_ARCHIVE_PHOTO_MAX_BYTES,
-  type VinArchiveLookup,
-  type VinArchivePhotoLookup,
-} from "@autodom/core/vin-archive";
+import { VIN_ARCHIVE_PHOTO_MAX_BYTES, type VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import {
   readVinArchivePhotoRequest,
   readVinRequest,
@@ -148,7 +143,6 @@ export interface MiniAppServerOptions {
     durationSeconds: number;
   }) => void;
   checkVin?: VinLookup;
-  checkVinArchive?: VinArchiveLookup;
   getVinArchivePhoto?: VinArchivePhotoLookup;
   /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
   dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
@@ -203,7 +197,6 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/config",
     "/miniapp/api/car",
     "/miniapp/api/vin",
-    "/miniapp/api/vin/archive-photos",
     "/miniapp/api/vin/archive-photo",
     "/miniapp/api/dialogue",
     "/miniapp/api/orders",
@@ -505,8 +498,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               options.onError?.(new Error("VIN archive photo API request failed"));
               respond(response, 503, {
                 code: "vin_archive_photo_unavailable",
-                error:
-                  "Фото временно недоступно. Лот и события сохранены. Повторите поиск архивных фото.",
+                error: "Фото временно недоступно. Лот и события сохранены. Повторите проверку VIN.",
               });
             }
           } finally {
@@ -514,11 +506,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           }
           return;
         }
-        if (
-          url.pathname === "/miniapp/api/vin" ||
-          url.pathname === "/miniapp/api/vin/archive-photos"
-        ) {
-          const archive = url.pathname === "/miniapp/api/vin/archive-photos";
+        if (url.pathname === "/miniapp/api/vin") {
           if (request.method !== "POST") {
             response.setHeader("Allow", "POST");
             throw new VinRequestError(
@@ -535,7 +523,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             );
           const vin = await readVinRequest(request);
           const attempt = randomUUID();
-          const evidenceKey = !archive && options.analytics ? offerKey(user.id, vin) : undefined;
+          const evidenceKey = options.analytics ? offerKey(user.id, vin) : undefined;
           const evidence = {
             expiresAt: Date.now() + 15 * 60 * 1000,
             reportKind: null as "korea" | "carfax" | null,
@@ -548,25 +536,20 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             if (offers.size >= 1000) offers.delete(offers.keys().next().value!);
             offers.set(evidenceKey, evidence);
           }
-          const reportRevision = archive ? undefined : payments?.forgetVinResult(user.id, vin);
-          if (archive && !options.checkVinArchive) {
-            respond(response, 200, disabledVinArchiveResult(vin));
-            return;
-          }
-          const lookup = archive ? options.checkVinArchive : options.checkVin;
+          const reportRevision = payments?.forgetVinResult(user.id, vin);
+          const lookup = options.checkVin;
           if (!lookup) {
             respond(response, 503, { code: "vin_not_enabled", error: VIN_NOT_ENABLED });
             return;
           }
-          if (!archive)
-            record({
-              actorId: user.id,
-              event: "vin_submitted",
-              surface: "miniapp",
-              flow: "report",
-              contextKey: vin,
-              dedupeKey: `miniapp:${attempt}:vin_submitted`,
-            });
+          record({
+            actorId: user.id,
+            event: "vin_submitted",
+            surface: "miniapp",
+            flow: "report",
+            contextKey: vin,
+            dedupeKey: `miniapp:${attempt}:vin_submitted`,
+          });
           const controller = new AbortController();
           const onClose = () => controller.abort();
           response.once("close", onClose);
@@ -574,77 +557,71 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           try {
             const result = await lookup(vin, controller.signal);
             if (result.vin !== vin) throw new Error("VIN result does not match the request");
-            if (reportRevision !== undefined && "carhistory" in result)
+            if (reportRevision !== undefined)
               payments?.rememberVinResult(user.id, result, reportRevision);
-            if (!archive && "carhistory" in result) {
-              const reportKind = confirmedVinReportKind(result);
-              if (evidenceKey && offers.get(evidenceKey) === evidence)
-                evidence.reportKind = reportKind;
-              const statuses = VIN_PROVIDERS.map((provider) => result[provider]?.status);
-              const found = statuses.includes("available");
-              const unavailable = statuses.includes("unavailable");
-              record({
-                actorId: user.id,
-                event: "vin_completed",
-                surface: "miniapp",
-                flow: "report",
-                contextKey: vin,
-                dedupeKey: `miniapp:${attempt}:vin_completed`,
-                outcome: found
-                  ? unavailable
-                    ? "partial"
-                    : "available"
-                  : unavailable
-                    ? "unavailable"
-                    : "not_found",
-              });
-              if (!response.destroyed && reportKind)
-                record({
-                  actorId: user.id,
-                  event: "report_offered",
-                  surface: "miniapp",
-                  flow: "report",
-                  contextKey: vin,
-                  reportKind,
-                  outcome: "available",
-                  dedupeKey: `report_offer:${vin}:${reportKind}`,
-                });
+            const reportKind = confirmedVinReportKind(result);
+            if (evidenceKey && offers.get(evidenceKey) === evidence)
+              evidence.reportKind = reportKind;
+            const statuses = VIN_PROVIDERS.map((provider) => result[provider]?.status);
+            const archiveSources = result.archives?.sources ?? [];
+            for (const source of archiveSources) {
+              if (source.status === "disabled") continue;
+              if (source.lots.length) statuses.push("available");
+              if (source.status !== "no_photos") statuses.push(source.status);
             }
-            if (!response.destroyed)
-              respond(
-                response,
-                200,
-                archive
-                  ? result
-                  : {
-                      ...result,
-                      reportSalesEnabled: payments?.reportSalesEnabled ?? false,
-                      reportPrice:
-                        payments?.reportPrice ??
-                        (reportBotUrl ? { amount: VIN_REPORT_FINIK_MINOR, currency: "KGS" } : null),
-                      reportKind: "carhistory" in result ? confirmedVinReportKind(result) : null,
-                    },
-              );
-          } catch {
-            if (!archive)
+            const found = statuses.includes("available");
+            const unavailable = statuses.includes("unavailable");
+            record({
+              actorId: user.id,
+              event: "vin_completed",
+              surface: "miniapp",
+              flow: "report",
+              contextKey: vin,
+              dedupeKey: `miniapp:${attempt}:vin_completed`,
+              outcome: found
+                ? unavailable || archiveSources.some((source) => source.partial)
+                  ? "partial"
+                  : "available"
+                : unavailable
+                  ? "unavailable"
+                  : "not_found",
+            });
+            if (!response.destroyed && reportKind)
               record({
                 actorId: user.id,
-                event: "vin_completed",
+                event: "report_offered",
                 surface: "miniapp",
                 flow: "report",
                 contextKey: vin,
-                dedupeKey: `miniapp:${attempt}:vin_completed`,
-                outcome: "error",
+                reportKind,
+                outcome: "available",
+                dedupeKey: `report_offer:${vin}:${reportKind}`,
               });
+            if (!response.destroyed)
+              respond(response, 200, {
+                ...result,
+                reportSalesEnabled: payments?.reportSalesEnabled ?? false,
+                reportPrice:
+                  payments?.reportPrice ??
+                  (reportBotUrl ? { amount: VIN_REPORT_FINIK_MINOR, currency: "KGS" } : null),
+                reportKind,
+              });
+          } catch {
+            record({
+              actorId: user.id,
+              event: "vin_completed",
+              surface: "miniapp",
+              flow: "report",
+              contextKey: vin,
+              dedupeKey: `miniapp:${attempt}:vin_completed`,
+              outcome: "error",
+            });
             if (!response.destroyed) {
-              options.onError?.(
-                new Error(archive ? "VIN archive API request failed" : "VIN API request failed"),
-              );
+              options.onError?.(new Error("VIN API request failed"));
               respond(response, 503, {
-                code: archive ? "vin_archive_unavailable" : "vin_unavailable",
-                error: archive
-                  ? "Поиск архивных фото временно недоступен. Результат неизвестен; это не отсутствие истории. Повторите позже."
-                  : "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите позже.",
+                code: "vin_unavailable",
+                error:
+                  "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите позже.",
               });
             }
           } finally {

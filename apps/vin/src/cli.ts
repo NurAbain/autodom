@@ -6,7 +6,6 @@ import { loadProxyRoutes } from "@autodom/core";
 import { configuredVinProviders } from "@autodom/core/vin";
 import { configuredVinArchiveProviders } from "@autodom/core/vin-archive";
 import { VinCheckService } from "@autodom/sources/vin";
-import { VinArchiveService } from "@autodom/sources/vin-archive";
 import { startVinApiServer, validateVinApiOptions } from "./server.js";
 
 const HELP = `Autodom private VIN API
@@ -18,10 +17,10 @@ Usage: pnpm vin [serve|health] [--help]
 
 serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters) and at least
 one explicit AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev) or
-AUTODOM_VIN_ARCHIVE_PROVIDERS (copart,bidcars,carway). Archive photos require an explicit
-action. Copart/Bid.Cars require existing proxies; Carway uses direct public HTTPS.
+AUTODOM_VIN_ARCHIVE_PROVIDERS (copart,bidcars,carway). Archives run automatically on
+the fallback branch. Copart/Bid.Cars require existing proxies; Carway uses direct public HTTPS.
 Carway returns partial UAE archive cards with unconfirmed outcome, dates and bids,
-not official auction history. It needs no API key; photos are fetched only on demand.
+not official auction history. It needs no API key; photo bytes require verified lookup grants.
 Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
 free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
@@ -37,8 +36,9 @@ the existing residential credentials. Other providers retain their original rout
 AUTODOM_ENCAR_CACHE_PATH optionally persists confirmed Encar IDs for 24-hour discovery
 freshness (up to 1,000 VINs); official data is rechecked on each lookup.
 Cached discovery is marked partial. Cookies/photos are not persisted; errors are not absence.
-Configured Korean providers run first. Decoders run only after all return not_found,
-or directly if no Korean provider is configured. Korean hits/errors skip both decoders.
+Configured Korean providers run first. Decoders and archives run in parallel only after
+all return not_found, or directly if no Korean provider is configured. Korean hits/errors
+skip all fallback providers. Both phases share the original 40-second lookup budget.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
 AUTODOM_VIN_API_MAX_IN_FLIGHT defaults to 10; AUTODOM_CRAWL_DELAY to 2 seconds.
 health needs only host/port. No database, Redis or Telegram configuration is used.
@@ -51,7 +51,6 @@ export async function main(
 ): Promise<number> {
   process.umask(0o077);
   let service: VinCheckService | undefined;
-  let archiveService: VinArchiveService | undefined;
   let exitCode = 0;
   const shutdown = new AbortController();
   const stop = () => shutdown.abort();
@@ -124,6 +123,7 @@ export async function main(
         : undefined;
     service = new VinCheckService({
       providers,
+      archiveProviders,
       routes,
       requestDelaySeconds,
       autoDevApiKey: env.AUTODOM_AUTODEV_API_KEY,
@@ -132,22 +132,13 @@ export async function main(
       carcheckRoutes,
       signal: shutdown.signal,
     });
-    if (archiveProviders.length)
-      archiveService = new VinArchiveService({
-        providers: archiveProviders,
-        routes,
-        requestDelaySeconds,
-        signal: shutdown.signal,
-      });
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     await service.start();
     const server = await startVinApiServer({
       ...options,
       checkVin: service.check,
-      ...(archiveService
-        ? { checkVinArchive: archiveService.check, getVinArchivePhoto: archiveService.getPhoto }
-        : {}),
+      getVinArchivePhoto: service.getArchivePhoto,
     });
     console.log(JSON.stringify({ level: 30, msg: "Autodom VIN API ready." }));
     await new Promise<void>((resolve, reject) => {
@@ -169,7 +160,7 @@ export async function main(
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     try {
-      await Promise.all([service?.close(), archiveService?.close()]);
+      await service?.close();
     } catch {
       console.error(JSON.stringify({ level: 50, msg: "VIN API shutdown failed." }));
       exitCode = 1;

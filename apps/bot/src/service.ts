@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BotSettings } from "@autodom/core";
 import type { VinLookup } from "@autodom/core/vin";
-import type { VinArchiveLookup, VinArchivePhotoLookup } from "@autodom/core/vin-archive";
+import type { VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import { maintain } from "@autodom/runtime/maintenance";
 import { Metrics } from "@autodom/runtime/metrics";
 import type { Store } from "@autodom/storage";
@@ -145,7 +145,6 @@ export interface BotServiceContext {
   assetsDirectory?: string;
   signal?: AbortSignal;
   checkVin?: VinLookup;
-  checkVinArchive?: VinArchiveLookup;
   getVinArchivePhoto?: VinArchivePhotoLookup;
   conversation?: Conversation;
   payments?: PaymentService;
@@ -303,7 +302,6 @@ export async function runBotService(
         ...(bot.webReportAuth ? { webReportAuth: bot.webReportAuth } : {}),
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
-        ...(context.checkVinArchive ? { checkVinArchive: context.checkVinArchive } : {}),
         ...(context.getVinArchivePhoto ? { getVinArchivePhoto: context.getVinArchivePhoto } : {}),
         ...(mode === "full" && context.conversation
           ? {

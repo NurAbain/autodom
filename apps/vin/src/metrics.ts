@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { VIN_PROVIDERS, type VinCheckResult } from "@autodom/core/vin";
-import { VIN_ARCHIVE_PROVIDERS, type VinArchiveResult } from "@autodom/core/vin-archive";
+import { VIN_ARCHIVE_PROVIDERS } from "@autodom/core/vin-archive";
 import { Counter, collectDefaultMetrics, Gauge, Histogram, Registry } from "@prometheus-io/client";
 
 const observationStatuses: Readonly<Record<string, true>> = {
@@ -18,7 +18,6 @@ function routeLabel(url: string | undefined): string {
     case "/health":
     case "/metrics":
     case "/v1/vin/check":
-    case "/v1/vin/archive-photos":
     case "/v1/vin/archive-photo":
       return path;
     default:
@@ -84,21 +83,18 @@ export class VinMetrics {
     response.once("close", completed);
   }
 
-  recordResult(result: VinCheckResult | VinArchiveResult): void {
-    if ("sources" in result) {
-      for (const observation of result.sources) {
-        if (
-          VIN_ARCHIVE_PROVIDERS.includes(observation.provider) &&
-          Object.hasOwn(observationStatuses, observation.status)
-        )
-          this.observations.inc({ provider: observation.provider, status: observation.status });
-      }
-    } else {
-      for (const provider of VIN_PROVIDERS) {
-        const observation = result[provider];
-        if (observation && Object.hasOwn(observationStatuses, observation.status))
-          this.observations.inc({ provider, status: observation.status });
-      }
+  recordResult(result: VinCheckResult): void {
+    for (const provider of VIN_PROVIDERS) {
+      const observation = result[provider];
+      if (observation && Object.hasOwn(observationStatuses, observation.status))
+        this.observations.inc({ provider, status: observation.status });
+    }
+    for (const observation of result.archives?.sources ?? []) {
+      if (
+        VIN_ARCHIVE_PROVIDERS.includes(observation.provider) &&
+        Object.hasOwn(observationStatuses, observation.status)
+      )
+        this.observations.inc({ provider: observation.provider, status: observation.status });
     }
   }
 }

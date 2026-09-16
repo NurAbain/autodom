@@ -110,7 +110,6 @@ describe("VIN observations presented without buying or certifying a report", () 
     const actions = vinResultActions(decoded);
     expect(actions.keyboard.inline_keyboard.flat()).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ callback_data: `vinarchive:${result.vin}` }),
         expect.objectContaining({ url: expect.stringContaining("google.com/search") }),
       ]),
     );
@@ -234,17 +233,9 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).not.toMatch(
       /39711062|40122438|OTHER VIN|UNKNOWN VIN|INVALID ID|attacker\.invalid/,
     );
-    expect(vinResultActions(history).photos).toEqual([]);
-    listing.photo_urls.push(
-      "https://ci.encar.com/carpicture/carpicture01/pic3972/39720103_001.jpg",
-    );
-    expect(vinResultActions(history).photos).toEqual([
-      expect.objectContaining({ callback_data: `vinphotos:${result.vin}` }),
-    ]);
     for (const status of ["disabled", "unavailable", "not_found"] as const) {
       const stale = { ...history, encar: { ...history.encar, status } };
       expect(hasKoreanVinRecord(stale)).toBe(false);
-      expect(vinResultActions(stale).photos).toEqual([]);
       expect(
         vinSourceText("encar", { ...history, encar: { ...history.encar, status } }),
       ).not.toContain("39720103");
@@ -253,7 +244,6 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinSourceText("encar", history)).not.toContain("39720103");
     expect(hasKoreanVinRecord(history)).toBe(false);
     expect(vinVisibleProviders(history)).toEqual([]);
-    expect(vinResultActions(history).photos).toEqual([]);
     expect(vinResultNotice(history)).toMatch(/неполная/);
   });
 

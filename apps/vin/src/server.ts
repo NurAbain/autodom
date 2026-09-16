@@ -1,11 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import type { VinLookup } from "@autodom/core/vin";
-import {
-  disabledVinArchiveResult,
-  type VinArchiveLookup,
-  type VinArchivePhotoLookup,
-} from "@autodom/core/vin-archive";
+import type { VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import {
   readVinArchivePhotoRequest,
   readVinRequest,
@@ -18,14 +14,13 @@ export interface VinApiServerOptions {
   port: number;
   apiToken: string;
   checkVin: VinLookup;
-  checkVinArchive?: VinArchiveLookup;
   getVinArchivePhoto?: VinArchivePhotoLookup;
   maxInFlight?: number;
   signal?: AbortSignal;
 }
 
 export function validateVinApiOptions(
-  options: Omit<VinApiServerOptions, "checkVin" | "checkVinArchive" | "getVinArchivePhoto">,
+  options: Omit<VinApiServerOptions, "checkVin" | "getVinArchivePhoto">,
 ): void {
   if (!/^[\x21-\x7e]{32,}$/u.test(options.apiToken))
     throw new Error(
@@ -87,11 +82,7 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
           }
           return;
         }
-        if (
-          request.url !== "/v1/vin/check" &&
-          request.url !== "/v1/vin/archive-photos" &&
-          request.url !== "/v1/vin/archive-photo"
-        )
+        if (request.url !== "/v1/vin/check" && request.url !== "/v1/vin/archive-photo")
           throw new VinRequestError(404, "not_found", "Endpoint not found.");
         if (request.method !== "POST") {
           response.setHeader("Allow", "POST");
@@ -131,7 +122,7 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
               throw new VinRequestError(
                 503,
                 "photo_unavailable",
-                "Archive photo is unavailable; repeat the archive lookup.",
+                "Archive photo is unavailable; repeat the VIN check.",
               );
             const photo = await options.getVinArchivePhoto(photoRequest, controller.signal);
             controller.signal.throwIfAborted();
@@ -148,11 +139,7 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
           }
           const vin = await readVinRequest(request);
           controller.signal.throwIfAborted();
-          const result =
-            request.url === "/v1/vin/archive-photos"
-              ? await (options.checkVinArchive?.(vin, controller.signal) ??
-                  disabledVinArchiveResult(vin))
-              : await options.checkVin(vin, controller.signal);
+          const result = await options.checkVin(vin, controller.signal);
           metrics.recordResult(result);
           controller.signal.throwIfAborted();
           json(response, 200, result);
@@ -169,7 +156,7 @@ export async function startVinApiServer(options: VinApiServerOptions): Promise<S
         else if (request.url === "/v1/vin/archive-photo")
           json(response, 503, {
             code: "photo_unavailable",
-            error: "Archive photo is unavailable; repeat the archive lookup.",
+            error: "Archive photo is unavailable; repeat the VIN check.",
           });
         else
           json(response, 502, { code: "check_failed", error: "VIN check could not be completed." });

@@ -1,11 +1,32 @@
 import { createServer } from "node:http";
 import { expect, it } from "vitest";
+import { VIN_SOURCE_URLS } from "../src/vin.js";
 import {
   VIN_ARCHIVE_PHOTO_MAX_BYTES,
   type VinArchivePhotoRequest,
   type VinArchiveResult,
 } from "../src/vin-archive.js";
-import { createVinArchiveApiLookup, createVinArchivePhotoApiLookup } from "../src/vin-client.js";
+import { createVinApiLookup, createVinArchivePhotoApiLookup } from "../src/vin-client.js";
+
+function automaticResult(vin: string, archives: unknown) {
+  const checkedAt = 1_789_344_000;
+  return {
+    vin,
+    checked_at: checkedAt,
+    carhistory: {
+      status: "not_found",
+      source_url: VIN_SOURCE_URLS.carhistory,
+      checked_at: checkedAt,
+    },
+    car365: {
+      status: "not_found",
+      source_url: VIN_SOURCE_URLS.car365,
+      checked_at: checkedAt,
+      data: null,
+    },
+    archives,
+  };
+}
 
 it("rejects a different VIN, foreign photo host, and a source link for a different lot", async () => {
   const vin = "4JGFB4JB0LA163026";
@@ -44,13 +65,15 @@ it("rejects a different VIN, foreign photo host, and a source link for a differe
     for await (const _chunk of request) {
       /* Consume the bounded test request. */
     }
-    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+    response
+      .writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify(automaticResult(vin, body)));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Missing fixture address");
-    const lookup = createVinArchiveApiLookup({
+    const lookup = createVinApiLookup({
       AUTODOM_VIN_API_URL: `http://127.0.0.1:${address.port}`,
       AUTODOM_VIN_API_TOKEN: "archive-client-test-token-with-32-characters",
     })!;
@@ -122,32 +145,36 @@ it("accepts Bid.Cars archive evidence but rejects photos belonging to a differen
     for await (const _chunk of request) {
       /* Consume the bounded test request. */
     }
-    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+    response
+      .writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify(automaticResult(vin, body)));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Missing fixture address");
-    const lookup = createVinArchiveApiLookup({
+    const lookup = createVinApiLookup({
       AUTODOM_VIN_API_URL: `http://127.0.0.1:${address.port}`,
       AUTODOM_VIN_API_TOKEN: "archive-client-test-token-with-32-characters",
     })!;
     await expect(lookup(vin)).resolves.toMatchObject({
-      sources: [
-        {
-          provider: "bidcars",
-          lots: [
-            {
-              auction: "iaai",
-              photos: [photo],
-              details: {
-                odometer: { value: 164957, unit: "mi", status: "Not Actual" },
-                keys_present: false,
+      archives: {
+        sources: [
+          {
+            provider: "bidcars",
+            lots: [
+              {
+                auction: "iaai",
+                photos: [photo],
+                details: {
+                  odometer: { value: 164957, unit: "mi", status: "Not Actual" },
+                  keys_present: false,
+                },
               },
-            },
-          ],
-        },
-      ],
+            ],
+          },
+        ],
+      },
     });
     for (const wrong of [
       photo.replace("/0-45397077/", "/0-45397078/"),
@@ -230,10 +257,12 @@ it("accepts Bid.Cars archive evidence but rejects photos belonging to a differen
       ],
     };
     await expect(lookup(vin)).resolves.toMatchObject({
-      sources: [
-        { provider: "copart", status: "no_photos" },
-        { provider: "bidcars", lots: [{ auction: "iaai" }, { auction: "copart" }] },
-      ],
+      archives: {
+        sources: [
+          { provider: "copart", status: "no_photos" },
+          { provider: "bidcars", lots: [{ auction: "iaai" }, { auction: "copart" }] },
+        ],
+      },
     });
   } finally {
     server.closeAllConnections();
@@ -355,26 +384,32 @@ it("accepts partial Carway cards without events while preserving US evidence and
     for await (const _chunk of request) {
       /* Consume the bounded request. */
     }
-    response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+    response
+      .writeHead(200, { "Content-Type": "application/json" })
+      .end(JSON.stringify(automaticResult(vin, body)));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Missing fixture address");
-    const lookup = createVinArchiveApiLookup({
+    const lookup = createVinApiLookup({
       AUTODOM_VIN_API_URL: `http://127.0.0.1:${address.port}`,
       AUTODOM_VIN_API_TOKEN: "carway-client-test-token-with-32-characters",
     })!;
     await expect(lookup(vin)).resolves.toMatchObject({
-      sources: [
-        { provider: "copart" },
-        { provider: "bidcars" },
-        {
-          provider: "carway",
-          partial: true,
-          lots: [{ auction: "copart_uae", events: [], photos: lot.photos, photos_complete: false }],
-        },
-      ],
+      archives: {
+        sources: [
+          { provider: "copart" },
+          { provider: "bidcars" },
+          {
+            provider: "carway",
+            partial: true,
+            lots: [
+              { auction: "copart_uae", events: [], photos: lot.photos, photos_complete: false },
+            ],
+          },
+        ],
+      },
     });
     for (const invalidLot of [
       { ...lot, source_url: lot.source_url.replace(vin, "WP0ZZZ99ZES180141") },

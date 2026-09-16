@@ -122,6 +122,42 @@ describe("remote VIN API consumer", () => {
     });
   });
 
+  it("rejects automatic archives when Korea has a match or an unresolved observation", async () => {
+    const archives: NonNullable<VinCheckResult["archives"]> = {
+      vin: VIN,
+      checked_at: result.checked_at,
+      coverage: "indexed_lots_only",
+      sources: [
+        {
+          provider: "bidcars",
+          status: "not_found",
+          source_url: "https://bid.cars/",
+          checked_at: result.checked_at,
+          partial: false,
+          lots: [],
+        },
+      ],
+    };
+    const absent = {
+      ...result,
+      carhistory: { ...result.carhistory, status: "not_found" },
+      car365: { ...result.car365, status: "not_found" },
+      archives,
+    };
+    const matched = await upstream({ ...absent, carhistory: result.carhistory });
+    await expect(matched(VIN)).rejects.toThrow();
+    const unresolved = await upstream({
+      ...absent,
+      encar: {
+        status: "unavailable",
+        source_url: VIN_SOURCE_URLS.encar,
+        checked_at: result.checked_at,
+        data: null,
+      },
+    });
+    await expect(unresolved(VIN)).rejects.toThrow();
+  });
+
   it("accepts a partial archive but rejects evidence belonging to another VIN or advertisement", async () => {
     const listing = {
       id: "39720103",

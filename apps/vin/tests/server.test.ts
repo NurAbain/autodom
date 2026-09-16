@@ -2,9 +2,9 @@ import { once } from "node:events";
 import { request as httpRequest, type Server } from "node:http";
 import { VIN_SOURCE_URLS, type VinCheckResult, type VinLookup } from "@autodom/core/vin";
 import {
-  disabledVinArchiveResult,
-  type VinArchiveLookup,
+  VIN_ARCHIVE_SOURCE_URLS,
   type VinArchivePhotoLookup,
+  type VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import { afterEach, describe, expect, it } from "vitest";
 import { startVinApiServer } from "../src/server.js";
@@ -52,7 +52,6 @@ afterEach(async () => {
 async function start(
   checkVin: VinLookup,
   maxInFlight?: number,
-  checkVinArchive?: VinArchiveLookup,
   getVinArchivePhoto?: VinArchivePhotoLookup,
 ) {
   const shutdown = new AbortController();
@@ -62,7 +61,6 @@ async function start(
     port: 0,
     apiToken: token,
     checkVin,
-    ...(checkVinArchive ? { checkVinArchive } : {}),
     ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
     ...(maxInFlight === undefined ? {} : { maxInFlight }),
     signal: shutdown.signal,
@@ -99,31 +97,45 @@ function sample(
 describe("private VIN API", () => {
   it("scrapes without authentication and bounds HTTP and returned observation labels", async () => {
     let calls = 0;
-    const archiveResult = disabledVinArchiveResult(vin);
-    const { url } = await start(
-      async () => {
-        calls++;
-        return result;
-      },
-      1,
-      async () => {
-        calls++;
-        return archiveResult;
-      },
-    );
+    const archives: VinArchiveResult = {
+      vin,
+      checked_at: result.checked_at,
+      coverage: "indexed_lots_only",
+      sources: [
+        {
+          provider: "carway",
+          status: "not_found",
+          source_url: VIN_ARCHIVE_SOURCE_URLS.carway,
+          checked_at: result.checked_at,
+          partial: false,
+          lots: [],
+        },
+      ],
+    };
+    const checked: VinCheckResult = {
+      ...result,
+      carhistory: { ...result.carhistory, status: "not_found" },
+      archives,
+    };
+    const { url } = await start(async () => {
+      calls++;
+      return checked;
+    }, 1);
     const initial = await fetch(`${url}/metrics`);
     expect(initial.status).toBe(200);
     expect(initial.headers.get("content-type")).toContain("text/plain");
     expect(sample(await initial.text(), "autodom_vin_in_flight")).toBe(0);
     expect(calls).toBe(0);
-    for (const path of ["/v1/vin/check", "/v1/vin/archive-photos", "/v1/vin/archive-photo"]) {
+    for (const path of ["/v1/vin/check", "/v1/vin/archive-photo"]) {
       expect(
         (await fetch(`${url}${path}`, { method: "POST", body: JSON.stringify({ vin }) })).status,
       ).toBe(401);
     }
     expect(calls).toBe(0);
     expect((await fetch(`${url}/${vin}?token=${token}`, { method: "DELETE" })).status).toBe(400);
-    expect((await post(url)).status).toBe(200);
+    const response = await post(url);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(checked);
     expect(
       (
         await fetch(`${url}/v1/vin/archive-photos`, {
@@ -132,9 +144,10 @@ describe("private VIN API", () => {
           body: JSON.stringify({ vin }),
         })
       ).status,
-    ).toBe(200);
+    ).toBe(404);
     const text = await (await fetch(`${url}/metrics`)).text();
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
+    expect(text).not.toContain('route="/v1/vin/archive-photos"');
     expect(text).not.toContain(vin);
     expect(text).not.toContain(token);
     expect(text).not.toContain(VIN_SOURCE_URLS.carhistory);
@@ -171,7 +184,7 @@ describe("private VIN API", () => {
     expect(
       sample(text, "autodom_vin_provider_observations_total", {
         provider: "carhistory",
-        status: "unavailable",
+        status: "not_found",
       }),
     ).toBe(1);
     expect(
@@ -183,7 +196,7 @@ describe("private VIN API", () => {
     expect(
       sample(text, "autodom_vin_provider_observations_total", {
         provider: "carway",
-        status: "disabled",
+        status: "not_found",
       }),
     ).toBe(1);
   });
@@ -278,55 +291,6 @@ describe("private VIN API", () => {
     expect(calls).toBe(0);
   });
 
-  it("requires authentication on archive photo requests without calling decoders", async () => {
-    let calls = 0;
-    const { url } = await start(async () => {
-      calls++;
-      return result;
-    });
-    const response = await fetch(`${url}/v1/vin/archive-photos`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ vin }),
-    });
-    expect(response.status).toBe(401);
-    expect(calls).toBe(0);
-  });
-
-  it("shares admission capacity between archive photos and regular VIN checks", async () => {
-    const entered = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    const { url } = await start(
-      async () => result,
-      1,
-      async () => {
-        entered.resolve();
-        await release.promise;
-        return disabledVinArchiveResult(vin);
-      },
-    );
-    const pending = fetch(`${url}/v1/vin/archive-photos`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ vin }),
-    });
-    try {
-      await Promise.race([
-        entered.promise,
-        pending.then(() => {
-          throw new Error("Archive request ended before entering its lookup");
-        }),
-      ]);
-      expect((await post(url)).status).toBe(429);
-      release.resolve();
-      expect((await pending).status).toBe(200);
-      expect((await post(url)).status).toBe(200);
-    } finally {
-      release.resolve();
-      await pending;
-    }
-  });
-
   it("returns exact binary archive bytes and rejects unauthenticated or forged bodies before loading", async () => {
     const bytes = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=",
@@ -339,7 +303,6 @@ describe("private VIN API", () => {
         decoderCalls++;
         return result;
       },
-      undefined,
       undefined,
       async () => {
         photoCalls++;
@@ -378,7 +341,6 @@ describe("private VIN API", () => {
     const { url } = await start(
       async () => result,
       1,
-      undefined,
       async (_request, signal) => {
         if (++calls > 1) throw new Error(`secret ${token} ${photoRequest.photo_url}`);
         entered.resolve();
@@ -406,12 +368,6 @@ describe("private VIN API", () => {
     request.end(JSON.stringify(photoRequest));
     await entered.promise;
     expect((await post(url)).status).toBe(429);
-    const archive = await fetch(`${url}/v1/vin/archive-photos`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ vin }),
-    });
-    expect(archive.status).toBe(429);
     request.destroy();
     await Promise.all([cancelled.promise, closed.promise]);
     expect((await post(url)).status).toBe(200);

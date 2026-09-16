@@ -3,11 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadBotSettings, loadToken, miniAppUrl } from "@autodom/core";
-import {
-  createVinApiLookup,
-  createVinArchiveApiLookup,
-  createVinArchivePhotoApiLookup,
-} from "@autodom/core/vin-client";
+import { createVinApiLookup, createVinArchivePhotoApiLookup } from "@autodom/core/vin-client";
 import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
@@ -134,7 +130,6 @@ export async function main(
     if (env.AUTODOM_ANALYTICS_KEY)
       analytics = new ProductAnalytics(settings.database_url, env.AUTODOM_ANALYTICS_KEY, mode);
     const checkVin = createVinApiLookup(env, abort.signal);
-    const checkVinArchive = createVinArchiveApiLookup(env, abort.signal);
     const getVinArchivePhoto = createVinArchivePhotoApiLookup(env, abort.signal);
     const token = await loadToken(env);
     const photoRecognizer = createPhotoRecognizer(token, env, abort.signal);
@@ -174,7 +169,6 @@ export async function main(
           starsEnabled: loadVinReportStarsEnabled(env),
           ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
           ...(checkVin ? { checkVin } : {}),
-          ...(checkVinArchive ? { checkVinArchive } : {}),
           ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
           ...(photoRecognizer ? { photoRecognizer } : {}),
         });
@@ -191,7 +185,6 @@ export async function main(
             ...(payments ? { payments } : {}),
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
             ...(checkVin ? { checkVin } : {}),
-            ...(checkVinArchive ? { checkVinArchive } : {}),
             ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
             signal: abort.signal,
           },
