@@ -1,9 +1,10 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeListing, makeProfile, money } from "@autodom/core";
+import type { PaymentOrder } from "@autodom/core/payments";
 import type { VinCheckResult, VinLookup } from "@autodom/core/vin";
 import type {
   VinArchiveLookup,
@@ -11,8 +12,11 @@ import type {
   VinArchivePhotoRequest,
   VinArchiveResult,
 } from "@autodom/core/vin-archive";
+import type { Store } from "@autodom/storage";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import type { AnalyticsEvent } from "../src/analytics-contract.js";
 import { startMiniAppServer } from "../src/miniapp-server.js";
+import { PaymentService } from "../src/payments.js";
 
 const TOKEN = "12345:detail-server-fixture";
 const PUBLIC_URL = "https://cars.example/miniapp/";
@@ -23,6 +27,8 @@ let base: string;
 let databaseReady = true;
 let readinessError: Error | null = null;
 const storageError = new Error("database password=private-connection-secret");
+const analyticsEvents: AnalyticsEvent[] = [];
+let rejectAnalytics = false;
 const profile = makeProfile({
   user_id: 42,
   chat_id: 42,
@@ -147,6 +153,15 @@ beforeAll(async () => {
     checkVin,
     checkVinArchive,
     getVinArchivePhoto,
+    analytics: {
+      async record(event) {
+        if (rejectAnalytics) throw new Error("analytics unavailable");
+        analyticsEvents.push(event);
+      },
+      async forget() {
+        return true;
+      },
+    },
     ready: async () => {
       if (readinessError) throw readinessError;
       return databaseReady;
@@ -472,6 +487,16 @@ it("reports an unconfigured VIN service without fabricating observations", async
   try {
     const address = disabled.address();
     if (!address || typeof address === "string") throw new Error("No listening address");
+    const analyticsResponse = await fetch(
+      `http://127.0.0.1:${address.port}/miniapp/api/analytics`,
+      {
+        method: "POST",
+        headers: { Authorization: authorization(44), "Content-Type": "application/json" },
+        body: JSON.stringify({ event: "miniapp_opened", nonce: randomUUID() }),
+      },
+    );
+    expect(analyticsResponse.status).toBe(200);
+    expect(await analyticsResponse.json()).toEqual({ enabled: false });
     const response = await fetch(`http://127.0.0.1:${address.port}/miniapp/api/vin`, {
       method: "POST",
       headers: { Authorization: authorization(44), "Content-Type": "application/json" },
@@ -693,4 +718,187 @@ it("aborts photo upstream work when the authenticated viewer disconnects", async
   controller.abort();
   await rejection;
   await aborted.promise;
+});
+
+it("accepts only authenticated bounded client intent, never identities or financial claims", async () => {
+  analyticsEvents.length = 0;
+  const post = (body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${base}/miniapp/api/analytics`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  const opened = { event: "miniapp_opened", nonce: randomUUID() };
+  expect((await post(opened, { Authorization: "" })).status).toBe(401);
+  expect((await post(opened, { Origin: "https://foreign.example" })).status).toBe(403);
+  for (const event of ["payment_succeeded", "order_created", "report_offered", "vin_completed"])
+    expect((await post({ ...opened, event })).status).toBe(400);
+  for (const extra of [{ actorId: 43 }, { timestamp: Date.now() }, { properties: {} }])
+    expect((await post({ ...opened, ...extra })).status).toBe(400);
+  expect((await post({ ...opened, padding: "x".repeat(513) })).status).toBe(413);
+  expect(analyticsEvents).toEqual([]);
+  const response = await post(opened);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ enabled: true });
+  expect(analyticsEvents).toEqual([
+    expect.objectContaining({
+      actorId: 42,
+      event: "miniapp_opened",
+      surface: "miniapp",
+    }),
+  ]);
+});
+
+it("requires fresh actor-specific confirmed report evidence for sample and negative feedback", async () => {
+  const headers = { Authorization: authorization(91), "Content-Type": "application/json" };
+  const sample = { event: "report_sample_opened", nonce: randomUUID(), vin: vinResult.vin };
+  const post = (body: unknown, actor = 91) =>
+    fetch(`${base}/miniapp/api/analytics`, {
+      method: "POST",
+      headers: { ...headers, Authorization: authorization(actor) },
+      body: JSON.stringify(body),
+    });
+  expect((await post(sample)).status).toBe(409);
+  expect(
+    (
+      await fetch(`${base}/miniapp/api/vin`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ vin: vinResult.vin }),
+      })
+    ).status,
+  ).toBe(200);
+  expect((await post(sample)).status).toBe(200);
+  expect((await post(sample, 92)).status).toBe(409);
+  const feedback = {
+    event: "feedback_submitted",
+    nonce: randomUUID(),
+    vin: vinResult.vin,
+    polarity: "negative",
+    reason: "too_expensive",
+  };
+  expect((await post(feedback)).status).toBe(200);
+  expect((await post({ ...feedback, reason: "mileage" })).status).toBe(400);
+  expect((await post({ ...feedback, polarity: "positive" })).status).toBe(400);
+  checkVin.mockResolvedValueOnce({
+    ...vinResult,
+    carhistory: { ...vinResult.carhistory, status: "not_found" },
+  });
+  expect(
+    (
+      await fetch(`${base}/miniapp/api/vin`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ vin: vinResult.vin }),
+      })
+    ).status,
+  ).toBe(200);
+  expect((await post(sample)).status).toBe(409);
+  expect((await post(feedback)).status).toBe(409);
+});
+
+it("keeps the free authenticated VIN result usable when analytics rejects", async () => {
+  rejectAnalytics = true;
+  try {
+    const response = await fetch(`${base}/miniapp/api/vin`, {
+      method: "POST",
+      headers: { Authorization: authorization(93), "Content-Type": "application/json" },
+      body: JSON.stringify({ vin: vinResult.vin }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      vin: vinResult.vin,
+      carhistory: { status: "available" },
+      reportKind: "korea",
+    });
+  } finally {
+    rejectAnalytics = false;
+  }
+});
+
+it("accepts positive feedback only for the authenticated buyer's currently paid report", async () => {
+  const payments = new PaymentService({} as Store);
+  const order: PaymentOrder = {
+    id: randomUUID(),
+    userId: 94,
+    vin: vinResult.vin,
+    product: "vin_report",
+    reportKind: "korea",
+    provider: "telegram_stars",
+    channel: "telegram",
+    currency: "XTR",
+    amount: 500,
+    title: "PDF",
+    description: "PDF",
+    seller: "Autodom",
+    executor: "Autodom",
+    supportUrl: "https://t.me/autodom_fixture",
+    terms: "PDF",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    createdAt: "2026-09-14T00:00:00.000Z",
+    acceptedAt: null,
+    paidAt: null,
+    invoiceUrl: null,
+    invoiceStatus: "pending",
+    paymentStatus: "unpaid",
+    fulfillmentStatus: "ready",
+    chargeId: null,
+    needsReview: false,
+    preCheckoutId: null,
+    reportFileId: null,
+    reportMessageId: null,
+    deliveredAt: null,
+    adminNotifiedAt: null,
+    refundPending: false,
+  };
+  vi.spyOn(payments.ledger, "getOrder").mockImplementation(async (id) =>
+    id === order.id ? order : null,
+  );
+  const paidServer = await startMiniAppServer({
+    token: TOKEN,
+    publicUrl: PUBLIC_URL,
+    host: "127.0.0.1",
+    port: 0,
+    assetsDirectory: directory,
+    ready: async () => true,
+    payments,
+    store: { getProfile: async () => null, getListing: async () => null },
+    analytics: {
+      async record(event) {
+        analyticsEvents.push(event);
+      },
+      async forget() {
+        return true;
+      },
+    },
+  });
+  try {
+    const address = paidServer.address();
+    if (!address || typeof address === "string") throw new Error("No listening address");
+    const post = (userId: number, reason = "mileage") =>
+      fetch(`http://127.0.0.1:${address.port}/miniapp/api/analytics`, {
+        method: "POST",
+        headers: { Authorization: authorization(userId), "Content-Type": "application/json" },
+        body: JSON.stringify({
+          event: "feedback_submitted",
+          nonce: randomUUID(),
+          orderId: order.id,
+          polarity: "positive",
+          reason,
+        }),
+      });
+    expect((await post(94)).status).toBe(409);
+    order.paymentStatus = "paid";
+    order.paidAt = "2026-09-14T00:00:02.000Z";
+    expect((await post(95)).status).toBe(404);
+    expect((await post(94, "too_expensive")).status).toBe(400);
+    expect((await post(94)).status).toBe(200);
+    order.paymentStatus = "refunded";
+    expect((await post(94)).status).toBe(409);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      paidServer.close((error) => (error ? reject(error) : resolve()));
+      paidServer.closeAllConnections();
+    });
+  }
 });

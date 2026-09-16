@@ -11,6 +11,7 @@ import {
 import { createLogger } from "@autodom/runtime/logging";
 import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
+import { ProductAnalytics } from "./analytics.js";
 import {
   loadBotMode,
   loadReportBotUrl,
@@ -34,11 +35,12 @@ import { createPhotoRecognizer } from "./vin-photo.js";
 
 const HELP = `Autodom Telegram bot and Mini App
 
-Usage: pnpm bot [serve|health|payments COMMAND] [--help]
+Usage: pnpm bot [serve|health|analytics-migrate|payments COMMAND] [--help]
 
   serve    Telegram polling, notifications, backups and optional Mini App (default)
   health   Probe this process's local metrics /health; no Store or token initialization
   payments Manage explicit inspection offers and refund requests; payments --help
+  analytics-migrate Create/update the isolated analytics schema; no Telegram/API calls
 
 AUTODOM_METRICS_PORT defaults to 9901.
 Set AUTODOM_MINI_APP_URL to enable the Mini App in this same bot process.
@@ -47,6 +49,8 @@ Set AUTODOM_VIN_API_URL and AUTODOM_VIN_API_TOKEN to enable remote VIN checks.
 Set AUTODOM_OCR_API_URL and AUTODOM_OCR_API_TOKEN to enable GPU photo recognition.
 AUTODOM_BOT_MODE=vin limits the bot to VIN and reports (default: full).
 AUTODOM_REPORT_BOT_URL delegates full-bot purchases to the separate VIN bot.
+AUTODOM_ANALYTICS_KEY enables first-party analytics (same random 32+ character secret in both bots).
+Run analytics-migrate once before enabling; unset the key to stop collection.
 No parser, worker or proxy configuration is loaded by this command.
 Stop the old Telegram poller before cutover; an existing webhook is never replaced.
 `;
@@ -65,6 +69,7 @@ export async function main(
   }
   let logger: Logger | undefined;
   let store: Store | undefined;
+  let analytics: ProductAnalytics | undefined;
   let code = 0;
   let forceExit: NodeJS.Timeout | undefined;
   const abort = new AbortController();
@@ -89,7 +94,7 @@ export async function main(
       return 0;
     }
     const [command = "serve", ...extra] = positionals;
-    if (extra.length || !["serve", "health"].includes(command)) {
+    if (extra.length || !["serve", "health", "analytics-migrate"].includes(command)) {
       process.stderr.write(HELP);
       return 2;
     }
@@ -114,6 +119,11 @@ export async function main(
       process.stdout.write(`${JSON.stringify({ role: "bot", healthy })}\n`);
       return healthy ? 0 : 1;
     }
+    if (command === "analytics-migrate") {
+      await ProductAnalytics.migrate(loadBotSettings(env).database_url);
+      process.stdout.write("Analytics schema ready; financial schema unchanged.\n");
+      return 0;
+    }
     logger = createLogger(env);
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
@@ -121,6 +131,8 @@ export async function main(
     const publicUrl = miniAppUrl(env);
     const mode = loadBotMode(env);
     const reportBotUrl = loadReportBotUrl(env);
+    if (env.AUTODOM_ANALYTICS_KEY)
+      analytics = new ProductAnalytics(settings.database_url, env.AUTODOM_ANALYTICS_KEY, mode);
     const checkVin = createVinApiLookup(env, abort.signal);
     const checkVinArchive = createVinArchiveApiLookup(env, abort.signal);
     const getVinArchivePhoto = createVinArchivePhotoApiLookup(env, abort.signal);
@@ -130,7 +142,10 @@ export async function main(
     if (!abort.signal.aborted) {
       store = await Store.open(settings.database_url);
       if (!abort.signal.aborted) {
-        const conversation = new Conversation(store, { seller: new SellerConversation(store) });
+        const conversation = new Conversation(store, {
+          seller: new SellerConversation(store),
+          ...(analytics ? { analytics } : {}),
+        });
         const payments = reportBotUrl
           ? undefined
           : new PaymentService(
@@ -141,6 +156,7 @@ export async function main(
               loadVinReportTelegramFinikEnabled(env),
               loadCarfaxReportEnabled(env),
             );
+        if (payments && analytics) payments.analytics = analytics;
         const botId = telegramIdentity(token);
         const registerRecipient = reportBotUrl
           ? async (userId: number) => {
@@ -151,6 +167,7 @@ export async function main(
         const bot = createTelegramBot(store, token, {
           conversation,
           mode,
+          ...(analytics ? { analytics } : {}),
           ...(reportBotUrl ? { reportBotUrl } : {}),
           ...(payments ? { payments } : {}),
           ...(registerRecipient ? { onPrivateInteraction: registerRecipient } : {}),
@@ -169,6 +186,7 @@ export async function main(
             token,
             conversation,
             mode,
+            ...(analytics ? { analytics } : {}),
             ...(reportBotUrl ? { reportBotUrl } : {}),
             ...(payments ? { payments } : {}),
             ...(publicUrl ? { miniAppUrl: publicUrl } : {}),
@@ -188,6 +206,7 @@ export async function main(
     code = 1;
   } finally {
     try {
+      await analytics?.close();
       await store?.close();
     } catch (err) {
       if (logger) logger.error({ err }, "Autodom bot Store shutdown failed");

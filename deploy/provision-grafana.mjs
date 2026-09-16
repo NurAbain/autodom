@@ -35,7 +35,8 @@ const directory = new URL("./grafana/dashboards/", import.meta.url);
 for (const name of await readdir(directory)) {
   if (!name.endsWith(".json")) continue;
   const dashboard = JSON.parse(await readFile(new URL(name, directory), "utf8"));
-  if (dashboard.uid !== "autodom-overview") throw new Error(`Unexpected dashboard UID in ${name}`);
+  if (!["autodom-overview", "autodom-product"].includes(dashboard.uid))
+    throw new Error(`Unexpected dashboard UID in ${name}`);
   const result = await api("/api/dashboards/db", "POST", {
     dashboard, folderUid: folder.uid, overwrite: true, message: "Autodom repository provisioning",
   });

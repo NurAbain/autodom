@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import {
   BODY_TYPES,
@@ -20,6 +21,7 @@ import {
 import type { CatalogLookup } from "@autodom/core/catalog-filter";
 import { type CatalogFilter, emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import type { Store } from "@autodom/storage";
+import type { AnalyticsEvent, AnalyticsRecorder, AnalyticsSurface } from "./analytics-contract.js";
 import {
   CATALOG_COVERAGE_NOTE,
   catalogActionAllowed,
@@ -148,6 +150,7 @@ export function privacyText(): string {
     `Архивные фото: ${VIN_ARCHIVE_DISCLOSURE}\n\n` +
     "Раздел своего авто не требует анкеты покупателя: отдельное согласие перед вводом, затем карточка марки/модели, года, пробега, цены и цели продажи или обмена. До сохранения ввод хранится временно в памяти; переключение цели его сбрасывает. Сохранённая карточка отделена от фильтров покупки. Мы не публикуем её и не отправляем партнёрам.\n\n" +
     "Данные хранятся до /delete: подтверждение удаляет профиль покупки, карточку своего авто, настройки и незавершённый ввод из рабочей базы. /cancel отменяет текущий ввод, а не сохранённые данные; при подтверждении удаления отменяет удаление и возвращает прежний черновик покупки. /start, /vin и /sell не удаляют черновик покупки: /buy продолжает его. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения этого срока. /delete не удаляет переписку в Telegram.\n\n" +
+    "Для улучшения продукта используем собственную псевдонимную аналитику действий за последние 90 дней: шаги поиска, результаты проверки и этапы покупки. Тексты сообщений, содержимое VIN, контакты и бюджет в аналитику не попадают; внешних трекеров нет. Подтверждённый /delete удаляет эту аналитику и отключает дальнейший сбор; финансовые записи, обязательные по закону, сохраняются отдельно.\n\n" +
     "Заказы и платёжная поддержка остаются в @autokgbot, отдельно от бесплатного поиска. В заказе сохраняются Telegram ID покупателя, продавец, исполнитель, состав, цена, принятые условия, идентификаторы и серверные подтверждения платежа, а также заявки на возврат. /delete не удаляет эти финансовые записи. Для счёта Finik получает номер, описание и сумму заказа, но не Telegram ID, контакты или профиль поиска. Создание счёта не означает оплату; заявка на возврат не означает возврат денег. Условия и поддержка конкретного заказа — /orders."
   );
 }
@@ -377,9 +380,36 @@ export class Conversation {
   private readonly consents = new Map<number, string>();
   private readonly goals = new Map<number, "home" | "buy" | "sell" | "vin">();
   private readonly deletions = new Map<number, [string, Draft]>();
+  private readonly analyticsContext = new AsyncLocalStorage<{
+    surface: AnalyticsSurface;
+    dedupeKey?: string;
+  }>();
+  private async record(
+    userId: number,
+    event: Omit<AnalyticsEvent, "actorId" | "surface" | "dedupeKey">,
+  ): Promise<void> {
+    const context = this.analyticsContext.getStore();
+    if (!context || !this.options.analytics) return;
+    try {
+      await this.options.analytics.record({
+        ...event,
+        actorId: userId,
+        surface: context.surface,
+        ...(context.dedupeKey
+          ? { dedupeKey: `${context.dedupeKey}:${event.event}:${event.flow}:${event.step ?? ""}` }
+          : {}),
+      });
+    } catch {
+      /* Analytics must not affect the conversation. */
+    }
+  }
   constructor(
     private readonly store: ConversationStore,
-    private readonly options: { seller?: SellerConversation; catalog?: CatalogLookup } = {},
+    private readonly options: {
+      seller?: SellerConversation;
+      catalog?: CatalogLookup;
+      analytics?: AnalyticsRecorder;
+    } = {},
   ) {}
 
   private setGoal(userId: number, goal: "home" | "buy" | "sell" | "vin"): void {
@@ -417,6 +447,12 @@ export class Conversation {
     };
     if (profile) {
       await this.store.setMonitoring(userId, false);
+      if (profile.monitoring)
+        await this.record(userId, {
+          event: "monitoring_paused",
+          flow: "buyer",
+          outcome: "success",
+        });
       for (const field of Object.keys(OPTIONAL_DEFAULTS) as (keyof typeof OPTIONAL_DEFAULTS)[])
         data[field] = profile[field];
       Object.assign(data, {
@@ -476,6 +512,18 @@ export class Conversation {
         this.options.catalog ?? vehicleCatalog,
       );
       await this.store.setDraft(userId, state, data);
+      await this.record(userId, {
+        event: "profile_step",
+        flow: "buyer",
+        step:
+          state === "cat_vehicles" ||
+          state === "cat_row" ||
+          (state === "cat_pick" &&
+            ["make", "model", "generation", "modification"].includes(String(data.cat_key)))
+            ? "model"
+            : "filters",
+        outcome: error ? "invalid" : "success",
+      });
       if (error) reply.text = escapeHtml(error) + "\n\n" + reply.text;
       return packReplies(reply.text, [], reply.buttons, {
         ...(reply.input ? { input: reply.input } : {}),
@@ -596,6 +644,17 @@ export class Conversation {
       text += "\n/cancel — отменить весь ввод. Мониторинг на время изменений приостановлен.";
     }
     await this.store.setDraft(userId, state, data);
+    await this.record(userId, {
+      event: "profile_step",
+      flow: "buyer",
+      step:
+        state === "currency" || state === "budget" || state === "review"
+          ? state
+          : state === "query"
+            ? "model"
+            : "filters",
+      outcome: error ? "invalid" : "success",
+    });
     return packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons, {
       ...(input ? { input } : {}),
       ...(filterEditor ? { filterEditor } : {}),
@@ -659,6 +718,11 @@ export class Conversation {
     if (offset >= count && offset)
       return packReplies("Выдача изменилась. Откройте её заново: /search.", [], menu(profile));
     const [listing] = await this.store.search(profile, 1, offset);
+    await this.record(profile.user_id, {
+      event: "search_completed",
+      flow: "buyer",
+      outcome: listing ? "results" : "empty",
+    });
     if (!listing)
       return packReplies(
         "<b>Пока нет совпадений</b>\nПопробуйте увеличить бюджет или убрать один из необязательных фильтров. Условия меняются только по вашему выбору.\n\n" +
@@ -681,7 +745,19 @@ export class Conversation {
     );
   }
 
-  async handle(userId: number, chatId: number, input: string): Promise<Reply[]> {
+  async handle(
+    userId: number,
+    chatId: number,
+    input: string,
+    surface: AnalyticsSurface = "telegram",
+    dedupeKey?: string,
+  ): Promise<Reply[]> {
+    return this.analyticsContext.run({ surface, ...(dedupeKey ? { dedupeKey } : {}) }, () =>
+      this.handleInput(userId, chatId, input),
+    );
+  }
+
+  private async handleInput(userId: number, chatId: number, input: string): Promise<Reply[]> {
     if (chatId !== userId)
       return [
         {
@@ -703,6 +779,12 @@ export class Conversation {
           profile ? menu(profile) : START_BUTTONS,
         );
       this.setGoal(userId, "buy");
+      await this.record(userId, {
+        event: "profile_step",
+        flow: "buyer",
+        step: "consent",
+        outcome: "success",
+      });
       return this.begin(userId, null);
     }
     let action: string | null = null;
@@ -777,6 +859,7 @@ export class Conversation {
         : this.privacy(userId, profile, true);
     if (command === "/start") {
       this.setGoal(userId, "home");
+      await this.record(userId, { event: "bot_started", flow: "navigation", step: "start" });
       return packReplies(
         "<b>Autodom</b>\nВаш следующий автомобиль — с понятными фактами.\n\nПроверьте VIN, подберите автомобиль или расскажите о своём для продажи и обмена.\n\nПоиск и мониторинг бесплатны. Сохранённые данные остаются на месте.",
         [],
@@ -785,6 +868,7 @@ export class Conversation {
     }
     if (command === "/vin") {
       this.setGoal(userId, "vin");
+      await this.record(userId, { event: "goal_selected", flow: "report", step: "vin" });
       return [
         {
           text: "Введите VIN из 17 символов или отправьте фото VIN в боте. Бесплатно проверим доступные корейские данные; это не полный платный отчёт.",
@@ -797,8 +881,17 @@ export class Conversation {
       this.setGoal(userId, "buy");
       if (draft?.[0] === "delete_confirm")
         return packReplies("Сначала подтвердите удаление или /cancel.", [], []);
+      await this.record(userId, { event: "goal_selected", flow: "buyer", step: "buy" });
       if (draft && draft[1].consent === true) return this.prompt(userId, draft[0], draft[1]);
-      if (!profile) return this.privacy(userId, null);
+      if (!profile) {
+        await this.record(userId, {
+          event: "profile_step",
+          flow: "buyer",
+          step: "consent",
+          outcome: "available",
+        });
+        return this.privacy(userId, null);
+      }
       if (command === "/buy")
         return packReplies("Ваш поиск сохранён.\n\n" + profileText(profile), [], menu(profile));
       return this.begin(userId, profile);
@@ -880,10 +973,21 @@ export class Conversation {
           profile ? menu(profile) : START_BUTTONS,
         );
       await this.store.deleteUser(userId);
+      let analyticsDeleted = !this.options.analytics;
+      try {
+        analyticsDeleted = (await this.options.analytics?.forget(userId)) ?? true;
+      } catch {
+        /* Report incomplete erasure without undoing core deletion. */
+      }
       this.deletions.delete(userId);
       this.setGoal(userId, "home");
       return packReplies(
-        "Профиль покупки, карточка своего авто и незавершённый ввод удалены из рабочей базы. Уведомления остановлены. Переписка в Telegram не удалена; резервные снимки могут содержать удалённые данные до 7 дней. Записи заказов и платежей, если они есть, сохранены; заказы этим не отменяются.",
+        "Профиль покупки, карточка своего авто и незавершённый ввод удалены из рабочей базы. Уведомления остановлены. Переписка в Telegram не удалена; резервные снимки могут содержать удалённые данные до 7 дней. Записи заказов и платежей, если они есть, сохранены; заказы этим не отменяются." +
+          (this.options.analytics
+            ? analyticsDeleted
+              ? "\n\nАналитика удалена, дальнейший сбор отключён."
+              : "\n\nУдаление аналитики временно недоступно. Рабочие данные уже удалены; повторите /delete для завершения удаления аналитики."
+            : ""),
         [],
         START_BUTTONS,
       );
@@ -929,6 +1033,12 @@ export class Conversation {
       }
       if (command === "/pause") {
         profile = await this.store.setMonitoring(userId, false);
+        if (profile)
+          await this.record(userId, {
+            event: "monitoring_paused",
+            flow: "buyer",
+            outcome: "success",
+          });
         return packReplies(
           "Мониторинг приостановлен. Поиск остаётся доступным бесплатно.",
           [],
@@ -947,6 +1057,12 @@ export class Conversation {
             [],
           );
         if (!profile.monitoring) profile = await this.store.setMonitoring(userId, true);
+        if (profile)
+          await this.record(userId, {
+            event: "monitoring_enabled",
+            flow: "buyer",
+            outcome: "success",
+          });
         return packReplies(
           "Бесплатный мониторинг включён. Буду присылать новые совпадения в нашем каталоге и снижение цены. Уже собранные варианты смотрите через /search: повторно отправлять весь каталог не буду. Новая запись в каталоге не обязательно только что опубликована на сайте. /pause — остановить.",
           [],
@@ -982,7 +1098,9 @@ export class Conversation {
       this.goals.get(userId) === "sell"
     ) {
       if (command === "/sell" || command === "/mycar") this.setGoal(userId, "sell");
-      const replies = await this.options.seller?.handle(userId, chatId, text);
+      const replies = await this.options.seller?.handle(userId, chatId, text, (event) =>
+        this.record(userId, event),
+      );
       if (replies) return replies;
       if (command === "/sell" || command === "/mycar")
         return packReplies("Раздел своего авто сейчас недоступен.", [], START_BUTTONS);
@@ -1039,6 +1157,17 @@ export class Conversation {
         const candidate = this.draftProfile(userId, data, profile);
         candidate.monitoring = action === "save.monitor";
         profile = await this.store.saveProfile(candidate);
+        await this.record(userId, {
+          event: "profile_saved",
+          flow: "buyer",
+          step: "saved",
+          outcome: "success",
+        });
+        await this.record(userId, {
+          event: profile.monitoring ? "monitoring_enabled" : "monitoring_paused",
+          flow: "buyer",
+          outcome: "success",
+        });
         await this.store.clearDraft(userId);
         return [
           {

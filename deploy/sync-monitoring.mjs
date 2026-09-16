@@ -29,7 +29,7 @@ if (!target || process.argv.length !== 3) {
   const rules = config.get("rule_files", true);
   if (!isSeq(jobs) || !isSeq(incoming) || !isSeq(rules))
     throw new Error("Expected existing Domcom scrape_configs and rule_files sequences");
-  const allowed = new Set(["autodom-bot", "autodom-worker", "autodom-vin"]);
+  const allowed = new Set(["autodom-bot", "autodom-full-bot", "autodom-worker", "autodom-vin"]);
   const seen = new Set();
   for (const job of incoming.items) {
     const name = job.get("job_name");
@@ -40,7 +40,7 @@ if (!target || process.argv.length !== 3) {
     if (matches.length) jobs.items[matches[0]] = job.clone();
     else jobs.add(job.clone());
   }
-  if (seen.size !== allowed.size) throw new Error("All three Autodom jobs are required");
+  if (seen.size !== allowed.size) throw new Error("All four Autodom jobs are required");
   if (!rules.items.some((item) => item.value === "/etc/prometheus/autodom.rules.yml"))
     rules.add("/etc/prometheus/autodom.rules.yml");
   const begin = "// BEGIN AUTODOM MANAGED PIPELINE\n";

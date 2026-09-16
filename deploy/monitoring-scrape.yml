@@ -9,6 +9,13 @@ scrape_configs:
     static_configs:
       - targets: ['autodom-bot-metrics:9901']
         labels: {application: autodom, role: bot}
+  - job_name: autodom-full-bot
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['autodom-full-bot:9901']
+        labels: {application: autodom, role: bot}
   - job_name: autodom-worker
     scrape_interval: 15s
     scrape_timeout: 5s

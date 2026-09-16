@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import type { BotSettings } from "@autodom/core";
 import type { VinLookup } from "@autodom/core/vin";
 import type { VinArchiveLookup, VinArchivePhotoLookup } from "@autodom/core/vin-archive";
@@ -16,6 +18,8 @@ import { type Bot, type BotError, type Context, GrammyError, HttpError } from "g
 import type { Update } from "grammy/types";
 import pg from "pg";
 import type { Logger } from "pino";
+import type { ProductAnalytics } from "./analytics.js";
+import { PaymentAnalytics } from "./analytics-payments.js";
 import {
   type BotMode,
   loadFullBotUrl,
@@ -145,6 +149,7 @@ export interface BotServiceContext {
   getVinArchivePhoto?: VinArchivePhotoLookup;
   conversation?: Conversation;
   payments?: PaymentService;
+  analytics?: ProductAnalytics;
 }
 
 export function metricsPort(env: NodeJS.ProcessEnv = process.env): number {
@@ -233,6 +238,11 @@ export async function runBotService(
     }
   };
   const metrics = new Metrics("bot", store, settings);
+  context.analytics?.attachMetrics(metrics.registry);
+  const paymentAnalytics =
+    context.analytics && context.payments
+      ? new PaymentAnalytics(settings.database_url, context.analytics, metrics.registry)
+      : undefined;
   const watchServer = (server: Server, name: string) => {
     server.on("error", () => abort.abort(new Error(`${name} HTTP listener failed`)));
     server.on("close", () => {
@@ -285,6 +295,7 @@ export async function runBotService(
         token,
         publicUrl: miniAppUrl,
         mode,
+        ...(context.analytics ? { analytics: context.analytics } : {}),
         ...(reportBotUrl ? { reportBotUrl } : {}),
         ...(fullBotUrl ? { fullBotUrl } : {}),
         ...listener,
@@ -299,7 +310,13 @@ export async function runBotService(
               dialogue: (userId: number, text: string) =>
                 store.tryWithLock(`autodom:user:${userId}`, () => {
                   bot.clearVinInput(userId);
-                  return context.conversation!.handle(userId, userId, text);
+                  return context.conversation!.handle(
+                    userId,
+                    userId,
+                    text,
+                    "miniapp",
+                    randomUUID(),
+                  );
                 }),
             }
           : {}),
@@ -378,6 +395,18 @@ export async function runBotService(
         })(),
       );
     }
+    if (context.analytics) {
+      const analytics = context.analytics;
+      tasks.push(
+        (async () => {
+          while (!abort.signal.aborted) {
+            await paymentAnalytics?.refresh();
+            await analytics.refresh();
+            await delay(30_000, undefined, { signal: abort.signal }).catch(() => {});
+          }
+        })(),
+      );
+    }
     logger.info(
       { role: "bot", metrics_port: port, ...(listener ? { miniapp_port: listener.port } : {}) },
       "Autodom service ready",
@@ -410,6 +439,7 @@ export async function runBotService(
       }
     } finally {
       try {
+        await paymentAnalytics?.close();
         await lease?.end();
       } catch (error) {
         if (!failed) {

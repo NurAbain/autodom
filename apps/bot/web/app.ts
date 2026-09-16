@@ -9,6 +9,12 @@ import {
   type VinArchivePhotoRequest,
   type VinArchiveResult,
 } from "@autodom/core/vin-archive";
+import {
+  ANALYTICS_REASON_LABELS,
+  type AnalyticsReason,
+  NON_PURCHASE_REASONS,
+  PURCHASE_REASONS,
+} from "../src/analytics-contract.js";
 import { type BotMode, loadReportBotUrl } from "../src/bot-mode.js";
 import { CARFAX_REPORT_EXAMPLE_PDF, CARFAX_REPORT_PREVIEW } from "../src/carfax-report-example.js";
 import type { Reply } from "../src/conversation.js";
@@ -72,7 +78,7 @@ let currentView: View = "home";
 let generation = 0;
 const pending = new Set<AbortController>();
 const reportUrls = new Set<string>();
-let config: { mode: BotMode; reportBotUrl?: string } | undefined;
+let config: { mode: BotMode; reportBotUrl?: string; analyticsEnabled: boolean } | undefined;
 
 function appPath(path: string): string {
   return `${new URL(".", window.location.href).pathname}${path.slice("/miniapp/".length)}`;
@@ -106,7 +112,11 @@ async function loadConfig(): Promise<void> {
       throw new Error("Адрес VIN-бота недоступен.");
     }
   }
-  config = { mode: value.mode, ...(reportBotUrl ? { reportBotUrl } : {}) };
+  config = {
+    mode: value.mode,
+    analyticsEnabled: "analyticsEnabled" in value && value.analyticsEnabled === true,
+    ...(reportBotUrl ? { reportBotUrl } : {}),
+  };
   document.documentElement.dataset.botMode = config.mode;
   document.title =
     config.mode === "vin" ? "АвтоКГ — бесплатная проверка VIN" : "Автодом — автомобили";
@@ -195,6 +205,89 @@ async function request<T>(
     signal?.removeEventListener("abort", onAbort);
     pending.delete(controller);
   }
+}
+
+type ClientAnalytics =
+  | { event: "miniapp_opened" }
+  | { event: "report_sample_opened" | "report_checkout_started"; vin: string }
+  | { event: "report_checkout_started"; orderId: string }
+  | { event: "feedback_submitted"; polarity: "negative"; reason: AnalyticsReason; vin: string }
+  | { event: "feedback_submitted"; polarity: "positive"; reason: AnalyticsReason; orderId: string };
+
+async function track(event: ClientAnalytics): Promise<boolean> {
+  if (!telegram?.initData || !config?.analyticsEnabled) return false;
+  try {
+    // Independent of view cancellation: following a link must not cancel its click event.
+    // No retries, cookies, external trackers, or influence on the underlying action.
+    const response = await fetch(appPath("/miniapp/api/analytics"), {
+      method: "POST",
+      headers: { Authorization: `tma ${telegram.initData}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ ...event, nonce: crypto.randomUUID() }),
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "error",
+      referrerPolicy: "no-referrer",
+      keepalive: true,
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok && ((await response.json()) as { enabled?: boolean }).enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function reportFeedback(context: { vin: string } | { orderId: string }): HTMLElement {
+  const positive = "orderId" in context;
+  const panel = element("details", "disclosure");
+  panel.hidden = !config?.analyticsEnabled;
+  panel.append(
+    element(
+      "summary",
+      "",
+      positive
+        ? "Почему выбрали отчёт? Необязательно"
+        : "Пока не покупаете? Поделитесь причиной — необязательно",
+    ),
+  );
+  const form = element("form", "vin-form");
+  const label = element("label", "footnote", "Выберите одну причину");
+  const select = element("select", "text-input");
+  select.setAttribute("aria-label", "Причина решения");
+  select.required = true;
+  const placeholder = element("option", "", "Выберите причину");
+  placeholder.value = "";
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  select.append(placeholder);
+  for (const reason of positive ? PURCHASE_REASONS : NON_PURCHASE_REASONS) {
+    const option = element("option", "", ANALYTICS_REASON_LABELS[reason]);
+    option.value = reason;
+    select.append(option);
+  }
+  const submit = element("button", "button button-quiet", "Отправить ответ");
+  submit.type = "submit";
+  const notice = element("p", "footnote");
+  notice.setAttribute("role", "status");
+  label.append(select);
+  form.append(label, submit, notice);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = true;
+    const reason = select.value as AnalyticsReason;
+    void track(
+      "orderId" in context
+        ? { event: "feedback_submitted", polarity: "positive", reason, orderId: context.orderId }
+        : { event: "feedback_submitted", polarity: "negative", reason, vin: context.vin },
+    ).then((recorded) => {
+      notice.textContent = recorded
+        ? "Спасибо за ответ."
+        : "Сейчас ответ не удалось сохранить. Это не влияет на проверку и заказ.";
+      submit.disabled = recorded;
+    });
+  });
+  panel.append(form);
+  return panel;
 }
 
 function errorText(error: unknown): string {
@@ -436,7 +529,7 @@ function showHome(): void {
   );
 }
 
-function samplePdfLink(reportKind: VinReportKind = "korea"): HTMLAnchorElement {
+function samplePdfLink(reportKind: VinReportKind = "korea", vin?: string): HTMLAnchorElement {
   const example = reportKind === "carfax" ? CARFAX_REPORT_EXAMPLE_PDF : KOREAN_REPORT_EXAMPLE_PDF;
   const link = element(
     "a",
@@ -446,6 +539,10 @@ function samplePdfLink(reportKind: VinReportKind = "korea"): HTMLAnchorElement {
   link.href = reportKind === "carfax" ? example.path : appPath(example.path);
   link.target = "_blank";
   link.rel = "noopener noreferrer";
+  if (vin)
+    link.addEventListener("click", () => {
+      void track({ event: "report_sample_opened", vin });
+    });
   return link;
 }
 
@@ -460,7 +557,7 @@ function premiumPanel(
   const actions = element("div", "report-actions");
   const notice = element("p", "footnote");
   notice.setAttribute("role", "status");
-  const sample = samplePdfLink(reportKind);
+  const sample = samplePdfLink(reportKind, result.vin);
   sample.textContent = "Посмотреть образец PDF";
   panel.append(
     element("h2", "", "Полный отчёт найден"),
@@ -469,13 +566,18 @@ function premiumPanel(
   );
   const price = result.reportPrice ? paymentAmountText(result.reportPrice) : null;
   if (config?.reportBotUrl && price) {
-    actions.append(reportBotLink(`vin_${result.vin}`, `Получить доступ · ${price}`));
+    const link = reportBotLink(`vin_${result.vin}`, `Получить доступ · ${price}`);
+    link.addEventListener("click", () => {
+      void track({ event: "report_checkout_started", vin: result.vin });
+    });
+    actions.append(link);
     notice.textContent =
       `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
       "Если получить отчёт невозможно — полный возврат. Условия и оплата — в VIN-боте.";
   } else if (result.reportSalesEnabled && price) {
     const buy = button(`Получить доступ · ${price}`, () => {
       if (buy.disabled) return;
+      void track({ event: "report_checkout_started", vin: result.vin });
       buy.disabled = true;
       buy.textContent = "Открываем заказ…";
       notice.textContent = "Сначала состав и условия. Деньги пока не списываются.";
@@ -502,7 +604,7 @@ function premiumPanel(
   } else {
     notice.textContent = "Покупка доступа пока недоступна.";
   }
-  panel.append(actions, notice);
+  panel.append(actions, notice, reportFeedback({ vin: result.vin }));
   return panel;
 }
 
@@ -1089,6 +1191,15 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element("summary", "", "Конфиденциальность проверки"),
     element("p", "footnote", VIN_DISCLOSURE),
   );
+  if (config?.analyticsEnabled) {
+    disclosure.append(
+      element(
+        "p",
+        "footnote",
+        "Для улучшения продукта сохраняем псевдонимные события действий на 90 дней, без текста сообщений, VIN и контактов. Внешних трекеров нет. Подтверждённый /delete в боте удаляет аналитику и отключает дальнейший сбор; финансовые записи заказа сохраняются отдельно.",
+      ),
+    );
+  }
   const form = element("form", "vin-form");
   const label = element("label", "", "VIN — 17 латинских букв и цифр, без I, O, Q");
   label.htmlFor = "vin-input";
@@ -1824,6 +1935,7 @@ async function showOrders(): Promise<void> {
             `Срок предоставления доступа к PDF: ${deadline.toLocaleString("ru-RU")}.`,
           ),
         );
+        panel.append(reportFeedback({ orderId: order.id }));
       }
       if (
         order.product === "vin_report" &&
@@ -1915,6 +2027,8 @@ async function showOrders(): Promise<void> {
         form.addEventListener("submit", (event) => {
           event.preventDefault();
           if (!checkbox.checked || submit.disabled) return;
+          if (order.product === "vin_report")
+            void track({ event: "report_checkout_started", orderId: order.id });
           submit.disabled = true;
           notice.textContent = "Подтверждаем счёт. Статус оплаты проверяем только на сервере.";
           void request<{ order: PaymentOrder }>("/miniapp/api/orders/checkout", {
@@ -1998,6 +2112,7 @@ async function load(): Promise<void> {
   if (!config) {
     try {
       await loadConfig();
+      void track({ event: "miniapp_opened" });
     } catch (error) {
       if (started === generation)
         showState("Не удалось открыть приложение", errorText(error), true);

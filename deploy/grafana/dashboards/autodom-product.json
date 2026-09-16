@@ -1,0 +1,1120 @@
+{
+  "uid": "autodom-product",
+  "title": "Autodom · путь пользователя и конверсия",
+  "tags": [
+    "autodom",
+    "product-analytics"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Как читать: наблюдения, не догадки",
+      "type": "text",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "## Пользовательский путь Autodom\nОкна **1 / 7 / 30 дней — скользящие от текущего сбора**, независимо от time picker Grafana. Воронка связывает **одного человека + один VIN**, допускает переход между ботами/Mini App и требует порядка шагов. Это не число людей, увидевших сообщение: Telegram подтверждает отправку, **не прочтение**.\n**Незавершённый путь ≠ отказ и не объясняет почему.** Причины ниже — только добровольные ответы (самоотбор). Оплата/выдача — подтверждённый журнал, не нажатие кнопки. История до включения событий неполна; платёжные события без наблюдаемого начала не добавляют выдуманный старт. Псевдонимная история 90 дней; /delete удаляет её и отключает дальнейший сбор. Текст сообщений, VIN и контакты не попадают в Grafana."
+      }
+    },
+    {
+      "id": 2,
+      "title": "Сбор аналитики · 1 = готов",
+      "type": "stat",
+      "description": "No data = аналитика не включена / target отсутствует; 0 = последняя выборка не удалась. Старые значения не выдаются за актуальные.",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "autodom_product_collection_success",
+          "legendFormat": "{{job}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 3,
+      "title": "Возраст успешного снимка",
+      "type": "stat",
+      "description": "Рабочий цикл 30с; >90с скрывает продуктовые панели.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - autodom_product_collection_timestamp_seconds > 0",
+          "legendFormat": "{{job}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 4,
+      "title": "Уникальные активные по боту / каналу",
+      "type": "bargauge",
+      "description": "Человек может присутствовать в нескольких каналах. Не суммировать эти числа как глобально уникальных пользователей.",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (bot,surface) (max by (bot,surface) (autodom_product_active_users{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "{{bot}} / {{surface}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 5,
+      "title": "Подтверждённые оплаты / выдачи / возвраты",
+      "type": "bargauge",
+      "description": "Все наблюдаемые ledger-события в окне, включая без полного клиентского пути. Не выручка/прибыль. Surface=system для Telegram-ledger; чтобы видеть все оплаты выберите Все каналы.",
+      "gridPos": {
+        "x": 12,
+        "y": 9,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event) (max by (bot,surface,event,outcome,step) (autodom_product_events{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",event=\"payment_succeeded\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "Оплачено",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (event) (max by (bot,surface,event,outcome,step) (autodom_product_events{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",event=\"report_delivered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "Выдано",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (event) (max by (bot,surface,event,outcome,step) (autodom_product_events{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",event=\"payment_refunded\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "Возвращено",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 6,
+      "title": "Последовательная воронка отчёта",
+      "type": "bargauge",
+      "description": "Когорта начавших VIN-путь в выбранном окне; повторные проверки того же VIN одним человеком не создают новую покупку. Bot/surface — вход в путь, не канал платежа.",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"vin_submitted\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "1. VIN отправлен",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"vin_completed\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "2. Бесплатный результат",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_offered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "3. Полный отчёт предложен",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_checkout_started\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "4. Начало оформления",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"terms_accepted\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "5. Условия приняты",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"payment_succeeded\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "6. Оплачено",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "G",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_delivered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "7. Отчёт выдан",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 7,
+      "title": "Пока не дошли до следующего шага",
+      "type": "bargauge",
+      "description": "Разница соседних стадий одной когорты. Здесь есть ещё активные пользователи; это не окончательный отказ и не причина непокупки.",
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"vin_submitted\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) - (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"vin_completed\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90))))",
+          "legendFormat": "2. Бесплатный результат",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"vin_completed\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) - (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_offered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90))))",
+          "legendFormat": "3. Полный отчёт предложен",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_offered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) - (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_checkout_started\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90))))",
+          "legendFormat": "4. Начало оформления",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "D",
+          "expr": "(sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_checkout_started\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) - (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"terms_accepted\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90))))",
+          "legendFormat": "5. Условия приняты",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "E",
+          "expr": "(sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"terms_accepted\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) - (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"payment_succeeded\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90))))",
+          "legendFormat": "6. Оплачено",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "F",
+          "expr": "(sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"payment_succeeded\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) - (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_delivered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90))))",
+          "legendFormat": "7. Отчёт выдан",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 8,
+      "title": "Предложение → подтверждённая оплата",
+      "type": "stat",
+      "description": "Тот же связанный последовательный путь, не деление независимых счётчиков. Нулевой знаменатель = No data, не 0%.",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"payment_succeeded\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) / ((sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_offered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) > 0)",
+          "legendFormat": "Конверсия",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 9,
+      "title": "VIN → предложение отчёта",
+      "type": "stat",
+      "description": "Показывает ограничение покрытия/доступности, а не готовность платить.",
+      "gridPos": {
+        "x": 12,
+        "y": 27,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 * (sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"report_offered\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) / ((sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"report\",stage=\"vin_submitted\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))) > 0)",
+          "legendFormat": "Доля",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 10,
+      "title": "Покупатель · профиль → полезный поиск",
+      "type": "bargauge",
+      "description": "Отдельный бесплатный путь. Пустая выдача не считается полезным результатом.",
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"buyer\",stage=\"profile_step\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "1. Начат профиль",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"buyer\",stage=\"profile_saved\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "2. Сохранён",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "sum(max by (bot,surface) (autodom_product_funnel{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",funnel=\"buyer\",stage=\"search_completed\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "3. Найдены варианты",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 11,
+      "title": "На каких шагах заполняют профиль",
+      "type": "bargauge",
+      "description": "Наблюдаемые переходы; повторы пользователем допустимы, это не уникальная последовательная конверсия.",
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (step) (max by (bot,surface,event,outcome,step) (autodom_product_events{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",event=\"profile_step\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "{{step}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 12,
+      "title": "Почему пока не покупают · ответы",
+      "type": "bargauge",
+      "description": "Только добровольные ответы на конкретное предложение. Нет ответа = причина неизвестна, не «дорого».",
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (max by (bot,surface,event,outcome,reason) (autodom_product_reasons{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",outcome=\"negative\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "{{reason}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "too_expensive" }, "properties": [{ "id": "displayName", "value": "Дорого" }] },
+          { "matcher": { "id": "byName", "options": "unclear_value" }, "properties": [{ "id": "displayName", "value": "Непонятна польза" }] },
+          { "matcher": { "id": "byName", "options": "not_now" }, "properties": [{ "id": "displayName", "value": "Пока не нужен" }] },
+          { "matcher": { "id": "byName", "options": "payment_problem" }, "properties": [{ "id": "displayName", "value": "Не получается оплатить" }] },
+          { "matcher": { "id": "byName", "options": "need_other_data" }, "properties": [{ "id": "displayName", "value": "Нужны другие данные" }] },
+          { "matcher": { "id": "byName", "options": "trust" }, "properties": [{ "id": "displayName", "value": "Не уверен в отчёте" }] }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 13,
+      "title": "Почему купили · ответы покупателей",
+      "type": "bargauge",
+      "description": "Ответ разрешён только владельцу подтверждённого оплаченного заказа. Это заявленный мотив, не доказательство причинности.",
+      "gridPos": {
+        "x": 12,
+        "y": 39,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (max by (bot,surface,event,outcome,reason) (autodom_product_reasons{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",outcome=\"positive\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "{{reason}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "check_history" }, "properties": [{ "id": "displayName", "value": "Проверить историю" }] },
+          { "matcher": { "id": "byName", "options": "mileage" }, "properties": [{ "id": "displayName", "value": "Проверить пробег" }] },
+          { "matcher": { "id": "byName", "options": "accidents" }, "properties": [{ "id": "displayName", "value": "Узнать о повреждениях" }] },
+          { "matcher": { "id": "byName", "options": "convenience" }, "properties": [{ "id": "displayName", "value": "Удобно получить здесь" }] }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 14,
+      "title": "Результаты VIN и поиска",
+      "type": "bargauge",
+      "description": "not_found/empty отделены от unavailable/error; пустая история не означает чистый автомобиль.",
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event,outcome) (max by (bot,surface,event,outcome,step) (autodom_product_events{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",event=~\"vin_completed|search_completed\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "{{event}} / {{outcome}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 15,
+      "title": "Наблюдаемые ошибки клиентского пути",
+      "type": "bargauge",
+      "description": "Технический барьер измеряется отдельно от добровольно названной причины. Исключения и тексты пользователей не записываются.",
+      "gridPos": {
+        "x": 12,
+        "y": 47,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (event,step,outcome) (max by (bot,surface,event,outcome,step) (autodom_product_events{bot=~\"$bot\",surface=~\"$surface\",window=\"$window\",outcome=~\"error|invalid|unavailable\"} and on (job,instance) (autodom_product_collection_success == 1) and on (job,instance) (time() - autodom_product_collection_timestamp_seconds < 90)))",
+          "legendFormat": "{{event}} / {{step}} / {{outcome}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "displayName": "${__field.displayName}",
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 16,
+      "title": "Качество доставки аналитики",
+      "type": "table",
+      "description": "Здесь используется time picker Grafana. Потери/таймауты означают неполную воронку; аналитика не блокирует бизнес-операции.",
+      "gridPos": {
+        "x": 0,
+        "y": 55,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (operation,result) (increase(autodom_product_operations_total[$__range]))",
+          "legendFormat": "{{operation}} / {{result}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 17,
+      "title": "Сверка финансового журнала",
+      "type": "stat",
+      "description": "1 = полный проход подтверждённых состояний. Повторы webhook и перезапуски не увеличивают платежи. Сверка только на владельце платежей.",
+      "gridPos": {
+        "x": 12,
+        "y": 55,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "autodom_product_ledger_collection_success",
+          "legendFormat": "{{job}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      }
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "bot",
+        "label": "Бот входа",
+        "type": "custom",
+        "query": "vin,full",
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "surface",
+        "label": "Канал",
+        "type": "custom",
+        "query": "telegram,miniapp,web,system",
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "window",
+        "label": "Окно когорты",
+        "type": "custom",
+        "query": "1d,7d,30d",
+        "current": {
+          "text": "7d",
+          "value": "7d"
+        }
+      }
+    ]
+  }
+}

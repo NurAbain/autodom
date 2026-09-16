@@ -11,6 +11,7 @@ import { PaymentStore } from "@autodom/storage/payments";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { type Api, GrammyError } from "grammy";
 import type { PreCheckoutQuery, Update } from "grammy/types";
+import type { AnalyticsRecorder } from "./analytics-contract.js";
 import {
   CARFAX_REPORT_FINIK_MINOR,
   CARFAX_REPORT_TELEGRAM_FINIK_TERMS,
@@ -160,6 +161,7 @@ function paymentTarget(value: unknown, logo = false): string {
 
 export class PaymentService {
   readonly ledger: PaymentStore;
+  analytics?: AnalyticsRecorder;
   private telegramApi?: Api;
   private starsEnabled = false;
   private telegramToken?: string;
@@ -769,6 +771,23 @@ export class PaymentService {
     return order;
   }
 
+  private async observeInvoice(order: PaymentOrder, success: boolean): Promise<void> {
+    if (!this.analytics || order.product !== "vin_report" || !order.vin) return;
+    await this.analytics
+      .record({
+        actorId: order.userId,
+        contextKey: order.vin,
+        flow: "report",
+        surface: order.channel === "web" ? "web" : "system",
+        event: success ? "invoice_created" : "interaction_error",
+        step: "checkout",
+        outcome: success ? "success" : "error",
+        ...(order.reportKind ? { reportKind: order.reportKind } : {}),
+        dedupeKey: `invoice:${order.id}:${success ? "created" : "error"}`,
+      })
+      .catch(() => {});
+  }
+
   async checkout(
     userId: number,
     id: string,
@@ -833,8 +852,10 @@ export class PaymentService {
           )
             throw new Error("Telegram did not return a native invoice URL");
           await this.ledger.setInvoice(id, invoiceUrl);
+          await this.observeInvoice(order, true);
           return this.ownedOrder(userId, id);
         } catch {
+          await this.observeInvoice(order, false);
           throw new PaymentRequestError(
             503,
             "Создание счёта не подтверждено. Заказ сохранён; проверьте /orders. Если уже платили, не платите повторно.",
@@ -920,8 +941,10 @@ export class PaymentService {
         )
           throw new Error("Unexpected Finik checkout origin");
         await this.ledger.setInvoice(id, url.href);
+        await this.observeInvoice(order, true);
         return await this.ownedOrder(userId, id, channel);
       } catch {
+        await this.observeInvoice(order, false);
         // Do not expose gateway responses, credentials, or claim that an ambiguous
         // provider request proves no payment exists. The receipt ledger remains authoritative.
         throw new PaymentRequestError(

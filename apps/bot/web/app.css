@@ -14,10 +14,10 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 280px; }
 button, a { -webkit-tap-highlight-color: transparent; }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 main, section, form, header { min-width: 0; }
 a { color: var(--tg-theme-link-color, #195c54); overflow-wrap: anywhere; }
-button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
 [hidden] { display: none !important; }
 #app {
   max-width: 780px;

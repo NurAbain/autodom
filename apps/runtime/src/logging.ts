@@ -8,6 +8,7 @@ export function createLogger(env: NodeJS.ProcessEnv = process.env): Logger {
         (key === "AUTODOM_BOT_TOKEN" ||
           key === "AUTODOM_DATABASE_URL" ||
           key === "AUTODOM_REDIS_URL" ||
+          key === "AUTODOM_ANALYTICS_KEY" ||
           (key.startsWith("SMARTPROXY_") && /(?:PASSWORD|USERNAME)$/u.test(key))),
     )
     .map(([, value]) => value ?? "");

@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import {
   MARKETS,
   money,
 } from "@autodom/core";
-import type { VinLookup } from "@autodom/core/vin";
+import { normalizeVin, VIN_PROVIDERS, type VinLookup } from "@autodom/core/vin";
 import {
   disabledVinArchiveResult,
   VIN_ARCHIVE_PHOTO_MAX_BYTES,
@@ -23,6 +24,13 @@ import {
   VinRequestError,
 } from "@autodom/core/vin-request";
 import type { Store } from "@autodom/storage";
+import { z } from "zod";
+import {
+  type AnalyticsEvent,
+  type AnalyticsRecorder,
+  NON_PURCHASE_REASONS,
+  PURCHASE_REASONS,
+} from "./analytics-contract.js";
 import type { BotMode } from "./bot-mode.js";
 import { listingText, type Reply } from "./conversation.js";
 import { RequestError, readFlatJson } from "./http-body.js";
@@ -37,6 +45,44 @@ import { handlePaymentRequest } from "./payments-http.js";
 import { confirmedVinReportKind, VIN_NOT_ENABLED } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
 import { handleWebReportRequest } from "./web-report-http.js";
+
+const analyticsNonce = z.string().uuid();
+const analyticsVin = z.string().regex(/^[A-HJ-NPR-Z0-9]{17}$/u);
+const clientAnalyticsBody = z.union([
+  z.object({ event: z.literal("miniapp_opened"), nonce: analyticsNonce }).strict(),
+  z
+    .object({
+      event: z.enum(["report_sample_opened", "report_checkout_started"]),
+      nonce: analyticsNonce,
+      vin: analyticsVin,
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal("report_checkout_started"),
+      nonce: analyticsNonce,
+      orderId: analyticsNonce,
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal("feedback_submitted"),
+      nonce: analyticsNonce,
+      polarity: z.literal("negative"),
+      reason: z.enum(NON_PURCHASE_REASONS),
+      vin: analyticsVin,
+    })
+    .strict(),
+  z
+    .object({
+      event: z.literal("feedback_submitted"),
+      nonce: analyticsNonce,
+      polarity: z.literal("positive"),
+      reason: z.enum(PURCHASE_REASONS),
+      orderId: analyticsNonce,
+    })
+    .strict(),
+]);
 
 async function readDialogueRequest(request: IncomingMessage): Promise<string> {
   const value = await readFlatJson(request, 8192);
@@ -107,6 +153,7 @@ export interface MiniAppServerOptions {
   /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
   dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
   payments?: PaymentService;
+  analytics?: AnalyticsRecorder;
   webReportAuth?: WebReportAuth;
 }
 
@@ -117,6 +164,18 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
   const origin = new URL(options.publicUrl).origin;
   const directory = options.assetsDirectory ?? fileURLToPath(new URL("./public/", import.meta.url));
   const assets = new Map<string, { body: Buffer; type: string }>();
+  // Short-lived evidence from real authenticated lookups, never browser assertions.
+  // Digest keys keep VINs and Telegram identities out of this telemetry cache.
+  const offers = new Map<string, { expiresAt: number; reportKind: "korea" | "carfax" | null }>();
+  const offerKey = (actorId: number, vin: string) =>
+    createHash("sha256").update(`${actorId}:${vin}`).digest("hex");
+  const record = (event: AnalyticsEvent): void => {
+    try {
+      void options.analytics?.record(event).catch(() => {});
+    } catch {
+      // Optional telemetry cannot break the action it observes.
+    }
+  };
   for (const [name, type] of [
     ["index.html", "text/html; charset=utf-8"],
     ["app.js", "text/javascript; charset=utf-8"],
@@ -153,6 +212,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/orders/report",
     "/miniapp/api/orders/payment-methods",
     "/miniapp/api/orders/card-payment",
+    "/miniapp/api/analytics",
   ];
 
   function respond(response: ServerResponse, status: number, value: unknown): void {
@@ -287,7 +347,11 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             response.setHeader("Allow", "GET");
             throw new RequestError(405, "Настройки доступны только через GET.");
           }
-          respond(response, 200, { mode, ...(reportBotUrl ? { reportBotUrl } : {}) });
+          respond(response, 200, {
+            mode,
+            analyticsEnabled: !!options.analytics,
+            ...(reportBotUrl ? { reportBotUrl } : {}),
+          });
           return;
         }
         if (!apiRoutes.includes(url.pathname)) throw new RequestError(404, "Страница не найдена.");
@@ -305,6 +369,70 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             401,
             "Сессия истекла. Закройте карточку и откройте её заново в Telegram.",
           );
+        if (url.pathname === "/miniapp/api/analytics") {
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "POST");
+            throw new RequestError(405, "Отзывы принимаются только через POST.");
+          }
+          if (url.search) throw new RequestError(400, "Передайте данные только в теле запроса.");
+          const parsed = clientAnalyticsBody.safeParse(await readFlatJson(request, 512));
+          if (!parsed.success) throw new RequestError(400, "Недопустимое событие или причина.");
+          if (!options.analytics) {
+            respond(response, 200, { enabled: false });
+            return;
+          }
+          const data = parsed.data;
+          if (data.event === "miniapp_opened") {
+            record({
+              actorId: user.id,
+              event: data.event,
+              surface: "miniapp",
+              flow: "navigation",
+              dedupeKey: `miniapp:${data.nonce}:${data.event}`,
+            });
+          } else {
+            let vin: string;
+            let reportKind: "korea" | "carfax";
+            if ("orderId" in data) {
+              const order = await payments?.ownedOrder(user.id, data.orderId);
+              if (
+                !order ||
+                order.product !== "vin_report" ||
+                !order.vin ||
+                normalizeVin(order.vin) !== order.vin ||
+                !order.reportKind ||
+                (data.event === "feedback_submitted" &&
+                  (order.paymentStatus !== "paid" || !order.paidAt))
+              )
+                throw new RequestError(409, "Нужен ваш подтверждённый заказ отчёта.");
+              vin = order.vin;
+              reportKind = order.reportKind;
+            } else {
+              vin = data.vin;
+              const evidence = offers.get(offerKey(user.id, vin));
+              if (!evidence?.reportKind || evidence.expiresAt <= Date.now())
+                throw new RequestError(409, "Сначала проверьте VIN и наличие отчёта.");
+              reportKind = evidence.reportKind;
+            }
+            record({
+              actorId: user.id,
+              event: data.event,
+              surface: "miniapp",
+              flow: "report",
+              contextKey: vin,
+              reportKind,
+              dedupeKey:
+                data.event === "feedback_submitted"
+                  ? `feedback:${vin}:${data.polarity}`
+                  : `miniapp:${data.nonce}:${data.event}`,
+              ...(data.event === "feedback_submitted"
+                ? { outcome: data.polarity, reason: data.reason }
+                : {}),
+            });
+          }
+          respond(response, 200, { enabled: true });
+          return;
+        }
         if (
           mode === "vin" &&
           (url.pathname === "/miniapp/api/car" || url.pathname === "/miniapp/api/dialogue")
@@ -406,6 +534,20 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               "Передайте один VIN только в теле запроса.",
             );
           const vin = await readVinRequest(request);
+          const attempt = randomUUID();
+          const evidenceKey = !archive && options.analytics ? offerKey(user.id, vin) : undefined;
+          const evidence = {
+            expiresAt: Date.now() + 15 * 60 * 1000,
+            reportKind: null as "korea" | "carfax" | null,
+          };
+          if (evidenceKey) {
+            for (const [key, value] of offers) {
+              if (value.expiresAt <= Date.now()) offers.delete(key);
+            }
+            offers.delete(evidenceKey);
+            if (offers.size >= 1000) offers.delete(offers.keys().next().value!);
+            offers.set(evidenceKey, evidence);
+          }
           const reportRevision = archive ? undefined : payments?.forgetVinResult(user.id, vin);
           if (archive && !options.checkVinArchive) {
             respond(response, 200, disabledVinArchiveResult(vin));
@@ -416,6 +558,15 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             respond(response, 503, { code: "vin_not_enabled", error: VIN_NOT_ENABLED });
             return;
           }
+          if (!archive)
+            record({
+              actorId: user.id,
+              event: "vin_submitted",
+              surface: "miniapp",
+              flow: "report",
+              contextKey: vin,
+              dedupeKey: `miniapp:${attempt}:vin_submitted`,
+            });
           const controller = new AbortController();
           const onClose = () => controller.abort();
           response.once("close", onClose);
@@ -425,6 +576,40 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             if (result.vin !== vin) throw new Error("VIN result does not match the request");
             if (reportRevision !== undefined && "carhistory" in result)
               payments?.rememberVinResult(user.id, result, reportRevision);
+            if (!archive && "carhistory" in result) {
+              const reportKind = confirmedVinReportKind(result);
+              if (evidenceKey && offers.get(evidenceKey) === evidence)
+                evidence.reportKind = reportKind;
+              const statuses = VIN_PROVIDERS.map((provider) => result[provider]?.status);
+              const found = statuses.includes("available");
+              const unavailable = statuses.includes("unavailable");
+              record({
+                actorId: user.id,
+                event: "vin_completed",
+                surface: "miniapp",
+                flow: "report",
+                contextKey: vin,
+                dedupeKey: `miniapp:${attempt}:vin_completed`,
+                outcome: found
+                  ? unavailable
+                    ? "partial"
+                    : "available"
+                  : unavailable
+                    ? "unavailable"
+                    : "not_found",
+              });
+              if (!response.destroyed && reportKind)
+                record({
+                  actorId: user.id,
+                  event: "report_offered",
+                  surface: "miniapp",
+                  flow: "report",
+                  contextKey: vin,
+                  reportKind,
+                  outcome: "available",
+                  dedupeKey: `report_offer:${vin}:${reportKind}`,
+                });
+            }
             if (!response.destroyed)
               respond(
                 response,
@@ -441,6 +626,16 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
                     },
               );
           } catch {
+            if (!archive)
+              record({
+                actorId: user.id,
+                event: "vin_completed",
+                surface: "miniapp",
+                flow: "report",
+                contextKey: vin,
+                dedupeKey: `miniapp:${attempt}:vin_completed`,
+                outcome: "error",
+              });
             if (!response.destroyed) {
               options.onError?.(
                 new Error(archive ? "VIN archive API request failed" : "VIN API request failed"),
@@ -480,6 +675,14 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             404,
             "Объявление недоступно, устарело или источник выключен. Вернитесь в чат за свежими вариантами.",
           );
+        record({
+          actorId: user.id,
+          event: "listing_opened",
+          surface: "miniapp",
+          flow: "buyer",
+          outcome: "success",
+          dedupeKey: `miniapp:${randomUUID()}:listing_opened`,
+        });
         respond(response, 200, carView(listing, profile.currency));
       })().catch((error: unknown) => {
         if (response.destroyed || response.headersSent) return;

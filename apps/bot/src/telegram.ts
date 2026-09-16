@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { isWebVinReport, type PaymentOrder, type VinReportKind } from "@autodom/core/payments";
@@ -24,6 +25,14 @@ import { sequentialize } from "@grammyjs/runner";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { InlineKeyboardMarkup } from "grammy/types";
+import {
+  ANALYTICS_REASON_LABELS,
+  type AnalyticsEvent,
+  type AnalyticsReason,
+  type AnalyticsRecorder,
+  NON_PURCHASE_REASONS,
+  PURCHASE_REASONS,
+} from "./analytics-contract.js";
 import type { BotMode } from "./bot-mode.js";
 import { CARFAX_REPORT_EXAMPLE_PDF } from "./carfax-report-example.js";
 import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
@@ -206,6 +215,7 @@ export type AutodomBot = Bot & {
 };
 
 export interface TelegramBotOptions {
+  analytics?: AnalyticsRecorder;
   mode?: BotMode;
   reportBotUrl?: string;
   onPrivateInteraction?: (userId: number) => Promise<void>;
@@ -230,6 +240,44 @@ export function createTelegramBot(
   });
   const vinOnly = options.mode === "vin";
   const reportBotUrl = !vinOnly ? options.reportBotUrl : undefined;
+  const analyticsContext = new AsyncLocalStorage<Context>();
+  async function record(
+    actorId: number,
+    event: Omit<AnalyticsEvent, "actorId" | "surface">,
+  ): Promise<void> {
+    const context = analyticsContext.getStore();
+    if (!options.analytics || !context || !privateBuyer(context) || context.from!.id !== actorId)
+      return;
+    const text = context.message?.text ?? context.message?.caption ?? "";
+    if (/^\/(?:payreply|refund|refundconfirm|report|deliver)(?:@\w+)?(?:\s|$)/iu.test(text)) return;
+    try {
+      await options.analytics.record({
+        ...event,
+        actorId,
+        surface: "telegram",
+        dedupeKey:
+          event.dedupeKey ??
+          `telegram:${context.update.update_id}:${event.event}:${event.flow}:${event.step ?? ""}`,
+      });
+    } catch {
+      /* First-party analytics never blocks the product. */
+    }
+  }
+  bot.use((context, next) =>
+    analyticsContext.run(context, async () => {
+      try {
+        await next();
+      } catch (error) {
+        if (context.from)
+          await record(context.from.id, {
+            event: "interaction_error",
+            flow: "navigation",
+            outcome: "error",
+          });
+        throw error;
+      }
+    }),
+  );
   // Register before payment handlers too: only a user's own private chat is reachable.
   bot.use(async (context, next) => {
     if (context.message && privateBuyer(context))
@@ -247,7 +295,99 @@ export function createTelegramBot(
     // Polling already committed this receipt before acknowledging its offset; replay is safe.
     await options.payments?.ingestTelegramPayment(context.update);
   });
-  const conversation = options.conversation ?? new Conversation(store);
+  const conversation =
+    options.conversation ??
+    new Conversation(store, { ...(options.analytics ? { analytics: options.analytics } : {}) });
+  function handleConversation(userId: number, chatId: number, input: string): Promise<Reply[]> {
+    if (
+      /^\/(?:start|cancel|delete|vin)(?:@\w+)?(?:\s|$)/iu.test(input) ||
+      input.startsWith("delete:")
+    )
+      reportContexts.delete(userId);
+    const updateId = analyticsContext.getStore()?.update.update_id;
+    return conversation.handle(
+      userId,
+      chatId,
+      input,
+      "telegram",
+      updateId === undefined ? undefined : `telegram:${updateId}`,
+    );
+  }
+  async function sendVinConversation(userId: number, chatId: number, input: string): Promise<void> {
+    const replies = await handleConversation(userId, chatId, input);
+    const confirming = replies.some((reply) =>
+      reply.buttons.some((row) => row.some(([, action]) => action.startsWith("delete:"))),
+    );
+    await sendReplies(
+      bot,
+      chatId,
+      replies,
+      confirming ? options : { ...options, fallbackReplyMarkup: vinMenu() },
+    );
+  }
+  interface ReportContext {
+    vin: string;
+    reportKind: VinReportKind;
+    nonce: string;
+    expiresAt: number;
+    messageIds: Set<number>;
+    polarity: "positive" | "negative";
+    orderId?: string;
+  }
+  const reportContexts = new Map<number, ReportContext>();
+  function reportContext(
+    userId: number,
+    vin: string,
+    reportKind: VinReportKind,
+    orderId?: string,
+  ): ReportContext {
+    for (const [id, value] of reportContexts)
+      if (value.expiresAt <= Date.now()) reportContexts.delete(id);
+    reportContexts.delete(userId);
+    if (reportContexts.size >= 1000) reportContexts.delete(reportContexts.keys().next().value!);
+    const value: ReportContext = {
+      vin,
+      reportKind,
+      nonce: randomBytes(12).toString("base64url"),
+      expiresAt: Date.now() + 30 * 60 * 1000,
+      messageIds: new Set(),
+      polarity: orderId ? "positive" : "negative",
+      ...(orderId ? { orderId } : {}),
+    };
+    reportContexts.set(userId, value);
+    return value;
+  }
+  async function positiveFeedback(context: Context, order: PaymentOrder): Promise<void> {
+    if (
+      !options.analytics ||
+      order.userId !== context.from?.id ||
+      order.paymentStatus !== "paid" ||
+      !order.vin ||
+      !order.reportKind
+    )
+      return;
+    const feedback = reportContext(order.userId, order.vin, order.reportKind, order.id);
+    try {
+      const sent = await context.reply(
+        "Если хотите, расскажите, что помогло решиться. Ответ необязателен и не влияет на выдачу отчёта.",
+        {
+          reply_markup: new InlineKeyboard().text(
+            "Что помогло решиться",
+            `report-feedback:${feedback.nonce}:open`,
+          ),
+        },
+      );
+      feedback.messageIds.add(sent.message_id);
+    } catch {
+      reportContexts.delete(order.userId);
+      await record(order.userId, {
+        event: "interaction_error",
+        flow: "report",
+        step: "report",
+        outcome: "error",
+      });
+    }
+  }
   const recognizePhoto = options.photoRecognizer;
   const pendingPhotos = new Map<
     number,
@@ -336,7 +476,7 @@ export function createTelegramBot(
       },
     );
   }
-  async function vinPrivacy(chatId: number, deleting = false): Promise<void> {
+  async function vinPrivacy(chatId: number): Promise<void> {
     await bot.api.sendMessage(
       chatId,
       [
@@ -346,18 +486,14 @@ export function createTelegramBot(
         "Фото VIN обрабатывает сервер распознавания Autodom; Telegram хранит отправленное сообщение.",
         "Подтверждение фото действует 10 минут. Новый VIN, /start или /cancel сбрасывает его.",
         escapeHtml(PAYMENT_PRIVACY_NOTICE),
-        ...(deleting
-          ? [
-              "VIN не записывается в профиль поиска. Для удаления ранее сохранённых авто, фильтров и настроек отправьте /paysupport Удалить мои сохранённые данные. Владелец уточнит запрос в этом чате. Ничего не удаляем без вашего подтверждения; заказы и платежи хранятся отдельно.",
-            ]
-          : [
-              "Для запроса удаления ранее сохранённых авто, фильтров и настроек используйте /delete. Данные не удаляются автоматически.",
-            ]),
+        "Собственная псевдонимная аналитика Autodom хранится 90 дней: этапы проверки и покупки, без текстов сообщений, содержимого VIN, контактов и бюджета; внешних трекеров нет. Подтверждённый /delete удаляет аналитику и отключает дальнейший сбор. Обязательные финансовые записи сохраняются отдельно.",
+        "Для удаления сохранённых авто, фильтров, настроек и аналитики используйте /delete и подтвердите действие. Переписка в Telegram не удаляется.",
       ].join("\n\n"),
       { parse_mode: "HTML", reply_markup: vinMenu() },
     );
   }
   async function vinHelp(userId: number, chatId: number): Promise<void> {
+    reportContexts.delete(userId);
     clearVehiclePhotos(userId);
     rememberPhoto(userId, []);
     await sendReplies(
@@ -406,6 +542,9 @@ export function createTelegramBot(
   }
   async function checkVin(chatId: number, vin: string): Promise<void> {
     if (normalizeVin(vin) !== vin) return;
+    reportContexts.delete(chatId);
+    await record(chatId, { event: "vin_submitted", flow: "report", contextKey: vin, step: "vin" });
+    let outcome: AnalyticsEvent["outcome"] = "unavailable";
     clearVehiclePhotos(chatId);
     const revision = options.payments?.forgetVinResult(chatId, vin);
     let keyboard: InlineKeyboardMarkup | undefined;
@@ -417,6 +556,20 @@ export function createTelegramBot(
       try {
         const checked = await options.checkVin(vin);
         if (checked.vin !== vin) throw new Error("VIN result does not match the request");
+        const statuses = [
+          checked.carhistory,
+          checked.car365,
+          checked.encar,
+          checked.nhtsa_vpic,
+          checked.autodev,
+        ].flatMap((source) => (source && source.status !== "disabled" ? [source.status] : []));
+        outcome = statuses.includes("available")
+          ? statuses.includes("unavailable")
+            ? "partial"
+            : "available"
+          : statuses.includes("unavailable") || !statuses.length
+            ? "unavailable"
+            : "not_found";
         const actions = vinResultActions(checked);
         if (actions.photos.length) photoOffer = rememberVehiclePhotos(chatId, "encar", checked);
         if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
@@ -443,6 +596,14 @@ export function createTelegramBot(
         presentation = vinResultPresentation(checked, actions);
         keyboard = actions.keyboard;
       } catch {
+        outcome = "error";
+        await record(chatId, {
+          event: "interaction_error",
+          flow: "report",
+          contextKey: vin,
+          step: "vin",
+          outcome: "error",
+        });
         clearVehiclePhotos(chatId);
         photoOffer = undefined;
         purchase = undefined;
@@ -450,6 +611,13 @@ export function createTelegramBot(
           "Проверка VIN временно недоступна. Результат неизвестен; это не отсутствие записей. Повторите /vin позже.";
       }
     }
+    await record(chatId, {
+      event: "vin_completed",
+      flow: "report",
+      contextKey: vin,
+      step: "vin",
+      outcome,
+    });
     await sendReplies(
       bot,
       chatId,
@@ -464,8 +632,9 @@ export function createTelegramBot(
         ...(photoOffer ? { onSent: (id: number) => photoOffer?.messageIds.add(id) } : {}),
       },
     );
-    if (purchase && reportKind)
-      await bot.api.sendMessage(
+    if (purchase && reportKind) {
+      const feedback = options.analytics ? reportContext(chatId, vin, reportKind) : undefined;
+      const sent = await bot.api.sendMessage(
         chatId,
         [
           "Полный отчёт найден. Бесплатные данные — выше.",
@@ -499,10 +668,30 @@ export function createTelegramBot(
                 },
               ],
               [purchase],
+              ...(feedback
+                ? [
+                    [
+                      {
+                        text: "Почему пока не покупаю",
+                        callback_data: `report-feedback:${feedback.nonce}:open`,
+                      },
+                    ],
+                  ]
+                : []),
             ],
           },
         },
       );
+      feedback?.messageIds.add(sent.message_id);
+      await record(chatId, {
+        event: "report_offered",
+        flow: "report",
+        contextKey: vin,
+        reportKind,
+        step: "report",
+        outcome: "available",
+      });
+    }
   }
   async function sendEncarPhotos(chatId: number, result: VinCheckResult): Promise<void> {
     const vin = result.vin;
@@ -798,6 +987,12 @@ export function createTelegramBot(
     try {
       await action(options.payments);
     } catch (error) {
+      await record(context.from!.id, {
+        event: "interaction_error",
+        flow: "report",
+        step: "payment",
+        outcome: "error",
+      });
       await context.reply(
         error instanceof PaymentRequestError
           ? error.message
@@ -829,6 +1024,13 @@ export function createTelegramBot(
   async function offerReport(context: Context, vin: string): Promise<void> {
     await paymentAction(context, async (payments) => {
       const order = await payments.reportOffer(context.from!.id, vin);
+      await record(context.from!.id, {
+        event: "report_checkout_started",
+        flow: "report",
+        contextKey: vin,
+        ...(order.reportKind ? { reportKind: order.reportKind } : {}),
+        step: "checkout",
+      });
       const keyboard = new InlineKeyboard();
       if (order.paymentStatus === "unpaid")
         keyboard
@@ -843,10 +1045,17 @@ export function createTelegramBot(
           : KOREAN_REPORT_EXAMPLE_PDF.label,
         order.reportKind === "carfax" ? "carfax-report-example" : "vin-report-example",
       );
-      await context.reply(
+      const sent = await context.reply(
         `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\n<b>Доступ к полному отчёту · до 60 минут после подтверждённой оплаты. Если предоставить доступ невозможно — полный возврат.</b>\n\n${escapeHtml(order.terms)}`,
         { parse_mode: "HTML", reply_markup: keyboard },
       );
+      const report = reportContexts.get(context.from!.id);
+      if (report?.vin === vin && report.expiresAt > Date.now()) {
+        if (report.messageIds.size >= 16)
+          report.messageIds.delete(report.messageIds.values().next().value!);
+        report.messageIds.add(sent.message_id);
+      }
+      await positiveFeedback(context, order);
     });
   }
 
@@ -860,12 +1069,17 @@ export function createTelegramBot(
   });
   bot.command("start", async (context, next) => {
     if (!privateBuyer(context)) return;
+    reportContexts.delete(context.from!.id);
+    if (vinOnly || context.match)
+      await record(context.from!.id, { event: "bot_started", flow: "navigation", step: "start" });
     clearVehiclePhotos(context.from!.id);
     if (context.match.startsWith("vin_")) {
       await store.withLock(`autodom:user:${context.from!.id}`, async () => {
         const vin = normalizeVin(context.match.slice(4));
         pendingPhotos.delete(context.from!.id);
-        if (!vinOnly) await conversation.handle(context.from!.id, context.chat.id, "/vin");
+        if (!vinOnly) await handleConversation(context.from!.id, context.chat.id, "/vin");
+        else
+          await record(context.from!.id, { event: "goal_selected", flow: "report", step: "vin" });
         if (vin) await checkVin(context.chat.id, vin);
         else await vinHelp(context.from!.id, context.chat.id);
       });
@@ -1013,6 +1227,16 @@ export function createTelegramBot(
     );
     if (options.miniAppUrl && replies.length) replies[replies.length - 1]!.miniAppView = "orders";
     await sendReplies(bot, context.chat!.id, replies, options);
+    const paid = orders
+      .slice(0, 10)
+      .find(
+        (order) =>
+          order.userId === context.from!.id &&
+          order.paymentStatus === "paid" &&
+          order.vin &&
+          order.reportKind,
+      );
+    if (paid) await positiveFeedback(context, paid);
   }
   bot.command("orders", showOrders);
   bot.command("sample", async (context) => {
@@ -1042,16 +1266,28 @@ export function createTelegramBot(
       const directVin = normalizeVin(text);
       if (vinCommand || directVin) {
         pendingPhotos.delete(userId);
-        if (!vinOnly) await conversation.handle(userId, chatId, "/vin");
+        if (!vinOnly) await handleConversation(userId, chatId, "/vin");
+        else await record(userId, { event: "goal_selected", flow: "report", step: "vin" });
         const vin = directVin ?? normalizeVin(vinCommand?.[2] ?? "");
         if (vin) await checkVin(chatId, vin);
-        else await vinHelp(userId, chatId);
+        else {
+          if (vinCommand?.[2]?.trim())
+            await record(userId, {
+              event: "vin_submitted",
+              flow: "report",
+              step: "vin",
+              outcome: "invalid",
+            });
+          await vinHelp(userId, chatId);
+        }
         return;
       }
       if (context.message.photo) {
+        reportContexts.delete(userId);
         pendingPhotos.delete(userId);
         clearVehiclePhotos(userId);
-        if (!vinOnly) await conversation.handle(userId, chatId, "/vin");
+        if (!vinOnly) await handleConversation(userId, chatId, "/vin");
+        else await record(userId, { event: "goal_selected", flow: "report", step: "vin" });
         if (!recognizePhoto) {
           await context.reply(photoHelp);
           return;
@@ -1087,6 +1323,12 @@ export function createTelegramBot(
             ),
           ].slice(0, 5);
         } catch (error) {
+          await record(userId, {
+            event: "interaction_error",
+            flow: "report",
+            step: "vin",
+            outcome: "error",
+          });
           const message =
             error instanceof VinPhotoError && error.reason === "busy"
               ? "Распознавание занято. Попробуйте фото чуть позже или введите /vin VIN."
@@ -1128,7 +1370,10 @@ export function createTelegramBot(
         return;
       }
       if (text.startsWith("/")) pendingPhotos.delete(userId);
-      if (/^\/(?:start|cancel)(?:@\w+)?(?:\s|$)/iu.test(text)) clearVehiclePhotos(userId);
+      if (/^\/(?:start|cancel|delete)(?:@\w+)?(?:\s|$)/iu.test(text)) {
+        clearVehiclePhotos(userId);
+        reportContexts.delete(userId);
+      }
       const pending = pendingPhotos.get(userId);
       if (pending && pending.expiresAt > Date.now()) {
         await context.reply(
@@ -1139,12 +1384,13 @@ export function createTelegramBot(
       pendingPhotos.delete(userId);
       if (vinOnly) {
         const command = /^\/([a-z]+)(?:@\w+)?(?:\s|$)/iu.exec(text)?.[1]?.toLowerCase();
-        if (command === "privacy" || command === "delete")
-          await vinPrivacy(chatId, command === "delete");
+        if (command === "delete" || command === "cancel")
+          await sendVinConversation(userId, chatId, text);
+        else if (command === "privacy") await vinPrivacy(chatId);
         else await vinWelcome(chatId);
         return;
       }
-      const replies = await conversation.handle(userId, chatId, text);
+      const replies = await handleConversation(userId, chatId, text);
       await sendReplies(bot, chatId, replies, options);
     });
   });
@@ -1154,6 +1400,69 @@ export function createTelegramBot(
     const chatId = userId;
     const data = "data" in callback ? (callback.data ?? "") : "";
     await store.withLock(`autodom:user:${userId}`, async () => {
+      if (data.startsWith("report-feedback:")) {
+        const parts = data.split(":");
+        const feedback = reportContexts.get(userId);
+        if (
+          !options.analytics ||
+          parts.length !== 3 ||
+          !feedback ||
+          feedback.nonce !== parts[1] ||
+          feedback.expiresAt <= Date.now() ||
+          !feedback.messageIds.has(callback.message!.message_id)
+        ) {
+          await context.reply("Этот вопрос устарел. Проверьте VIN заново или откройте /orders.");
+          return;
+        }
+        if (feedback.orderId) {
+          try {
+            const order = await options.payments?.ownedOrder(userId, feedback.orderId);
+            if (
+              !order ||
+              order.userId !== userId ||
+              order.paymentStatus !== "paid" ||
+              order.vin !== feedback.vin
+            )
+              return;
+          } catch {
+            await context.reply(
+              "Не удалось проверить актуальный заказ. Ответ необязателен; повторите позже через /orders.",
+            );
+            return;
+          }
+        }
+        const reasons: readonly AnalyticsReason[] =
+          feedback.polarity === "positive" ? PURCHASE_REASONS : NON_PURCHASE_REASONS;
+        if (parts[2] === "open") {
+          const keyboard = new InlineKeyboard();
+          for (const reason of reasons)
+            keyboard
+              .text(ANALYTICS_REASON_LABELS[reason], `report-feedback:${feedback.nonce}:${reason}`)
+              .row();
+          const sent = await context.reply(
+            "Можно выбрать одну причину или просто пропустить. Это не влияет на бесплатную проверку, цену и выдачу отчёта.",
+            { reply_markup: keyboard },
+          );
+          if (feedback.messageIds.size >= 16)
+            feedback.messageIds.delete(feedback.messageIds.values().next().value!);
+          feedback.messageIds.add(sent.message_id);
+        } else if (reasons.includes(parts[2] as AnalyticsReason)) {
+          await record(userId, {
+            event: "feedback_submitted",
+            flow: "report",
+            contextKey: feedback.vin,
+            reportKind: feedback.reportKind,
+            outcome: feedback.polarity,
+            reason: parts[2] as AnalyticsReason,
+            dedupeKey: `feedback:${feedback.vin}:${feedback.polarity}`,
+          });
+          reportContexts.delete(userId);
+          await context.reply(
+            "Спасибо за ответ! Бесплатная проверка и ваши заказы доступны как раньше.",
+          );
+        }
+        return;
+      }
       if (data === "/orders") {
         if (reportBotUrl) await delegateReport(context);
         else await showOrders(context);
@@ -1195,15 +1504,38 @@ export function createTelegramBot(
             `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\nДоступ к полному отчёту до 60 минут после подтверждённой оплаты; если предоставить доступ невозможно — полный возврат.\nПоддержка и возврат: /paysupport текст`,
             { parse_mode: "HTML", reply_markup: paymentKeyboard(order) },
           );
+          await positiveFeedback(context, order);
         });
         return;
       }
       if (data === "carfax-report-example") {
         await sendReportExample(chatId, "carfax");
+        const report = reportContexts.get(userId);
+        await record(userId, {
+          event: "report_sample_opened",
+          flow: "report",
+          reportKind: "carfax",
+          ...(report?.reportKind === "carfax" &&
+          report.expiresAt > Date.now() &&
+          report.messageIds.has(callback.message!.message_id)
+            ? { contextKey: report.vin }
+            : {}),
+        });
         return;
       }
       if (data === "vin-report-example") {
         await sendReportExample(chatId);
+        const report = reportContexts.get(userId);
+        await record(userId, {
+          event: "report_sample_opened",
+          flow: "report",
+          reportKind: "korea",
+          ...(report?.reportKind === "korea" &&
+          report.expiresAt > Date.now() &&
+          report.messageIds.has(callback.message!.message_id)
+            ? { contextKey: report.vin }
+            : {}),
+        });
         return;
       }
       if (data.startsWith("vinphotos:") || data.startsWith("vinarchivephotos:")) {
@@ -1262,7 +1594,7 @@ export function createTelegramBot(
             await sendReplies(
               bot,
               chatId,
-              await conversation.handle(userId, chatId, "/cancel"),
+              await handleConversation(userId, chatId, "/cancel"),
               options,
             );
         } else {
@@ -1273,29 +1605,52 @@ export function createTelegramBot(
         return;
       }
       pendingPhotos.delete(userId);
-      if (data === "/start" || data === "/cancel") clearVehiclePhotos(userId);
+      if (
+        data === "/start" ||
+        data === "/cancel" ||
+        data === "/delete" ||
+        data.startsWith("delete:")
+      ) {
+        clearVehiclePhotos(userId);
+        reportContexts.delete(userId);
+      }
       if (data === "/vin" || data.startsWith("/vin ")) {
-        if (!vinOnly) await conversation.handle(userId, chatId, "/vin");
+        if (!vinOnly) await handleConversation(userId, chatId, "/vin");
+        else await record(userId, { event: "goal_selected", flow: "report", step: "vin" });
         const vin = normalizeVin(data.slice(4));
         if (vin) await checkVin(chatId, vin);
-        else await vinHelp(userId, chatId);
+        else {
+          if (data.slice(4).trim())
+            await record(userId, {
+              event: "vin_submitted",
+              flow: "report",
+              step: "vin",
+              outcome: "invalid",
+            });
+          await vinHelp(userId, chatId);
+        }
         return;
       }
       if (vinOnly) {
-        if (data === "/privacy" || data === "/delete") await vinPrivacy(chatId, data === "/delete");
+        if (data === "/delete" || data.startsWith("delete:") || data === "/cancel")
+          await sendVinConversation(userId, chatId, data);
+        else if (data === "/privacy") await vinPrivacy(chatId);
         else {
           clearVehiclePhotos(userId);
+          if (data === "/start")
+            await record(userId, { event: "bot_started", flow: "navigation", step: "start" });
           await vinWelcome(chatId);
         }
         return;
       }
-      const replies = await conversation.handle(userId, chatId, data);
+      const replies = await handleConversation(userId, chatId, data);
       await sendReplies(bot, chatId, replies, options);
     });
   });
   return Object.assign(bot, {
     clearVinInput(userId: number): void {
       pendingPhotos.delete(userId);
+      reportContexts.delete(userId);
       clearVehiclePhotos(userId);
     },
   });

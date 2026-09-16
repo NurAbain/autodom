@@ -11,6 +11,7 @@ import {
   validateOwnerVehicle,
 } from "@autodom/core/owner-vehicle";
 import type { Store } from "@autodom/storage";
+import type { AnalyticsEvent } from "./analytics-contract.js";
 import type { Button, Buttons, Reply } from "./conversation.js";
 import { escapeHtml } from "./html.js";
 
@@ -239,11 +240,21 @@ export class SellerConversation {
     return this.move(draft, step);
   }
 
-  async handle(userId: number, chatId: number, input: string): Promise<Reply[] | null> {
+  async handle(
+    userId: number,
+    chatId: number,
+    input: string,
+    record?: (event: Omit<AnalyticsEvent, "actorId" | "surface" | "dedupeKey">) => Promise<void>,
+  ): Promise<Reply[] | null> {
+    if (chatId !== userId) return null;
     const text = input.trim();
     if (text === "/sell" || text === "/mycar") {
       this.current(userId);
-      return this.begin(userId, chatId, await this.store.getOwnerVehicle(userId));
+      const card = await this.store.getOwnerVehicle(userId);
+      try {
+        await record?.({ event: "goal_selected", flow: "seller", step: "sell" });
+      } catch {}
+      return this.begin(userId, chatId, card);
     }
     const callback = text.startsWith("seller:");
     if (text.startsWith("/") || (!callback && /^[a-z][a-z_-]*:/iu.test(text))) {
@@ -327,6 +338,14 @@ export class SellerConversation {
         draft.data.chat_id = chatId;
         draft.data.updated_at = Date.now() / 1000;
         const saved = await this.store.saveOwnerVehicle(this.candidate(draft));
+        try {
+          await record?.({
+            event: "profile_saved",
+            flow: "seller",
+            step: "saved",
+            outcome: "success",
+          });
+        } catch {}
         return this.begin(userId, chatId, saved);
       }
     }
@@ -353,6 +372,13 @@ export class SellerConversation {
     }
     if (draft.step === "purpose" && Object.hasOwn(OWNER_PURPOSES, action)) {
       draft.data.purpose = action as OwnerPurpose;
+      try {
+        await record?.({
+          event: "goal_selected",
+          flow: "seller",
+          step: action === "sale" ? "sell" : "exchange",
+        });
+      } catch {}
       return this.advance(draft);
     }
     if (draft.step === "property_type" && Object.hasOwn(PROPERTY_TYPES, action)) {

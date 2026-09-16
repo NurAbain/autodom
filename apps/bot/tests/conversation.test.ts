@@ -18,6 +18,7 @@ import type { Store } from "@autodom/storage";
 import { load } from "cheerio";
 import { InputFile } from "grammy";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AnalyticsEvent, AnalyticsRecorder } from "../src/analytics-contract.js";
 import {
   Conversation,
   listingReplies,
@@ -25,7 +26,11 @@ import {
   packReplies,
   type Reply,
 } from "../src/conversation.js";
-import { configureTelegramBot, createTelegramBot } from "../src/telegram.js";
+import {
+  configureTelegramBot,
+  createTelegramBot,
+  type TelegramBotOptions,
+} from "../src/telegram.js";
 
 // An interaction fixture only: persistence, SQL locking and cursor semantics are
 // independently exercised against PostgreSQL in the storage package.
@@ -203,6 +208,62 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.useRealTimers();
+});
+
+describe("first-party conversation analytics", () => {
+  it("keeps concurrent surfaces separate and records only committed buyer actions", async () => {
+    const events: AnalyticsEvent[] = [];
+    const instrumented = new Conversation(store, {
+      catalog: catalogFixture,
+      analytics: {
+        record: async (event) => {
+          events.push(event);
+        },
+        forget: async () => true,
+      },
+    });
+    await Promise.all([
+      instrumented.handle(1, 1, "/buy", "miniapp", "web-one"),
+      instrumented.handle(2, 2, "/start", "telegram", "telegram:2"),
+      instrumented.handle(3, -100, "/start", "telegram", "telegram:3"),
+    ]);
+    expect(events.map(({ actorId, surface, event }) => ({ actorId, surface, event }))).toEqual(
+      expect.arrayContaining([
+        { actorId: 1, surface: "miniapp", event: "goal_selected" },
+        { actorId: 2, surface: "telegram", event: "bot_started" },
+      ]),
+    );
+    expect(events.some((event) => event.actorId === 3)).toBe(false);
+    const overview = await review(instrumented, "Toyota Camry");
+    expect(events.some((event) => event.event === "profile_saved")).toBe(false);
+    await instrumented.handle(1, 1, button(overview, "Сохранить без"), "miniapp", "web-save");
+    expect(events.filter((event) => event.event === "profile_saved")).toMatchObject([
+      { surface: "miniapp", flow: "buyer", outcome: "success" },
+    ]);
+    expect(events.filter((event) => event.event === "search_completed")).toMatchObject([
+      { surface: "miniapp", outcome: "empty" },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/Toyota|Camry|15000/);
+  });
+
+  it("deletes core data but reports failed analytics erasure and permits a confirmed retry", async () => {
+    const forget = vi
+      .fn<AnalyticsRecorder["forget"]>()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const instrumented = new Conversation(store, { analytics: { record: async () => {}, forget } });
+    await save(instrumented, "");
+    const first = await instrumented.handle(1, 1, "/delete");
+    expect(forget).not.toHaveBeenCalled();
+    const failed = await instrumented.handle(1, 1, button(first, "Удалить мои"));
+    expect(await store.getProfile(1)).toBeNull();
+    expect(rendered(failed)).toContain("Удаление аналитики временно недоступно");
+    expect(rendered(failed)).not.toContain("Аналитика удалена");
+    const retry = await instrumented.handle(1, 1, "/delete");
+    const succeeded = await instrumented.handle(1, 1, button(retry, "Удалить мои"));
+    expect(rendered(succeeded)).toContain("Аналитика удалена");
+    expect(forget).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("explicit consent and save safety", () => {
@@ -941,8 +1002,10 @@ describe("grammY transport boundaries", () => {
     checkVin?: VinLookup,
     checkVinArchive?: VinArchiveLookup,
     getVinArchivePhoto?: VinArchivePhotoLookup,
+    options: TelegramBotOptions = {},
   ) {
     const bot = createTelegramBot(store as unknown as Store, "100:test-token", {
+      ...options,
       ...(checkVin ? { checkVin } : {}),
       ...(checkVinArchive ? { checkVinArchive } : {}),
       ...(getVinArchivePhoto ? { getVinArchivePhoto } : {}),
@@ -990,6 +1053,294 @@ describe("grammY transport boundaries", () => {
     expect(photo).toBeInstanceOf(InputFile);
     return (photo as InputFile).toRaw();
   }
+  it("records only delivered report offers and binds voluntary feedback to the actor, VIN and message", async () => {
+    const events: AnalyticsEvent[] = [];
+    const analytics: AnalyticsRecorder = {
+      record: async (event) => {
+        events.push(event);
+      },
+      forget: async () => true,
+    };
+    const vin = "KMHDU41DBAU123456";
+    const lookup: VinLookup = async (value) => ({
+      vin: value,
+      checked_at: 1_789_000_000,
+      carhistory: {
+        status: "available",
+        source_url: "https://www.carhistory.or.kr/",
+        checked_at: 1_789_000_000,
+      },
+      car365: { status: "not_found", source_url: "", checked_at: null, data: null },
+    });
+    const { bot, calls } = telegram(lookup, undefined, undefined, {
+      analytics,
+      reportBotUrl: "https://t.me/autokgbot",
+    });
+    await bot.init();
+    const from = { id: 1, is_bot: false, first_name: "Buyer" };
+    const message = {
+      message_id: 1,
+      date: 1,
+      from,
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${vin}` } });
+    expect(events.filter((event) => event.event === "report_offered")).toMatchObject([
+      { contextKey: vin, reportKind: "korea" },
+    ]);
+    const index = calls.findLastIndex((call) =>
+      JSON.stringify(call.payload.reply_markup)?.includes("report-feedback:"),
+    );
+    const markup = calls[index]!.payload.reply_markup as {
+      inline_keyboard: { callback_data?: string }[][];
+    };
+    const data = markup.inline_keyboard
+      .flat()
+      .find((item) => item.callback_data?.startsWith("report-feedback:"))!.callback_data!;
+    const callback = {
+      id: "feedback",
+      from,
+      chat_instance: "private",
+      message: { ...message, message_id: index + 1 },
+      data,
+    };
+    await bot.handleUpdate({
+      update_id: 2,
+      callback_query: { ...callback, from: { ...from, id: 2 } },
+    });
+    await bot.handleUpdate({
+      update_id: 3,
+      callback_query: { ...callback, message: { ...message, message_id: 999 } },
+    });
+    await bot.handleUpdate({
+      update_id: 4,
+      callback_query: { ...callback, data: data.replace(":open", ":not_a_reason") },
+    });
+    expect(events.filter((event) => event.event === "feedback_submitted")).toEqual([]);
+    await bot.handleUpdate({ update_id: 5, callback_query: callback });
+    const promptId = calls.length;
+    const selected = {
+      ...callback,
+      message: { ...message, message_id: promptId },
+      data: data.replace(":open", ":too_expensive"),
+    };
+    await bot.handleUpdate({ update_id: 6, callback_query: selected });
+    await bot.handleUpdate({ update_id: 7, callback_query: selected });
+    expect(events.filter((event) => event.event === "feedback_submitted")).toMatchObject([
+      { actorId: 1, contextKey: vin, outcome: "negative", reason: "too_expensive" },
+    ]);
+    expect(events.filter((event) => event.event === "payment_succeeded")).toEqual([]);
+    await bot.handleUpdate({
+      update_id: 8,
+      message: { ...message, text: "/vin KMHDU41DBAU123457" },
+    });
+    await bot.handleUpdate({ update_id: 9, callback_query: selected });
+    expect(events.filter((event) => event.event === "feedback_submitted")).toHaveLength(1);
+  });
+
+  it("does not count an offer whose Telegram delivery fails or let analytics failure stop free VIN", async () => {
+    const events: AnalyticsEvent[] = [];
+    const lookup: VinLookup = async (vin) => ({
+      vin,
+      checked_at: 1_789_000_000,
+      carhistory: {
+        status: "available",
+        source_url: "https://www.carhistory.or.kr/",
+        checked_at: 1_789_000_000,
+      },
+      car365: { status: "not_found", source_url: "", checked_at: null, data: null },
+    });
+    const { bot } = telegram(lookup, undefined, undefined, {
+      analytics: {
+        record: async (event) => {
+          events.push(event);
+          if (event.event === "vin_submitted") throw new Error("offline");
+        },
+        forget: async () => true,
+      },
+      reportBotUrl: "https://t.me/autokgbot",
+    });
+    bot.api.config.use(async (previous, method, payload, signal) => {
+      if (
+        method === "sendMessage" &&
+        "reply_markup" in payload &&
+        JSON.stringify(payload.reply_markup).includes("report-feedback:")
+      )
+        throw new Error("Telegram unavailable");
+      return previous(method, payload, signal);
+    });
+    await bot.init();
+    await expect(
+      bot.handleUpdate({
+        update_id: 1,
+        message: {
+          message_id: 1,
+          date: 1,
+          from: { id: 1, is_bot: false, first_name: "Buyer" },
+          chat: { id: 1, type: "private", first_name: "Buyer" },
+          text: "/vin KMHDU41DBAU123456",
+        },
+      }),
+    ).rejects.toThrow();
+    expect(
+      events.some((event) => event.event === "vin_completed" && event.outcome === "available"),
+    ).toBe(true);
+    expect(events.filter((event) => event.event === "report_offered")).toEqual([]);
+  });
+
+  it("requires confirmed VIN-bot deletion before analytics erasure", async () => {
+    const forget = vi.fn(async () => true);
+    const { bot, calls } = telegram(undefined, undefined, undefined, {
+      mode: "vin",
+      analytics: { record: async () => {}, forget },
+    });
+    await bot.init();
+    const from = { id: 1, is_bot: false, first_name: "Buyer" };
+    const message = {
+      message_id: 1,
+      date: 1,
+      from,
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    await bot.handleUpdate({ update_id: 1, message: { ...message, text: "/delete" } });
+    expect(forget).not.toHaveBeenCalled();
+    const markup = calls.at(-1)!.payload.reply_markup as {
+      inline_keyboard: { callback_data?: string }[][];
+    };
+    const data = markup.inline_keyboard
+      .flat()
+      .find((item) => item.callback_data?.startsWith("delete:"))!.callback_data!;
+    await bot.handleUpdate({
+      update_id: 2,
+      callback_query: { id: "delete", from, chat_instance: "private", message, data },
+    });
+    expect(forget).toHaveBeenCalledExactlyOnceWith(1);
+    await bot.handleUpdate({
+      update_id: 3,
+      callback_query: { id: "stale", from, chat_instance: "private", message, data },
+    });
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the report purchase offer usable without inert feedback when analytics is disabled", async () => {
+    const vin = "KMHDU41DBAU123456";
+    const { bot, calls } = telegram(
+      async () => ({
+        vin,
+        checked_at: 1_789_000_000,
+        carhistory: {
+          status: "available",
+          source_url: "https://www.carhistory.or.kr/",
+          checked_at: 1_789_000_000,
+        },
+        car365: { status: "not_found", source_url: "", checked_at: null, data: null },
+      }),
+      undefined,
+      undefined,
+      { reportBotUrl: "https://t.me/autokgbot" },
+    );
+    await bot.init();
+    await bot.handleUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private", first_name: "Buyer" },
+        text: `/vin ${vin}`,
+      },
+    });
+    const markup = calls.at(-1)!.payload.reply_markup as {
+      inline_keyboard: { callback_data?: string; url?: string }[][];
+    };
+    expect(
+      markup.inline_keyboard
+        .flat()
+        .some((button) => button.url === `https://t.me/autokgbot?start=vin_${vin}`),
+    ).toBe(true);
+    expect(
+      markup.inline_keyboard
+        .flat()
+        .some((button) => button.callback_data?.startsWith("report-feedback:")),
+    ).toBe(false);
+  });
+
+  it("offers positive feedback only for an owned paid order and rechecks payment before accepting it", async () => {
+    const events: AnalyticsEvent[] = [];
+    const order = {
+      id: "paid-order",
+      userId: 1,
+      product: "vin_report",
+      channel: "telegram",
+      title: "Report",
+      vin: "KMHDU41DBAU123456",
+      reportKind: "korea",
+      amount: 49900,
+      currency: "KGS",
+      paymentStatus: "unpaid",
+    };
+    const payments = {
+      configureStars: () => {},
+      ledger: { listOrders: async () => [order] },
+      ownedOrder: async () => order,
+    } as unknown as NonNullable<TelegramBotOptions["payments"]>;
+    const { bot, calls } = telegram(undefined, undefined, undefined, {
+      mode: "vin",
+      payments,
+      analytics: {
+        record: async (event) => {
+          events.push(event);
+        },
+        forget: async () => true,
+      },
+    });
+    await bot.init();
+    const from = { id: 1, is_bot: false, first_name: "Buyer" };
+    const message = {
+      message_id: 1,
+      date: 1,
+      from,
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    const callback = { id: "orders", from, chat_instance: "private", message, data: "/orders" };
+    await bot.handleUpdate({ update_id: 1, callback_query: callback });
+    expect(
+      calls.some((call) => JSON.stringify(call.payload.reply_markup)?.includes("report-feedback:")),
+    ).toBe(false);
+    order.paymentStatus = "paid";
+    await bot.handleUpdate({ update_id: 2, callback_query: callback });
+    const index = calls.findLastIndex((call) =>
+      JSON.stringify(call.payload.reply_markup)?.includes("report-feedback:"),
+    );
+    const markup = calls[index]!.payload.reply_markup as {
+      inline_keyboard: { callback_data?: string }[][];
+    };
+    const open = markup.inline_keyboard
+      .flat()
+      .find((item) => item.callback_data?.startsWith("report-feedback:"))!.callback_data!;
+    const feedback = { ...callback, message: { ...message, message_id: index + 1 } };
+    await bot.handleUpdate({
+      update_id: 3,
+      callback_query: { ...feedback, data: open.replace(":open", ":too_expensive") },
+    });
+    expect(events.filter((event) => event.event === "feedback_submitted")).toEqual([]);
+    order.paymentStatus = "refunded";
+    await bot.handleUpdate({
+      update_id: 4,
+      callback_query: { ...feedback, data: open.replace(":open", ":mileage") },
+    });
+    expect(events.filter((event) => event.event === "feedback_submitted")).toEqual([]);
+    order.paymentStatus = "paid";
+    await bot.handleUpdate({
+      update_id: 5,
+      callback_query: { ...feedback, data: open.replace(":open", ":mileage") },
+    });
+    expect(events.filter((event) => event.event === "feedback_submitted")).toMatchObject([
+      { outcome: "positive", reason: "mileage", contextKey: order.vin },
+    ]);
+    expect(events.filter((event) => event.event === "payment_succeeded")).toEqual([]);
+  });
+
   it("acknowledges archive clicks during photo delivery without overlapping the searches", async () => {
     const vin = "WBA51AG03NCK98884";
     const archive = vi.fn<VinArchiveLookup>(async () => ({
