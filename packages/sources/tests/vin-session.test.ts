@@ -189,6 +189,77 @@ describe("proxy-only VIN sessions", () => {
     mock.assertNoPendingInterceptors();
   });
 
+  it("preserves confirmed Encar photos when an optional report times out during admission", async () => {
+    const vin = "WBA51AG03NCK98884";
+    const id = "39720103";
+    const deadline = new AbortController();
+    const mock = new MockAgent();
+    mock.disableNetConnect();
+    mock
+      .get("https://fem.encar.com")
+      .intercept({ path: `/cars/detail/${id}` })
+      .reply(
+        200,
+        `<script>__PRELOADED_STATE__ = ${JSON.stringify({
+          cars: {
+            base: {
+              vehicleId: Number(id),
+              vin,
+              manage: { dummy: false },
+              condition: { inspection: { formats: ["TABLE"] } },
+              photos: [{ path: "/carpicture02/pic3972/39720103_001.jpg" }],
+            },
+          },
+        })};</script>`,
+      );
+    let reportRequests = 0;
+    mock
+      .get("https://api.encar.com")
+      .intercept({ path: `/legacy/usedcar/inspect/${id}` })
+      .reply(() => {
+        reportRequests++;
+        return { statusCode: 200, data: "{}" };
+      });
+    const transport = new VinTransport({
+      routes: routes.slice(0, 1),
+      requestDelaySeconds: 20,
+      dispatcherFactory: () => mock,
+    });
+    transports.push(transport);
+    const result = transport.run(
+      "encar",
+      (session) =>
+        checkEncarHistory(
+          vin,
+          {
+            ...session,
+            request(path, options) {
+              const pending = session.request(path, options);
+              if (path === `https://api.encar.com/legacy/usedcar/inspect/${id}`)
+                queueMicrotask(() =>
+                  deadline.abort(new DOMException("Workflow expired", "TimeoutError")),
+                );
+              return pending;
+            },
+          },
+          [id],
+        ),
+      deadline.signal,
+    );
+    await expect(result).resolves.toMatchObject({
+      vin,
+      partial: true,
+      listings: [
+        {
+          id,
+          photo_urls: ["https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg"],
+          reports: [{ kind: "inspection", status: "unavailable", partial: true }],
+        },
+      ],
+    });
+    expect(reportRequests).toBe(0);
+  });
+
   it("rejects unsafe paths and credential headers before calling the discovery hook", async () => {
     const fetch = vi.fn(async () => new Response("unused"));
     const unsafe = [

@@ -178,6 +178,9 @@ export class VinTransport {
       // Charge only real admissions; cancelled queue entries leave no future debt.
       this.#nextRequest.set(provider, Date.now() + (this.#options.requestDelaySeconds ?? 2) * 1000);
       return request();
+    } catch (error) {
+      signal.throwIfAborted();
+      throw error;
     } finally {
       signal.removeEventListener("abort", abort);
       release();
