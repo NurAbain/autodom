@@ -421,16 +421,13 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(confirmedVinReportKind({ ...positive, vin: positive.vin.toLowerCase() })).toBeNull();
   });
 
-  it("attributes the actual CARFAX count to VAGVIN without presenting a fetched report", () => {
+  it("keeps CARFAX vehicle facts without exposing provider links or rendering retrieved markup", () => {
     const positive = carfaxResult();
     const source = vinSourceText("vagvin_carfax", positive);
-    expect(source).toContain("VAGVIN");
-    expect(source).toContain("CARFAX");
-    expect(source).toContain("47");
     expect(source).toContain("BMW 530i");
     const rendered = load(vinResultPresentation(positive).text);
-    expect(rendered('a[href="https://vagvin.ru/home"]').text()).toContain("VAGVIN");
-    expect(rendered.root().text()).toContain("47");
+    expect(rendered("a").length).toBe(0);
+    expect(rendered.root().text()).not.toMatch(/VAGVIN|vagvin\.ru/u);
     const unsafe = carfaxResult();
     unsafe.vagvin_carfax!.data!.vehicle = '<a href="https://attacker.invalid/">BMW</a>';
     expect(load(vinResultPresentation(unsafe).text)('a[href*="attacker"]').length).toBe(0);

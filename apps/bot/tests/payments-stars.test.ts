@@ -143,6 +143,30 @@ it("rejects unauthorized delivery, refund, support reply, and another buyer's PD
   await expect(service.downloadReport(43, id)).rejects.toMatchObject({ status: 404 });
 });
 
+it("lets the operator answer a photo-only buyer's support request", async () => {
+  const { service, api } = fixture();
+  vi.spyOn(service.ledger, "listOrders").mockResolvedValue([
+    {
+      ...paidOrder(),
+      product: "vin_photos",
+      reportKind: null,
+      provider: "finik",
+      currency: "KGS",
+      amount: 19900,
+      preCheckoutId: null,
+    },
+  ]);
+  const delivered: { chat_id: number; text: string }[] = [];
+  api.config.use(async (_previous, method, payload) => {
+    if (method === "sendMessage") delivered.push(payload as { chat_id: number; text: string });
+    return { ok: true, result: { message_id: delivered.length } } as never;
+  });
+  await service.paymentSupport(42, "Не открывается фото");
+  await service.paymentSupportReply(VIN_REPORT_OWNER, 42, "Поможем с доступом");
+  expect(delivered.map((message) => message.chat_id)).toEqual([VIN_REPORT_OWNER, 42]);
+  expect(delivered[1]?.text).toContain("Поможем с доступом");
+});
+
 it("requires explicit terms even for the buyer of an existing invoice", async () => {
   const { service } = fixture();
   await expect(service.checkout(42, id, false)).rejects.toMatchObject({ status: 400 });

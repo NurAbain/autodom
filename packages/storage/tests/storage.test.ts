@@ -478,6 +478,139 @@ const starsReceipt = (orderId: string, userId = 1): PaymentEvent => ({
   userId,
 });
 
+describe("VIN photo access purchases", () => {
+  it("deduplicates across processes, scopes access to buyer and VIN, and revokes it throughout a full refund", async () => {
+    const payments = new PaymentStore(db);
+    const peer = new PaymentStore(await open(url));
+    const quote: PaymentOfferInput = {
+      ...reportOffer(),
+      product: "vin_photos",
+      reportKind: null,
+      amount: 19900,
+    };
+    const [photos, retry] = await Promise.all([
+      payments.createOffer(quote),
+      peer.createOffer(quote),
+    ]);
+    expect(retry.id).toBe(photos.id);
+    const report = await payments.createFinikReportOffer(
+      { ...reportOffer(), amount: 49900 },
+      "telegram",
+    );
+    await payments.acceptOrder(report.id, 1);
+    await payments.ingestEvent({ ...receipt(report.id), amount: report.amount });
+    expect(await payments.hasPhotoAccess(1, photos.vin!)).toBe(false);
+    await payments.acceptOrder(photos.id, 1);
+    await payments.setInvoice(photos.id, "https://qr.finik.kg/photo-fixture");
+    expect(await payments.hasPhotoAccess(1, photos.vin!)).toBe(false);
+    const paid = { ...receipt(photos.id), amount: photos.amount };
+    expect(await payments.ingestEvent(paid)).toBe("applied");
+    expect(await payments.ingestEvent(paid)).toBe("duplicate");
+    expect(await payments.getOrder(photos.id)).toMatchObject({
+      paymentStatus: "paid",
+      fulfillmentStatus: "fulfilled",
+      reportFileId: null,
+      reportMessageId: null,
+    });
+    expect(await payments.hasPhotoAccess(1, photos.vin!)).toBe(true);
+    expect(await payments.hasPhotoAccess(2, photos.vin!)).toBe(false);
+    expect(await payments.hasPhotoAccess(1, "KMHCT41DADU123457")).toBe(false);
+    vi.setSystemTime(Date.parse(photos.expiresAt) + 1000);
+    expect(await payments.hasPhotoAccess(1, photos.vin!)).toBe(true);
+    expect((await peer.findOpenVinPhotos(1, photos.vin!))?.id).toBe(photos.id);
+    const active = join(directory, "photo-access.ndjson");
+    await backup(db, active);
+    const restoredUrl = await database();
+    await restore(active, restoredUrl);
+    const restoredStore = await open(restoredUrl);
+    const restored = new PaymentStore(restoredStore);
+    expect(await restored.hasPhotoAccess(1, photos.vin!)).toBe(true);
+    await expect(restored.requestRefund(photos.id, 100, "Partial")).rejects.toThrow();
+    const refund = await restored.requestRefund(photos.id, photos.amount, "Access refund");
+    expect(await restored.hasPhotoAccess(1, photos.vin!)).toBe(false);
+    expect((await restored.requestRefund(photos.id, photos.amount, "Retry")).id).toBe(refund.id);
+    await restored.confirmFinikReportRefund(photos.id, 706854211, "photo-refund-reference");
+    expect(await restored.hasPhotoAccess(1, photos.vin!)).toBe(false);
+    const returned = join(directory, "photo-refunded.ndjson");
+    await backup(restoredStore, returned);
+    const returnedUrl = await database();
+    await restore(returned, returnedUrl);
+    const returnedPayments = new PaymentStore(await open(returnedUrl));
+    expect(await returnedPayments.getOrder(photos.id)).toMatchObject({
+      product: "vin_photos",
+      paymentStatus: "refunded",
+      reportKind: null,
+      reportFileId: null,
+    });
+    expect(await returnedPayments.hasPhotoAccess(1, photos.vin!)).toBe(false);
+  });
+
+  it.each([false, true])(
+    "replaces expired unpaid photo checkout after invoice creation=%s without duplicate replacements",
+    async (issued) => {
+      const payments = new PaymentStore(db);
+      const peer = new PaymentStore(await open(url));
+      const quote: PaymentOfferInput = { ...reportOffer(), product: "vin_photos", amount: 19900 };
+      const expired = await payments.createOffer(quote);
+      await payments.acceptOrder(expired.id, 1);
+      if (issued) await payments.setInvoice(expired.id, "https://qr.finik.kg/expired-photos");
+      expect((await peer.createOffer(quote)).id).toBe(expired.id);
+      vi.setSystemTime(Date.parse(expired.expiresAt) + 1000);
+      expect(await payments.findOpenVinPhotos(1, expired.vin!)).toBeNull();
+      const renewed = { ...quote, expiresAt: new Date(Date.now() + 3600000).toISOString() };
+      const [replacement, retry] = await Promise.all([
+        payments.createOffer(renewed),
+        peer.createOffer(renewed),
+      ]);
+      expect(replacement.id).not.toBe(expired.id);
+      expect(retry.id).toBe(replacement.id);
+      expect(await payments.getOrder(expired.id)).toMatchObject({
+        paymentStatus: "unpaid",
+        invoiceStatus: "pending",
+      });
+      expect(await payments.hasPhotoAccess(1, expired.vin!)).toBe(false);
+    },
+  );
+
+  it("never unlocks mismatched or late receipts and rejects incompatible photo snapshot rows", async () => {
+    const payments = new PaymentStore(db);
+    const quote: PaymentOfferInput = { ...reportOffer(), product: "vin_photos", amount: 19900 };
+    const photos = await payments.createOffer(quote);
+    await payments.acceptOrder(photos.id, 1);
+    expect(await payments.ingestEvent({ ...receipt(photos.id), amount: 100 })).toBe("review");
+    expect(await payments.hasPhotoAccess(1, photos.vin!)).toBe(false);
+    expect(await payments.ingestEvent({ ...receipt(photos.id), amount: photos.amount })).toBe(
+      "applied",
+    );
+    expect(await payments.hasPhotoAccess(1, photos.vin!)).toBe(false);
+    const late = await payments.createOffer({ ...quote, userId: 2 });
+    await payments.acceptOrder(late.id, 2);
+    vi.setSystemTime(Date.parse(late.expiresAt) + 1000);
+    expect(await payments.ingestEvent({ ...receipt(late.id), amount: late.amount })).toBe("review");
+    expect(await payments.hasPhotoAccess(2, late.vin!)).toBe(false);
+    const source = join(directory, "photos-review.ndjson");
+    await backup(db, source);
+    for (const damage of ["legacy", "amount", "kind", "web", "stars", "pdf"]) {
+      const damaged = join(directory, `photo-${damage}.ndjson`);
+      await rewriteSnapshot(source, damaged, (record) => {
+        if (damage === "legacy" && Object.hasOwn(record, "schema_version"))
+          record.schema_version = 10;
+        const row = record.row as Record<string, unknown> | undefined;
+        if (record.table !== "payment_orders" || row?.id !== photos.id) return;
+        if (damage === "amount") row.amount = "49900";
+        if (damage === "kind") row.report_kind = "korea";
+        if (damage === "web") row.channel = "web";
+        if (damage === "stars") {
+          row.provider = "telegram_stars";
+          row.currency = "XTR";
+        }
+        if (damage === "pdf") row.report_file_id = "not-a-photo";
+      });
+      await expect(restore(damaged, await database())).rejects.toThrow();
+    }
+  });
+});
+
 describe("Independent Finik website reports", () => {
   it("separates native Stars offers and refuses delivery before authenticated Finik capture", async () => {
     const payments = new PaymentStore(db);
@@ -689,16 +822,18 @@ describe("Explicit VIN report identity", () => {
       "web",
     );
     const current = join(directory, "korean-only.ndjson");
-    const historical = join(directory, "schema-9.ndjson");
     await backup(oldStore, current);
-    await rewriteSnapshot(current, historical, (record) => {
-      if (Object.hasOwn(record, "schema_version")) record.schema_version = 9;
-    });
-    const historicalUrl = await database();
-    await restore(historical, historicalUrl);
-    expect(await new PaymentStore(await open(historicalUrl)).getOrder(oldOrder.id)).toEqual(
-      oldOrder,
-    );
+    for (const version of [9, 10]) {
+      const historical = join(directory, `schema-${version}.ndjson`);
+      await rewriteSnapshot(current, historical, (record) => {
+        if (Object.hasOwn(record, "schema_version")) record.schema_version = version;
+      });
+      const historicalUrl = await database();
+      await restore(historical, historicalUrl);
+      expect(await new PaymentStore(await open(historicalUrl)).getOrder(oldOrder.id)).toEqual(
+        oldOrder,
+      );
+    }
   });
 });
 

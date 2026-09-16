@@ -143,6 +143,8 @@ export class PaymentStore {
     const reportKind = input.product === "vin_report" ? (input.reportKind ?? "korea") : null;
     if (reportKind === "carfax" && (provider !== "finik" || channel !== "telegram"))
       throw new Error("CARFAX reports require Finik and Telegram");
+    if (input.product === "vin_photos" && (provider !== "finik" || channel !== "telegram"))
+      throw new Error("VIN photos require Finik and Telegram");
     if (Date.parse(input.expiresAt) <= Date.now()) throw new Error("Payment offer has expired");
     return this.store.transaction(async () => {
       if (input.product === "vin_report") {
@@ -153,6 +155,10 @@ export class PaymentStore {
           channel,
           reportKind!,
         );
+        if (existing) return existing;
+      }
+      if (input.product === "vin_photos") {
+        const existing = await this.findOpenVinPhotos(input.userId, input.vin!);
         if (existing) return existing;
       }
       const [row] = await this.store.database
@@ -346,6 +352,9 @@ export class PaymentStore {
             charge_id: event.chargeId,
             paid_at: event.occurredAt,
             needs_review: order.needsReview || reason !== null,
+            ...(order.product === "vin_photos" && !order.needsReview && reason === null
+              ? { fulfillment_status: "fulfilled" as const, delivered_at: event.occurredAt }
+              : {}),
           })
           .where(eq(paymentOrders.id, order.id));
       if (order && refund) {
@@ -443,15 +452,15 @@ export class PaymentStore {
       if (!order || order.paymentStatus !== "paid")
         throw new Error("Refund requires captured payment");
       if (
-        order.product === "vin_report" &&
+        (order.product === "vin_report" || order.product === "vin_photos") &&
         (amount !== order.amount || order.fulfillmentStatus === "delivering")
       )
-        throw new Error("PDF reports require full refund without an active delivery");
+        throw new Error("VIN purchases require full refund without an active delivery");
       const refunds = await this.store.database
         .select()
         .from(paymentRefunds)
         .where(eq(paymentRefunds.order_id, orderId));
-      if (order.product === "vin_report") {
+      if (order.product === "vin_report" || order.product === "vin_photos") {
         const pending = refunds.find(
           (refund) => refund.status === "requested" || refund.status === "submitted",
         );
@@ -552,8 +561,13 @@ export class PaymentStore {
     validatePaymentText(reference, "Finik refund confirmation", 300);
     await this.store.transaction(async () => {
       const order = await this.getOrder(orderId);
-      if (!order || order.product !== "vin_report" || order.provider !== "finik" || !order.chargeId)
-        throw new Error("Refund confirmation requires a captured Finik report");
+      if (
+        !order ||
+        (order.product !== "vin_report" && order.product !== "vin_photos") ||
+        order.provider !== "finik" ||
+        !order.chargeId
+      )
+        throw new Error("Refund confirmation requires a captured Finik VIN purchase");
       const refunds = await this.listRefunds(orderId);
       const confirmed = refunds.find((refund) => refund.status === "confirmed");
       if (confirmed) {
@@ -673,6 +687,65 @@ export class PaymentStore {
     return row ? decodePaymentOrder(row) : null;
   }
 
+  async findOpenVinPhotos(userId: number, vin: string): Promise<PaymentOrder | null> {
+    if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(vin))
+      throw new Error("Invalid photo buyer or VIN");
+    const rows = await this.store.database
+      .select(orderColumns)
+      .from(paymentOrders)
+      .where(
+        and(
+          eq(paymentOrders.user_id, userId),
+          eq(paymentOrders.vin, vin),
+          eq(paymentOrders.product, "vin_photos"),
+          eq(paymentOrders.provider, "finik"),
+          eq(paymentOrders.channel, "telegram"),
+          ne(paymentOrders.payment_status, "refunded"),
+          ne(paymentOrders.invoice_status, "cancelled"),
+          ne(paymentOrders.fulfillment_status, "cancelled"),
+        ),
+      )
+      .orderBy(desc(paymentOrders.created_at), desc(paymentOrders.id));
+    const row = rows.find(
+      (item) =>
+        item.payment_status === "paid" ||
+        item.needs_review ||
+        Date.parse(item.expires_at) > Date.now(),
+    );
+    return row ? decodePaymentOrder(row) : null;
+  }
+
+  async hasPhotoAccess(userId: number, vin: string): Promise<boolean> {
+    if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(vin))
+      return false;
+    const [row] = await this.store.database
+      .select({ id: paymentOrders.id })
+      .from(paymentOrders)
+      .where(
+        and(
+          eq(paymentOrders.user_id, userId),
+          eq(paymentOrders.vin, vin),
+          eq(paymentOrders.product, "vin_photos"),
+          eq(paymentOrders.provider, "finik"),
+          eq(paymentOrders.channel, "telegram"),
+          eq(paymentOrders.currency, "KGS"),
+          eq(paymentOrders.amount, 19900),
+          isNull(paymentOrders.report_kind),
+          eq(paymentOrders.payment_status, "paid"),
+          eq(paymentOrders.invoice_status, "pending"),
+          eq(paymentOrders.fulfillment_status, "fulfilled"),
+          sql`NOT EXISTS (
+            SELECT 1 FROM payment_refunds r WHERE r.order_id = ${paymentOrders.id}
+              AND r.status IN ('requested','submitted')
+          )`,
+          sql`${paymentOrders.accepted_at} IS NOT NULL AND ${paymentOrders.charge_id} IS NOT NULL AND ${paymentOrders.paid_at} IS NOT NULL`,
+          eq(paymentOrders.needs_review, false),
+        ),
+      )
+      .limit(1);
+    return !!row;
+  }
+
   async reserveStarsCheckout(
     orderId: string,
     userId: number,
@@ -739,7 +812,7 @@ export class PaymentStore {
         .from(paymentOrders)
         .where(
           and(
-            eq(paymentOrders.product, "vin_report"),
+            inArray(paymentOrders.product, ["vin_report", "vin_photos"]),
             eq(paymentOrders.payment_status, "paid"),
             isNull(paymentOrders.admin_notified_at),
           ),
@@ -752,8 +825,12 @@ export class PaymentStore {
   async markReportNotified(orderId: string): Promise<void> {
     await this.store.transaction(async () => {
       const order = await this.getOrder(orderId);
-      if (!order || order.product !== "vin_report" || order.paymentStatus === "unpaid")
-        throw new Error("Notification requires a captured report");
+      if (
+        !order ||
+        (order.product !== "vin_report" && order.product !== "vin_photos") ||
+        order.paymentStatus === "unpaid"
+      )
+        throw new Error("Notification requires a captured VIN purchase");
       if (!order.adminNotifiedAt)
         await this.store.database
           .update(paymentOrders)

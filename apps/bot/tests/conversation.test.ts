@@ -1019,6 +1019,18 @@ describe("grammY transport boundaries", () => {
     });
     return { bot, calls };
   }
+  function photoPayments(
+    ownerId: number,
+    vin: string,
+  ): NonNullable<TelegramBotOptions["payments"]> {
+    return {
+      configureStars: () => {},
+      forgetVinResult: () => undefined,
+      photoSalesEnabled: true,
+      hasPhotoAccess: async (userId: number, requestedVin: string) =>
+        userId === ownerId && requestedVin === vin,
+    } as unknown as NonNullable<TelegramBotOptions["payments"]>;
+  }
   async function uploadedBytes(photo: unknown): Promise<unknown> {
     expect(photo).toBeInstanceOf(InputFile);
     return (photo as InputFile).toRaw();
@@ -1192,7 +1204,7 @@ describe("grammY transport boundaries", () => {
     expect(forget).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the report purchase offer usable when automatic photos fail and analytics is disabled", async () => {
+  it("keeps free facts and direct cross-bot purchase links without sending unpaid photographs", async () => {
     const vin = "KMHDU41DBAU123456";
     const { bot, calls } = telegram(
       async () => ({
@@ -1254,7 +1266,7 @@ describe("grammY transport boundaries", () => {
         text: `/vin ${vin}`,
       },
     });
-    expect(photoAttempts).toBe(1);
+    expect(photoAttempts).toBe(0);
     const freeText = calls
       .filter((call) => call.method === "sendMessage")
       .map((call) => String(call.payload.text))
@@ -1264,19 +1276,10 @@ describe("grammY transport boundaries", () => {
     expect(calls.some((call) => ["sendRichMessage", "sendDocument"].includes(call.method))).toBe(
       false,
     );
-    const markup = calls.at(-1)!.payload.reply_markup as {
-      inline_keyboard: { callback_data?: string; url?: string }[][];
-    };
-    expect(
-      markup.inline_keyboard
-        .flat()
-        .some((button) => button.url === `https://t.me/autokgbot?start=vin_${vin}`),
-    ).toBe(true);
-    expect(
-      markup.inline_keyboard
-        .flat()
-        .some((button) => button.callback_data?.startsWith("report-feedback:")),
-    ).toBe(false);
+    const markup = JSON.stringify(calls.map((call) => call.payload.reply_markup));
+    expect(markup).toContain(`https://t.me/autokgbot?startapp=buy_report_${vin}`);
+    expect(markup).toContain(`https://t.me/autokgbot?startapp=buy_photos_${vin}`);
+    expect(markup).not.toContain("report-feedback:");
   });
 
   it("offers positive feedback only for an owned paid order and rechecks payment before accepting it", async () => {
@@ -1355,8 +1358,8 @@ describe("grammY transport boundaries", () => {
     expect(events.filter((event) => event.event === "payment_succeeded")).toEqual([]);
   });
 
-  it.each(["command", "confirmed OCR"] as const)(
-    "automatically sends archive facts and validated bytes after one owned %s VIN check, keeping photos separated by lot",
+  it.each(["command", "confirmed OCR", "unpaid"] as const)(
+    "keeps archive photos private while showing free facts for %s VIN checks",
     async (entry) => {
       const vin = "KMHDU41DBAU123456";
       const firstPhotos = Array.from(
@@ -1390,6 +1393,11 @@ describe("grammY transport boundaries", () => {
                 ],
                 photos: [...firstPhotos, "https://attacker.invalid/photo.jpg"],
                 photos_complete: true,
+                details: {
+                  model: "Elantra",
+                  model_year: 2011,
+                  odometer: { value: 81234, unit: "mi" },
+                },
               },
               {
                 auction: "copart",
@@ -1432,6 +1440,14 @@ describe("grammY transport boundaries", () => {
               },
             ],
           },
+          {
+            provider: "carway",
+            status: "not_found",
+            source_url: "https://carway.info/",
+            checked_at: 1_789_000_000,
+            partial: false,
+            lots: [],
+          },
         ],
       };
       const events: AnalyticsEvent[] = [];
@@ -1463,6 +1479,8 @@ describe("grammY transport boundaries", () => {
         },
         {
           mode: "vin",
+          miniAppUrl: "https://mini.example/miniapp",
+          payments: photoPayments(entry === "unpaid" ? 2 : 1, vin),
           photoRecognizer: async () => [vin],
           analytics: {
             record: async (event) => {
@@ -1497,7 +1515,7 @@ describe("grammY transport boundaries", () => {
         });
       }
       expect(downloaded).toEqual([]);
-      if (entry === "command") {
+      if (entry !== "confirmed OCR") {
         await bot.handleUpdate({ update_id: 2, message: { ...message, text: `/vin ${vin}` } });
       } else {
         await bot.handleUpdate({
@@ -1527,6 +1545,33 @@ describe("grammY transport boundaries", () => {
         });
       }
       expect(lookup).toHaveBeenCalledExactlyOnceWith(vin);
+      if (entry === "unpaid") {
+        expect(downloaded).toEqual([]);
+        expect(
+          calls.filter((call) => ["sendPhoto", "sendMediaGroup"].includes(call.method)),
+        ).toEqual([]);
+        const buttons = calls.flatMap((call) => {
+          const markup = call.payload.reply_markup as
+            | { inline_keyboard?: { web_app?: { url: string } }[][] }
+            | undefined;
+          return markup?.inline_keyboard?.flat() ?? [];
+        });
+        expect(
+          buttons.some(
+            (button) =>
+              button.web_app?.url ===
+              `https://mini.example/miniapp?view=checkout&vin=${vin}&product=vin_photos`,
+          ),
+        ).toBe(true);
+        const text = calls.map((call) => String(call.payload.text ?? "")).join("\n");
+        expect(text).toContain("12345678");
+        expect(text).toContain("23456789");
+        expect(text).toContain("Elantra");
+        expect(text).toContain("2011");
+        expect(text.replaceAll(/\s/gu, "")).toContain("81234миль");
+        expect(text).not.toContain("Архив ОАЭ:");
+        return;
+      }
       const firstPhoto = calls.findIndex((call) =>
         ["sendPhoto", "sendMediaGroup"].includes(call.method),
       );
@@ -1625,6 +1670,7 @@ describe("grammY transport boundaries", () => {
           : failure === "invalid-bytes"
             ? async () => ({ bytes: new Uint8Array(), content_type: "image/jpeg" })
             : undefined,
+        { payments: photoPayments(1, vin) },
       );
       await bot.init();
       await bot.handleUpdate({
@@ -1701,6 +1747,7 @@ describe("grammY transport boundaries", () => {
             throw new Error("Photo unavailable");
           return { bytes: bytes[index]!, content_type: "image/jpeg" };
         },
+        { payments: photoPayments(1, vin) },
       );
       if (failure === "upload") {
         bot.api.config.use(async (previous, method, payload, signal) => {
@@ -1924,7 +1971,6 @@ describe("grammY transport boundaries", () => {
     const html = sent
       .map((call) => {
         expect(String(call.payload.text).length).toBeLessThanOrEqual(4096);
-        expect(call.payload.parse_mode).toBe("HTML");
         return String(call.payload.text);
       })
       .join("");
@@ -1962,56 +2008,60 @@ describe("grammY transport boundaries", () => {
       `https://ci.encar.com/carpicture/carpicture02/pic3972/${id}_${String(index).padStart(3, "0")}.jpg`;
     const firstPhotos = Array.from({ length: 33 }, (_, index) => photo("39720103", index + 1));
     const secondPhotos = [photo("39720104", 1), photo("39720104", 2)];
-    const { bot, calls } = telegram(async (vin) => {
-      const listing = {
-        id: "39720103",
-        vin,
-        source_url: "https://fem.encar.com/cars/detail/39720103",
-        model: "BMW",
-        mileage_km: null,
-        advertisement_status: "SOLD" as const,
-        created_at: null,
-        first_advertised_at: null,
-        modified_at: null,
-        re_registered: null,
-        photo_urls: firstPhotos,
-      };
-      return {
-        vin,
-        checked_at: 1_789_000_000,
-        carhistory: { status: "disabled", source_url: "", checked_at: null },
-        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
-        encar: {
-          status: "available",
-          source_url: "https://fem.encar.com/",
+    const { bot, calls } = telegram(
+      async (vin) => {
+        const listing = {
+          id: "39720103",
+          vin,
+          source_url: "https://fem.encar.com/cars/detail/39720103",
+          model: "BMW",
+          mileage_km: null,
+          advertisement_status: "SOLD" as const,
+          created_at: null,
+          first_advertised_at: null,
+          modified_at: null,
+          re_registered: null,
+          photo_urls: firstPhotos,
+        };
+        return {
+          vin,
           checked_at: 1_789_000_000,
-          data: {
-            vin,
-            discovery_url: `https://carcheck.by/auto/${vin}`,
-            partial: true,
-            listings: [
-              {
-                ...listing,
-                photo_urls: [
-                  ...firstPhotos,
-                  photo("39720103", 1),
-                  "https://attacker.invalid/photo.jpg",
-                  photo("39720104", 1),
-                ],
-              },
-              { ...listing, id: "39720104", photo_urls: secondPhotos },
-              {
-                ...listing,
-                id: "39720105",
-                vin: "WBA51AG03NCK98884",
-                photo_urls: [photo("39720105", 1)],
-              },
-              listing,
-            ],
+          carhistory: { status: "disabled", source_url: "", checked_at: null },
+          car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+          encar: {
+            status: "available",
+            source_url: "https://fem.encar.com/",
+            checked_at: 1_789_000_000,
+            data: {
+              vin,
+              discovery_url: `https://carcheck.by/auto/${vin}`,
+              partial: true,
+              listings: [
+                {
+                  ...listing,
+                  photo_urls: [
+                    ...firstPhotos,
+                    photo("39720103", 1),
+                    "https://attacker.invalid/photo.jpg",
+                    photo("39720104", 1),
+                  ],
+                },
+                { ...listing, id: "39720104", photo_urls: secondPhotos },
+                {
+                  ...listing,
+                  id: "39720105",
+                  vin: "WBA51AG03NCK98884",
+                  photo_urls: [photo("39720105", 1)],
+                },
+                listing,
+              ],
+            },
           },
-        },
-      };
-    });
+        };
+      },
+      undefined,
+      { payments: photoPayments(1, "KMHDU41DBAU123456") },
+    );
     await bot.init();
     await bot.handleUpdate({
       update_id: 1,

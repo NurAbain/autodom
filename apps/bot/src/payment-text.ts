@@ -3,6 +3,7 @@ import { isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
 export const VIN_REPORT_STARS = 500;
 export const VIN_REPORT_FINIK_MINOR = 49900;
 export const CARFAX_REPORT_FINIK_MINOR = 49900;
+export const VIN_PHOTOS_FINIK_MINOR = 19900;
 export const VIN_REPORT_OWNER = 706854211;
 export const VIN_REPORT_SLA_MS = 60 * 60 * 1000;
 export const VIN_REPORT_MAX_BYTES = 20 * 1024 * 1024;
@@ -60,6 +61,17 @@ export const CARFAX_REPORT_TELEGRAM_FINIK_TERMS = `CARFAX · PDF · ${CARFAX_REP
 
 Нажимая кнопку согласия перед оплатой, вы подтверждаете VIN, цену, срок и все эти условия.`;
 
+export const VIN_PHOTOS_TERMS = `Все найденные фотографии · ${VIN_PHOTOS_FINIK_MINOR / 100} сом (KGS)
+Разовая покупка по указанному VIN через Finik, не подписка. Покупка открывает все найденные фотографии из Кореи и архива в мини-приложении после серверного подтверждения оплаты. PDF и полный отчёт в эту покупку не входят.
+
+Количество и состав фотографий зависят от доступных записей. Фотографии не гарантируют состояние авто. Отсутствие записей не означает отсутствие ДТП, ремонта или других проблем.
+
+Если предоставить доступ невозможно — полный возврат через Finik. На время заявки на возврат доступ приостанавливается, после подтверждённого возврата прекращается. Заявка ещё не означает возврат денег.
+
+Продавец и исполнитель: владелец Autodom, Telegram ID ${VIN_REPORT_OWNER}. Поддержка и полный возврат: /paysupport текст.
+
+Нажимая кнопку покупки, вы подтверждаете VIN, цену и эти условия.`;
+
 export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency">): string {
   return order.currency === "XTR"
     ? `${order.amount} Stars (XTR)`
@@ -67,7 +79,7 @@ export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency
 }
 
 export const PAYMENT_PRIVACY_NOTICE =
-  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание (включая VIN для PDF) и сумму заказа на осмотр или PDF в боте либо на сайте, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для предоставления отчёта и поддержки. PDF, купленный в боте, доступен в Telegram; купленный на сайте — только на сайте. Переход в приложение банка, на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
+  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание (включая VIN для отчёта или фотографий) и сумму заказа, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для предоставления покупки и поддержки. PDF, купленный в боте, доступен в Telegram; купленный на сайте — только на сайте. Купленные фотографии доступны в мини-приложении. Переход в приложение банка, на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
 
 export function paymentOrderStatus(order: PaymentOrder): string {
   if (order.paymentStatus === "refunded")
@@ -77,6 +89,12 @@ export function paymentOrderStatus(order: PaymentOrder): string {
         ? "Полный возврат Stars подтверждён"
         : "Полный возврат Finik подтверждён владельцем";
   if (order.needsReview) return "Платёж требует проверки — не оплачивайте повторно";
+  if (order.product === "vin_photos" && order.refundPending)
+    return "Полный возврат запрошен · доступ к фотографиям приостановлен";
+  if (order.product === "vin_photos" && order.paymentStatus === "paid")
+    return order.fulfillmentStatus === "fulfilled"
+      ? "Оплата подтверждена · фотографии доступны в мини-приложении"
+      : "Доступ к фотографиям требует проверки · поддержка /paysupport";
   if (order.product === "vin_report" && order.refundPending)
     return order.provider === "telegram_stars"
       ? "Полный возврат запрошен · подтверждения Telegram пока нет · выдача PDF приостановлена"

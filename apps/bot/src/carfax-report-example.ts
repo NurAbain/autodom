@@ -1,9 +1,8 @@
 export const CARFAX_REPORT_EXAMPLE_PDF = {
   path: "https://dealsoncarfax.com/sample-report.pdf",
-  sourceUrl: "https://dealsoncarfax.com/sample-report",
   label: "Открыть образец CARFAX · PDF, 7 страниц",
   caption:
-    "ОБРАЗЕЦ CARFAX — НЕ ОТЧЁТ ПО ВАШЕМУ VIN.\n\nПубличный PDF на английском, 7 страниц: Toyota Prius 2015, документ от 7 мая 2026 года. Издатель образца — Deals on Carfax; ссылка открывает внешний сайт.\n\nОбразец показывает формат. Его VIN, пробег, записи и цены не относятся к вашему авто или заказу Autodom. Состав вашего отчёта зависит от данных CARFAX.\nИсточник: https://dealsoncarfax.com/sample-report",
+    "ОБРАЗЕЦ CARFAX — НЕ ОТЧЁТ ПО ВАШЕМУ VIN.\n\nПубличный PDF на английском, 7 страниц: Toyota Prius 2015, документ от 7 мая 2026 года. Ссылка открывает внешний PDF.\n\nОбразец показывает формат. Его VIN, пробег, записи и цены не относятся к вашему авто или заказу Autodom. Состав вашего отчёта зависит от данных CARFAX.",
 } as const;
 
 export const CARFAX_REPORT_PREVIEW = {

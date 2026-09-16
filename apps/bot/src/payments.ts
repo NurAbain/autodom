@@ -17,6 +17,8 @@ import {
   CARFAX_REPORT_TELEGRAM_FINIK_TERMS,
   paymentAmountText,
   paymentOrderStatus,
+  VIN_PHOTOS_FINIK_MINOR,
+  VIN_PHOTOS_TERMS,
   VIN_REPORT_FINIK_MINOR,
   VIN_REPORT_MAX_BYTES,
   VIN_REPORT_OWNER,
@@ -26,6 +28,7 @@ import {
   VIN_REPORT_TERMS,
   VIN_REPORT_WEB_TERMS,
 } from "./payment-text.js";
+import { confirmedVinPhotoCount } from "./vin-photo-access.js";
 import { confirmedVinReportKind } from "./vin-text.js";
 
 export function loadVinReportStarsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -167,7 +170,7 @@ export class PaymentService {
   private telegramToken?: string;
   private readonly koreanResults = new Map<
     string,
-    { revision: number; expiresAt: number; reportKind: VinReportKind | null }
+    { revision: number; expiresAt: number; reportKind: VinReportKind | null; photoCount: number }
   >();
   private vinRevision = 0;
 
@@ -190,6 +193,19 @@ export class PaymentService {
       : { amount: VIN_REPORT_STARS, currency: "XTR" };
   }
 
+  get photoSalesEnabled(): boolean {
+    return this.nativeFinikEnabled && !!this.gateway && !!this.telegramApi;
+  }
+
+  get photoPrice(): { amount: number; currency: "KGS" } {
+    return { amount: VIN_PHOTOS_FINIK_MINOR, currency: "KGS" };
+  }
+
+  async hasPhotoAccess(userId: number, value: string): Promise<boolean> {
+    const vin = normalizeVin(value);
+    return vin ? this.ledger.hasPhotoAccess(userId, vin) : false;
+  }
+
   get webReportSalesEnabled(): boolean {
     return this.finikEnabled && !!this.gateway && !!this.telegramApi;
   }
@@ -210,7 +226,12 @@ export class PaymentService {
       if (oldest !== undefined) this.koreanResults.delete(oldest);
     }
     const revision = ++this.vinRevision;
-    this.koreanResults.set(key, { revision, expiresAt: now + 15 * 60 * 1000, reportKind: null });
+    this.koreanResults.set(key, {
+      revision,
+      expiresAt: now + 15 * 60 * 1000,
+      reportKind: null,
+      photoCount: 0,
+    });
     return revision;
   }
 
@@ -225,6 +246,7 @@ export class PaymentService {
     const current = this.koreanResults.get(`${channel}:${userId}:${vin}`);
     if (!current || current.revision !== revision || current.expiresAt <= Date.now()) return;
     current.reportKind = confirmedVinReportKind(result);
+    current.photoCount = confirmedVinPhotoCount(result);
   }
 
   async reportOffer(
@@ -304,6 +326,48 @@ export class PaymentService {
           : this.ledger.createOffer(input);
       },
     );
+  }
+
+  async photoOffer(userId: number, value: string): Promise<PaymentOrder> {
+    const vin = normalizeVin(value);
+    if (!vin) throw new PaymentRequestError(400, "Нужен корректный VIN из 17 символов.");
+    if (!this.photoSalesEnabled)
+      throw new PaymentRequestError(503, "Покупка фотографий через Finik сейчас отключена.");
+    const key = `telegram:${userId}:${vin}`;
+    return this.store.withLock(`autodom:photos:offer:${userId}:${vin}`, async () => {
+      const existing = await this.ledger.findOpenVinPhotos(userId, vin);
+      if (existing) return existing;
+      const eligibility = this.koreanResults.get(key);
+      if (!eligibility || eligibility.photoCount <= 0 || eligibility.expiresAt <= Date.now())
+        throw new PaymentRequestError(
+          409,
+          "Сначала проверьте VIN. Для покупки нужны найденные фотографии.",
+        );
+      const me = await this.requireTelegramApi().getMe();
+      if (
+        this.koreanResults.get(key) !== eligibility ||
+        eligibility.photoCount <= 0 ||
+        eligibility.expiresAt <= Date.now()
+      )
+        throw new PaymentRequestError(
+          409,
+          "Проверка VIN обновилась. Повторите проверку перед покупкой.",
+        );
+      return this.ledger.createOffer({
+        userId,
+        vin,
+        product: "vin_photos",
+        reportKind: null,
+        amount: VIN_PHOTOS_FINIK_MINOR,
+        title: "Все найденные фотографии",
+        description: `Доступ ко всем найденным фотографиям по VIN ${vin}: Корея и архив.`,
+        seller: `Autodom · владелец ${VIN_REPORT_OWNER}`,
+        executor: `Владелец Autodom · ${VIN_REPORT_OWNER}`,
+        supportUrl: `https://t.me/${me.username}?start=paysupport`,
+        terms: VIN_PHOTOS_TERMS,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      });
+    });
   }
 
   private requireTelegramApi(): Api {
@@ -475,6 +539,21 @@ export class PaymentService {
       await this.store.withLock(`autodom:report:notify:${order.id}`, async () => {
         const current = await this.ledger.getOrder(order.id);
         if (!current || current.adminNotifiedAt || current.paymentStatus !== "paid") return;
+        if (current.product === "vin_photos") {
+          if (await this.hasPhotoAccess(current.userId, current.vin!)) {
+            await api.sendMessage(
+              current.userId,
+              `Оплата подтверждена. Все найденные фотографии по VIN ${current.vin} доступны в мини-приложении.\nОткрыть проверку: /vin ${current.vin}\nЗаказ ${current.id}\nПоддержка: /paysupport`,
+            );
+          } else {
+            await api.sendMessage(
+              VIN_REPORT_OWNER,
+              `Покупка фотографий требует проверки.\nЗаказ ${current.id}\nVIN ${current.vin}\n${paymentOrderStatus(current)}\n/refund ${current.id}`,
+            );
+          }
+          await this.ledger.markReportNotified(current.id);
+          return;
+        }
         const deadline = current.paidAt
           ? new Date(Date.parse(current.paidAt) + VIN_REPORT_SLA_MS).toISOString()
           : "требует проверки";
@@ -546,8 +625,8 @@ export class PaymentService {
     requirePaymentOrderId(orderId);
     return this.store.withLock(`autodom:report:operation:${orderId}`, async () => {
       const order = await this.ledger.getOrder(orderId);
-      if (!order || order.product !== "vin_report")
-        throw new PaymentRequestError(404, "PDF-заказ не найден.");
+      if (!order || (order.product !== "vin_report" && order.product !== "vin_photos"))
+        throw new PaymentRequestError(404, "VIN-заказ не найден.");
       if (order.paymentStatus === "refunded") return order;
       if (order.paymentStatus !== "paid" || !order.chargeId)
         throw new PaymentRequestError(409, "Нет однозначно подтверждённой оплаты для возврата.");
@@ -604,7 +683,7 @@ export class PaymentService {
     if (!body || body.length > 2500)
       throw new PaymentRequestError(400, "Напишите /paysupport и вопрос (до 2500 символов).");
     const orders = (await this.ledger.listOrders(userId)).filter(
-      (order) => order.product === "vin_report",
+      (order) => order.product === "vin_report" || order.product === "vin_photos",
     );
     await this.requireTelegramApi().sendMessage(
       VIN_REPORT_OWNER,
@@ -619,8 +698,12 @@ export class PaymentService {
     this.requireOwner(actorId);
     if (!Number.isSafeInteger(userId) || userId <= 0 || !text.trim() || text.length > 3000)
       throw new PaymentRequestError(400, "Используйте /payreply BUYER_ID текст.");
-    if (!(await this.ledger.listOrders(userId)).some((order) => order.product === "vin_report"))
-      throw new PaymentRequestError(404, "Покупатель PDF-заказа не найден.");
+    if (
+      !(await this.ledger.listOrders(userId)).some(
+        (order) => order.product === "vin_report" || order.product === "vin_photos",
+      )
+    )
+      throw new PaymentRequestError(404, "Покупатель не найден.");
     await this.requireTelegramApi().sendMessage(
       userId,
       `Поддержка Autodom:\n${text.trim()}\n\nОтветить: /paysupport текст`,
@@ -641,12 +724,13 @@ export class PaymentService {
   private async nativeFinikPaymentOrder(userId: number, orderId: string): Promise<PaymentOrder> {
     const order = await this.ownedOrder(userId, orderId);
     if (!this.nativeFinikEnabled || !this.reportSalesEnabled)
-      throw new PaymentRequestError(503, "Покупка PDF через Finik сейчас отключена.");
+      throw new PaymentRequestError(503, "Покупка через Finik сейчас отключена.");
     if (
-      order.product !== "vin_report" ||
+      (order.product !== "vin_report" && order.product !== "vin_photos") ||
       order.provider !== "finik" ||
       order.currency !== "KGS" ||
-      order.amount !== VIN_REPORT_FINIK_MINOR ||
+      order.amount !==
+        (order.product === "vin_photos" ? VIN_PHOTOS_FINIK_MINOR : VIN_REPORT_FINIK_MINOR) ||
       !order.vin ||
       !order.acceptedAt ||
       !order.invoiceUrl ||
@@ -659,7 +743,7 @@ export class PaymentService {
     )
       throw new PaymentRequestError(
         409,
-        "Способ оплаты доступен только для действующего принятого неоплаченного PDF-заказа без расхождений.",
+        "Способ оплаты доступен только для действующего принятого неоплаченного заказа без расхождений.",
       );
     const url = new URL(order.invoiceUrl);
     if (
@@ -878,8 +962,21 @@ export class PaymentService {
         if (order.amount !== expectedAmount || !order.vin)
           throw new PaymentRequestError(409, "Некорректное предложение PDF.");
       }
+      if (order.product === "vin_photos") {
+        if (!this.photoSalesEnabled)
+          throw new PaymentRequestError(503, "Покупка фотографий через Finik сейчас отключена.");
+        if (
+          order.channel !== "telegram" ||
+          order.reportKind !== null ||
+          order.amount !== VIN_PHOTOS_FINIK_MINOR ||
+          !order.vin
+        )
+          throw new PaymentRequestError(409, "Некорректное предложение фотографий.");
+      }
       if (
-        (order.product !== "inspection" && order.product !== "vin_report") ||
+        (order.product !== "inspection" &&
+          order.product !== "vin_report" &&
+          order.product !== "vin_photos") ||
         order.currency !== "KGS" ||
         order.provider !== "finik"
       )
@@ -899,7 +996,9 @@ export class PaymentService {
             ? isWebVinReport(order)
               ? "web-report-invoices"
               : "report-invoices"
-            : "invoices";
+            : order.product === "vin_photos"
+              ? "photo-invoices"
+              : "invoices";
         const response = await this.fetcher(`${this.gateway.url}/v1/autodom/${endpoint}`, {
           method: "POST",
           headers: {

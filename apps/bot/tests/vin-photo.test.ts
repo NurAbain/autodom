@@ -113,6 +113,7 @@ it("sends plain VIN facts and keeps the confirmed PDF offer in a separate messag
   const bot = createTelegramBot(store, "100:test-token", {
     mode: "vin",
     payments,
+    miniAppUrl: "https://mini.example/miniapp",
     conversation: { handle: async () => [] } as unknown as Conversation,
     checkVin: async () => ({
       vin: checkedVin,
@@ -152,19 +153,23 @@ it("sends plain VIN facts and keeps the confirmed PDF offer in a separate messag
   await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${checkedVin}` } });
   expect(sent.some(({ method }) => method === "sendRichMessage")).toBe(false);
   const messages = sent.filter(({ method }) => method === "sendMessage");
-  expect(messages).toHaveLength(2);
-  const facts = String(messages[0]!.payload.text);
+  expect(messages).toHaveLength(3);
+  const facts = String(messages[1]!.payload.text);
   expect(facts).toContain(checkedVin);
   expect(facts).toContain("G70");
   expect(facts.replaceAll(/\s/gu, "")).toContain("268170");
   expect(facts).toContain("2025-09-20");
   expect(facts).toContain("2019-09-30");
   expect(facts).not.toMatch(/PDF|CarHistory|Результат получен|Как понимать результат/);
-  expect(JSON.stringify(messages[0]!.payload.reply_markup)).not.toContain("vin-report");
-  const offer = messages[1]!.payload;
+  expect(JSON.stringify(messages[1]!.payload.reply_markup)).not.toContain("vin-report");
+  const offer = messages[2]!.payload;
   const keyboard = JSON.stringify(offer.reply_markup);
   expect(keyboard).toContain("vin-report-example");
-  expect(keyboard).toContain(`vin-report-buy:${checkedVin}`);
+  expect(keyboard).toContain(
+    `https://mini.example/miniapp?view=checkout&vin=${checkedVin}&product=vin_report`,
+  );
+  expect(keyboard).toContain('"web_app"');
+  expect(keyboard).not.toContain("vin-report-buy:");
   expect(keyboard).toContain("499 сом");
 });
 
@@ -187,6 +192,7 @@ it("offers CARFAX in Telegram only when CARFAX sales are enabled, using its exis
     const bot = createTelegramBot(store, "100:test-token", {
       mode: "vin",
       payments,
+      miniAppUrl: "https://mini.example/miniapp",
       conversation: { handle: async () => [] } as unknown as Conversation,
       analytics: {
         async record(event) {
@@ -235,9 +241,12 @@ it("offers CARFAX in Telegram only when CARFAX sales are enabled, using its exis
     await bot.init();
     await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${checkedVin}` } });
     expect(outcomes).toEqual(["available"]);
-    expect(String(messages[0]!.text)).toMatch(/VAGVIN.*47/s);
+    expect(JSON.stringify(messages)).not.toMatch(/VAGVIN|vagvin\.ru/u);
+    expect(JSON.stringify(messages)).toContain("BMW 530i");
     const offers = messages.filter((entry) =>
-      JSON.stringify(entry.reply_markup).includes(`vin-report-buy:${checkedVin}`),
+      JSON.stringify(entry.reply_markup ?? {}).includes(
+        `view=checkout&vin=${checkedVin}&product=vin_report`,
+      ),
     );
     expect(offers).toHaveLength(enabled ? 1 : 0);
     if (enabled) {
@@ -250,7 +259,7 @@ it("offers CARFAX in Telegram only when CARFAX sales are enabled, using its exis
     messages.length = 0;
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: `/vin ${checkedVin}` } });
     expect(outcomes).toEqual(["available", "unavailable"]);
-    expect(JSON.stringify(messages)).not.toContain(`vin-report-buy:${checkedVin}`);
+    expect(JSON.stringify(messages)).not.toContain("view=checkout");
   }
 });
 

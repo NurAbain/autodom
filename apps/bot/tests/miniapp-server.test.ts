@@ -13,7 +13,7 @@ import type {
 } from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
 import { Api } from "grammy";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import type { AnalyticsEvent } from "../src/analytics-contract.js";
 import { startMiniAppServer } from "../src/miniapp-server.js";
 import { PaymentService } from "../src/payments.js";
@@ -113,6 +113,13 @@ const getVinArchivePhoto = vi.fn<VinArchivePhotoLookup>(async () => ({
   bytes: photoBytes,
   content_type: "image/png",
 }));
+const photoPayments = new PaymentService({} as Store);
+const paidPhotoAccess = vi.fn<PaymentService["hasPhotoAccess"]>(
+  async (userId, vin) => userId === 44 && vin === photoRequest.vin,
+);
+beforeEach(() => {
+  vi.spyOn(photoPayments, "hasPhotoAccess").mockImplementation(paidPhotoAccess);
+});
 
 function authorization(userId = 42): string {
   const params = new URLSearchParams({
@@ -151,6 +158,7 @@ beforeAll(async () => {
     assetsDirectory: directory,
     checkVin,
     getVinArchivePhoto,
+    payments: photoPayments,
     analytics: {
       async record(event) {
         if (rejectAnalytics) throw new Error("analytics unavailable");
@@ -624,8 +632,8 @@ it("reports an unconfigured VIN service without fabricating observations", async
         body: JSON.stringify(photoRequest),
       },
     );
-    expect(photoResponse.status).toBe(503);
-    expect(await photoResponse.json()).toMatchObject({ code: "vin_archive_photo_unavailable" });
+    expect(photoResponse.status).toBe(403);
+    expect(getVinArchivePhoto).not.toHaveBeenCalled();
   } finally {
     await new Promise<void>((resolve, reject) => {
       disabled.close((error) => (error ? reject(error) : resolve()));
@@ -748,7 +756,7 @@ it("cancels VIN lookup when the authenticated client disconnects", async () => {
   await aborted.promise;
 });
 
-it("serves private archive photo bytes without a profile and never exposes a CDN redirect", async () => {
+it("serves paid private archive photo bytes without a profile or CDN redirect", async () => {
   const response = await fetch(`${base}/miniapp/api/vin/archive-photo`, {
     method: "POST",
     headers: { Authorization: authorization(44), "Content-Type": "application/json" },
@@ -761,6 +769,22 @@ it("serves private archive photo bytes without a profile and never exposes a CDN
   expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   expect(response.headers.get("location")).toBeNull();
   expect(Buffer.from(await response.arrayBuffer())).toEqual(photoBytes);
+});
+
+it("blocks unpaid and revoked photo access, including revocation during an upstream fetch", async () => {
+  getVinArchivePhoto.mockClear();
+  const post = (userId: number) =>
+    fetch(`${base}/miniapp/api/vin/archive-photo`, {
+      method: "POST",
+      headers: { Authorization: authorization(userId), "Content-Type": "application/json" },
+      body: JSON.stringify(photoRequest),
+    });
+  expect((await post(45)).status).toBe(403);
+  expect(getVinArchivePhoto).not.toHaveBeenCalled();
+  paidPhotoAccess.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+  const revoked = await post(44);
+  expect(revoked.status).toBe(403);
+  expect(revoked.headers.get("content-type")).not.toContain("image/");
 });
 
 it("rejects unauthorized, duplicate-key, foreign and extended photo requests before fetching", async () => {
@@ -1014,5 +1038,96 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
       paidServer.close((error) => (error ? reject(error) : resolve()));
       paidServer.closeAllConnections();
     });
+  }
+});
+
+it("keeps known vehicle facts public but withholds both Korean and archive image URLs until paid", async () => {
+  const vin = photoRequest.vin;
+  const koreanPhoto = "https://ci.encar.com/carpicture/carpicture02/pic2026/39720103_001.jpg";
+  const korean: VinCheckResult = {
+    ...vinResult,
+    vin,
+    encar: {
+      status: "available",
+      source_url: "https://fem.encar.com/",
+      checked_at: 1789000000,
+      data: {
+        vin,
+        discovery_url: `https://carcheck.co.kr/auto/${vin}`,
+        partial: false,
+        listings: [
+          {
+            id: "39720103",
+            vin,
+            source_url: "https://fem.encar.com/cars/detail/39720103",
+            model: "BMW 520i",
+            mileage_km: 21990,
+            advertisement_status: "ADVERTISE",
+            created_at: null,
+            first_advertised_at: null,
+            modified_at: null,
+            re_registered: null,
+            photo_urls: [koreanPhoto],
+          },
+        ],
+      },
+    },
+  };
+  const american: VinCheckResult = {
+    ...vinResult,
+    vin,
+    carhistory: { ...vinResult.carhistory, status: "not_found" },
+    car365: { ...vinResult.car365, status: "not_found" },
+    archives: {
+      ...archiveResult,
+      vin,
+      sources: [
+        {
+          provider: "bidcars",
+          status: "available",
+          source_url: "https://bid.cars/",
+          checked_at: 1789000000,
+          partial: false,
+          lots: [
+            {
+              auction: "iaai",
+              lot_id: photoRequest.lot_id,
+              source_url: `https://bid.cars/en/lot/0-${photoRequest.lot_id}/2022-Ford-F-150-${vin}`,
+              photos: [photoRequest.photo_url],
+              photos_complete: true,
+              events: [],
+              details: { model: "F-150", odometer: { value: 164957, unit: "mi" } },
+            },
+          ],
+        },
+      ],
+    },
+  };
+  for (const result of [korean, american]) {
+    const post = async (actor: number) => {
+      checkVin.mockResolvedValueOnce(result);
+      return fetch(`${base}/miniapp/api/vin`, {
+        method: "POST",
+        headers: { Authorization: authorization(actor), "Content-Type": "application/json" },
+        body: JSON.stringify({ vin }),
+      });
+    };
+    const locked = await (await post(45)).json();
+    expect(locked.photoAccess).toMatchObject({
+      available: true,
+      granted: false,
+      price: { amount: 19900, currency: "KGS" },
+    });
+    expect(JSON.stringify(locked)).not.toContain(koreanPhoto);
+    expect(JSON.stringify(locked)).not.toContain(photoRequest.photo_url);
+    if (result.encar) expect(locked.encar.data.listings[0].mileage_km).toBe(21990);
+    else
+      expect(locked.archives.sources[0].lots[0].details.odometer).toEqual({
+        value: 164957,
+        unit: "mi",
+      });
+    const paid = await (await post(44)).json();
+    expect(paid.photoAccess.granted).toBe(true);
+    expect(JSON.stringify(paid)).toContain(result.encar ? koreanPhoto : photoRequest.photo_url);
   }
 });

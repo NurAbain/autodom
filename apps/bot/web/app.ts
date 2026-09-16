@@ -2,7 +2,6 @@ import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
 import {
   isEncarPhotoUrl,
   normalizeVin,
-  VIN_SOURCE_URLS,
   type VinListingReport,
   vinGoogleSearchUrl,
 } from "@autodom/core/vin";
@@ -22,9 +21,9 @@ import {
   PURCHASE_REASONS,
 } from "../src/analytics-contract.js";
 import { type BotMode, loadReportBotUrl } from "../src/bot-mode.js";
-import { CARFAX_REPORT_EXAMPLE_PDF, CARFAX_REPORT_PREVIEW } from "../src/carfax-report-example.js";
+import { CARFAX_REPORT_EXAMPLE_PDF } from "../src/carfax-report-example.js";
 import type { Reply } from "../src/conversation.js";
-import { KOREAN_REPORT_EXAMPLE_PDF, KOREAN_REPORT_PREVIEW } from "../src/korean-report-example.js";
+import { KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
 import type { MiniAppCar, MiniAppFinikMethods, MiniAppVinResult } from "../src/miniapp-contract.js";
 import {
   PAYMENT_PRIVACY_NOTICE,
@@ -38,10 +37,8 @@ import {
   encarHistorySummary,
   encarListingFacts,
   hasKoreanVinRecord,
-  VIN_ARCHIVE_CARWAY_NOTICE,
   VIN_ARCHIVE_DISCLOSURE,
   VIN_ARCHIVE_LABEL,
-  VIN_ARCHIVE_STATUS_TEXT,
   VIN_CAUTION,
   VIN_DISCLOSURE,
   VIN_GOOGLE_SEARCH_LABEL,
@@ -75,6 +72,7 @@ const root = document.getElementById("app")!;
 type View =
   | "home"
   | "vin"
+  | "checkout"
   | "buy"
   | "sell"
   | "report-example"
@@ -87,6 +85,9 @@ let generation = 0;
 const pending = new Set<AbortController>();
 const reportUrls = new Set<string>();
 let config: { mode: BotMode; reportBotUrl?: string; analyticsEnabled: boolean } | undefined;
+type CheckoutProduct = "vin_report" | "vin_photos";
+let checkoutEligibility: MiniAppVinResult | undefined;
+let launchConsumed = false;
 
 function appPath(path: string): string {
   return `${new URL(".", window.location.href).pathname}${path.slice("/miniapp/".length)}`;
@@ -147,9 +148,14 @@ function navigate(view: View, targetId?: string): void {
   url.searchParams.delete("view");
   url.searchParams.delete("order_id");
   url.searchParams.delete("vin");
+  url.searchParams.delete("product");
+  url.searchParams.delete("startapp");
+  url.searchParams.delete("tgWebAppStartParam");
+  url.searchParams.delete("start_param");
   if (view === "car" && targetId) url.searchParams.set("car", targetId);
   else if (view !== "home") url.searchParams.set("view", view);
   if (view === "orders" && targetId) url.searchParams.set("order_id", targetId);
+  if (view === "vin" && targetId) url.searchParams.set("vin", targetId);
   window.history.pushState(null, "", url);
   void load();
 }
@@ -358,7 +364,9 @@ function sourceLink(url: string | null, text: string): HTMLAnchorElement {
 
 function reportBotLink(payload: string, label: string, className = "button"): HTMLAnchorElement {
   const url = new URL(config!.reportBotUrl!);
-  url.searchParams.set("start", payload);
+  url.searchParams.delete("start");
+  url.searchParams.delete("startapp");
+  url.searchParams.set(payload.startsWith("buy_") ? "startapp" : "start", payload);
   const link = element("a", className, label);
   link.href = url.href;
   link.target = "_blank";
@@ -554,67 +562,104 @@ function samplePdfLink(reportKind: VinReportKind = "korea", vin?: string): HTMLA
   return link;
 }
 
+function navigateCheckout(
+  vin: string,
+  product: CheckoutProduct,
+  orderId?: string,
+  reportKind?: VinReportKind | null,
+): void {
+  const url = new URL(window.location.href);
+  url.search = "";
+  url.searchParams.set("view", "checkout");
+  url.searchParams.set("vin", vin);
+  url.searchParams.set("product", product);
+  if (orderId) url.searchParams.set("order_id", orderId);
+  if (reportKind) url.searchParams.set("report_kind", reportKind);
+  window.history.pushState(null, "", url);
+  void load();
+}
+
+function purchaseAction(
+  result: MiniAppVinResult,
+  product: CheckoutProduct,
+  label: string,
+): HTMLElement {
+  if (config?.reportBotUrl) {
+    const link = reportBotLink(
+      `buy_${product === "vin_photos" ? "photos" : "report"}_${result.vin}${product === "vin_report" && result.reportKind ? `_${result.reportKind}` : ""}`,
+      label,
+    );
+    if (product === "vin_report")
+      link.addEventListener("click", () => {
+        void track({ event: "report_checkout_started", vin: result.vin });
+      });
+    return link;
+  }
+  const buy = button(label, () => {
+    if (buy.disabled) return;
+    buy.disabled = true;
+    checkoutEligibility = result;
+    navigateCheckout(
+      result.vin,
+      product,
+      undefined,
+      product === "vin_report" ? result.reportKind : null,
+    );
+  });
+  return buy;
+}
+
 function premiumPanel(result: MiniAppVinResult): HTMLElement | null {
   const reportKind = confirmedVinReportKind(result);
   if (!reportKind || reportKind !== result.reportKind) return null;
-  const started = generation;
-  const preview = reportKind === "carfax" ? CARFAX_REPORT_PREVIEW : KOREAN_REPORT_PREVIEW;
   const panel = element("section", "panel premium-panel");
-  const actions = element("div", "report-actions");
-  const notice = element("p", "footnote");
-  notice.setAttribute("role", "status");
   const sample = samplePdfLink(reportKind, result.vin);
   sample.textContent = "Посмотреть образец PDF";
   panel.append(
     element(
       "h2",
       "",
-      reportKind === "carfax" ? "CARFAX доступен по данным VAGVIN" : "Полный отчёт найден",
+      reportKind === "carfax" ? "Для вашего авто есть полный отчёт CARFAX" : "Полный отчёт найден",
     ),
-    element("p", "footnote", preview.limitations),
+    element("p", "footnote", "Образец показывает формат, а не историю вашего автомобиля."),
     sample,
   );
   const price = result.reportPrice ? paymentAmountText(result.reportPrice) : null;
-  if (config?.reportBotUrl && price) {
-    const link = reportBotLink(`vin_${result.vin}`, `Получить доступ · ${price}`);
-    link.addEventListener("click", () => {
-      void track({ event: "report_checkout_started", vin: result.vin });
-    });
-    actions.append(link);
-    notice.textContent =
-      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
-      "Если получить отчёт невозможно — полный возврат. Условия и оплата — в VIN-боте.";
-  } else if (result.reportSalesEnabled && price) {
-    const buy = button(`Получить доступ · ${price}`, () => {
-      if (buy.disabled) return;
-      void track({ event: "report_checkout_started", vin: result.vin });
-      buy.disabled = true;
-      buy.textContent = "Открываем заказ…";
-      notice.textContent = "Сначала состав и условия. Деньги пока не списываются.";
-      void request<{ order: PaymentOrder }>("/miniapp/api/orders/report", {
-        vin: result.vin,
-      })
-        .then(({ order }) => {
-          if (started === generation && panel.isConnected) navigate("orders", order.id);
-        })
-        .catch((error: unknown) => {
-          if (started === generation && panel.isConnected) notice.textContent = errorText(error);
-        })
-        .finally(() => {
-          if (started === generation && panel.isConnected) {
-            buy.disabled = false;
-            buy.textContent = `Получить доступ · ${price}`;
-          }
-        });
-    });
-    actions.append(buy);
-    notice.textContent =
-      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
-      "Если получить отчёт невозможно — полный возврат. Условия — до оплаты.";
-  } else {
-    notice.textContent = "Покупка доступа пока недоступна.";
-  }
-  panel.append(actions, notice, reportFeedback({ vin: result.vin }));
+  if (price && (config?.reportBotUrl || result.reportSalesEnabled))
+    panel.append(purchaseAction(result, "vin_report", `Получить отчёт · ${price}`));
+  else panel.append(element("p", "footnote", "Покупка доступа пока недоступна."));
+  panel.append(
+    element(
+      "p",
+      "footnote",
+      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если получить отчёт невозможно — полный возврат.`,
+    ),
+    reportFeedback({ vin: result.vin }),
+  );
+  return panel;
+}
+
+function photoAccessPanel(result: MiniAppVinResult): HTMLElement | null {
+  const access = result.photoAccess;
+  if (!access?.available || access.granted) return null;
+  const panel = element("section", "panel photo-access");
+  panel.append(
+    element("h2", "", "Найдены фотографии автомобиля"),
+    element(
+      "p",
+      "footnote",
+      "Одна покупка открывает все найденные фотографии этого VIN: Корея и архивы аукционов. Отчёт приобретается отдельно.",
+    ),
+  );
+  if (access.salesEnabled || config?.reportBotUrl)
+    panel.append(
+      purchaseAction(
+        result,
+        "vin_photos",
+        `Получить фотографии · ${paymentAmountText(access.price)}`,
+      ),
+    );
+  else panel.append(element("p", "footnote", "Покупка фотографий пока недоступна."));
   return panel;
 }
 
@@ -654,7 +699,6 @@ function showCarfaxExample(): void {
       "footnote",
       "Внешний публичный образец, не отчёт по вашему VIN. PDF откроется на сайте источника только после нажатия.",
     ),
-    sourceLink(CARFAX_REPORT_EXAMPLE_PDF.sourceUrl, "Страница источника образца"),
     button("Перейти к проверке своего VIN", () => navigate("vin")),
   );
 }
@@ -1036,6 +1080,9 @@ function gallery(
   const photoNotice = archive ? element("p", "notice") : undefined;
   if (photoNotice) photoNotice.hidden = true;
   const frame = element("div", "photo-frame");
+  const progress = element("p", "footnote");
+  progress.setAttribute("role", "status");
+  section.append(progress);
   const counter = element("span", "photo-counter");
   counter.setAttribute("aria-live", "polite");
   const previous = button(
@@ -1061,18 +1108,30 @@ function gallery(
   function renderPhoto(): void {
     releasePhoto();
     if (signal?.aborted) return;
+    progress.textContent = "Загружаем фотографию…";
+    frame.setAttribute("aria-busy", "true");
     const index = selected;
     const imageUrl = photos[index];
     if (imageUrl === undefined) throw new RangeError("Photo index is out of bounds");
     if (failed?.has(index)) {
       frame.replaceChildren(element("p", "photo-empty", "Это фото источника недоступно."));
+      progress.textContent = "Фотография недоступна.";
+      frame.setAttribute("aria-busy", "false");
     } else {
       const image = element("img");
       image.alt = `${title} — фото ${selected + 1}`;
       image.referrerPolicy = "no-referrer";
       image.decoding = "async";
       image.loading = "lazy";
-      if (!archive) image.src = imageUrl;
+      image.addEventListener(
+        "load",
+        () => {
+          if (!frame.contains(image) || signal?.aborted) return;
+          progress.textContent = "";
+          frame.setAttribute("aria-busy", "false");
+        },
+        { once: true },
+      );
       image.addEventListener(
         "error",
         () => {
@@ -1083,6 +1142,8 @@ function gallery(
               "Часть фотографий сейчас недоступна. Лот и события сохранены. Повторите проверку VIN.";
           }
           if (frame.contains(image)) {
+            progress.textContent = "Фотография недоступна.";
+            frame.setAttribute("aria-busy", "false");
             frame.replaceChildren(
               element("p", "photo-empty", "Источник не смог загрузить это фото."),
             );
@@ -1093,6 +1154,7 @@ function gallery(
         { once: true },
       );
       frame.replaceChildren(image);
+      if (!archive) image.src = imageUrl;
       if (archive && visible) {
         const controller = new AbortController();
         photoController = controller;
@@ -1170,16 +1232,16 @@ function gallery(
 
 function appendVinListingReports(host: HTMLElement, reports?: readonly VinListingReport[]): void {
   if (!reports?.length) return;
+  if (reports.some((report) => report.status === "unavailable" || report.partial))
+    host.append(element("p", "notice", "Часть документов не удалось получить полностью."));
+  const availableReports = reports.filter((report) => report.status === "available");
+  if (!availableReports.length) return;
   const documents = element("details", "disclosure");
   documents.append(
-    element(
-      "summary",
-      "",
-      `Осмотры и документы${reports.some((report) => report.partial) ? " · неполные данные" : ""}`,
-    ),
+    element("summary", "", "Осмотры и документы"),
     element("p", "footnote", VIN_LISTING_REPORT_NOTICE),
   );
-  for (const report of reports) {
+  for (const report of availableReports) {
     const document = element("section", "vin-source");
     document.dataset.status = report.status;
     document.append(element("p", "vin-observation", vinListingReportText(report)));
@@ -1282,6 +1344,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     vin: string,
     controller: AbortController,
     revision: number,
+    photoAccessGranted: boolean,
   ): HTMLElement {
     const archiveResults = element("section", "vin-results");
     archiveResults.append(
@@ -1295,27 +1358,10 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         element("p", "vin", `VIN ${result.vin}`),
         element("p", "footnote", `Ответ получен: ${vinArchiveTime(result.checked_at)}`),
       ];
-      for (const source of result.sources) {
-        const section = element("section", "vin-source");
-        section.dataset.status = source.status;
-        section.append(
-          element(
-            "h3",
-            "",
-            source.provider === "carway" ? "Архивные записи · ОАЭ" : "Архивные записи · США",
-          ),
-          element("p", "badge", VIN_ARCHIVE_STATUS_TEXT[source.status]),
-          element("p", "footnote", `Данные получены: ${vinArchiveTime(source.checked_at)}`),
-        );
-        if (source.provider === "carway")
-          section.append(element("p", "notice", VIN_ARCHIVE_CARWAY_NOTICE));
-        if (source.partial)
-          section.append(
-            element("p", "notice", "Поиск или получение фотографий выполнены не полностью."),
-          );
-        sections.push(section);
-      }
-      for (const group of groupVinArchiveLots(result)) {
+      for (const group of groupVinArchiveLots({
+        ...result,
+        sources: result.sources.filter((source) => source.status !== "disabled"),
+      })) {
         const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
         const lotSection = element("section", "vin-source");
         lotSection.append(element("h3", "", title));
@@ -1330,7 +1376,11 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               ),
             );
           lotSection.append(
-            element("p", "vin-observation", vinArchiveLotText(lot, provider, false)),
+            element(
+              "p",
+              "vin-observation",
+              vinArchiveLotText(lot, provider, false, photoAccessGranted),
+            ),
           );
           appendVinListingReports(lotSection, lot.reports);
           if (
@@ -1340,7 +1390,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
           )
             lotSection.append(element("p", "notice", "Часть ссылок на фотографии недоступна."));
         }
-        const galleries = group.sources
+        const galleries = (photoAccessGranted ? group.sources : [])
           .map(({ provider, lot }) => ({
             provider,
             photoUrls: [
@@ -1363,7 +1413,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
                     candidate.photoUrls.every((photo) => previous.photoUrls.includes(photo)),
                 ),
           );
-        if (galleries.length) {
+        if (photoAccessGranted && galleries.length) {
           const galleryHost = element("div");
           const controls = element("div", "button-row");
           controls.setAttribute("aria-label", "Источник фотографий");
@@ -1431,7 +1481,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       archiveResults.append(...sections);
     } catch (error) {
       archiveResults.append(
-        element("p", "notice", `${errorText(error)} ${VIN_ARCHIVE_STATUS_TEXT.unavailable}`),
+        element("p", "notice", `${errorText(error)} Часть архивных данных недоступна.`),
       );
     }
     archiveResults.append(element("p", "footnote", VIN_ARCHIVE_COVERAGE_NOTICE));
@@ -1504,7 +1554,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
                 ? "Объявления найдены · частичный результат"
                 : "Подтверждённые объявления найдены"
               : provider === "vagvin_carfax"
-                ? "Доступность по данным посредника"
+                ? "Полный отчёт доступен"
                 : "Запись найдена",
           ),
         );
@@ -1559,17 +1609,20 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               element("p", "footnote", `Подтверждённый VIN: ${listing.vin}`),
             );
             const facts = element("dl", "facts");
-            for (const [label, value] of encarListingFacts(listing)) {
+            for (const [label, value] of encarListingFacts(
+              listing,
+              result.photoAccess?.granted === true,
+            )) {
               const fact = element("div", "fact");
               fact.append(element("dt", "", label), element("dd", "", value));
               facts.append(fact);
             }
             advertisement.append(facts);
             appendVinListingReports(advertisement, listing.reports);
-            const photoUrls = [
-              ...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id))),
-            ];
-            if (photoUrls.length) {
+            const photoUrls = result.photoAccess?.granted
+              ? [...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)))]
+              : [];
+            if (result.photoAccess?.granted && photoUrls.length) {
               advertisement.append(
                 element("p", "footnote", `Найдены фотографии: ${photoUrls.length}.`),
                 gallery(
@@ -1578,10 +1631,6 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
                   undefined,
                   controller.signal,
                 ),
-              );
-            } else {
-              advertisement.append(
-                element("p", "footnote", "Фотографии не предоставлены источником."),
               );
             }
             section.append(advertisement);
@@ -1598,14 +1647,25 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         } else {
           section.append(element("p", "vin-observation", vinSourceText(provider, result)));
         }
-        if (provider === "vagvin_carfax")
-          section.append(sourceLink(VIN_SOURCE_URLS.vagvin_carfax, "Источник: VAGVIN"));
         results.append(section);
       }
       if (result.carhistory.status === "available")
         results.append(element("p", "vin-observation", vinSourceText("carhistory", result)));
-      if (result.archives)
-        results.append(renderArchive(result.archives, vin, controller, revision));
+      if (
+        result.archives?.vin === vin &&
+        result.archives.sources.some((source) => source.status !== "disabled" && source.lots.length)
+      )
+        results.append(
+          renderArchive(
+            result.archives,
+            vin,
+            controller,
+            revision,
+            result.photoAccess?.granted === true,
+          ),
+        );
+      const photos = photoAccessPanel(result);
+      if (photos) results.append(photos);
       const report = premiumPanel(result);
       if (report) results.append(report);
       if (!korean) {
@@ -1646,6 +1706,10 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     disclosure,
     followUp,
   );
+  if (!car && normalizeVin(new URLSearchParams(window.location.search).get("vin") ?? ""))
+    queueMicrotask(() => {
+      if (started === generation && panel.isConnected) void lookup();
+    });
   return panel;
 }
 
@@ -1708,6 +1772,7 @@ function finikMethods(order: PaymentOrder): HTMLElement {
     () => {
       if (card.disabled) return;
       card.disabled = true;
+      card.setAttribute("aria-busy", "true");
       notice.textContent = "Открываем защищённую форму оплаты картой…";
       void request<{ cardUrl: string }>("/miniapp/api/orders/card-payment", { orderId: order.id })
         .then(({ cardUrl }) => {
@@ -1723,7 +1788,10 @@ function finikMethods(order: PaymentOrder): HTMLElement {
           if (current()) notice.textContent = errorText(error);
         })
         .finally(() => {
-          if (current()) card.disabled = false;
+          if (current()) {
+            card.disabled = false;
+            card.setAttribute("aria-busy", "false");
+          }
         });
     },
     "button button-quiet payment-card",
@@ -1732,6 +1800,7 @@ function finikMethods(order: PaymentOrder): HTMLElement {
   async function loadBanks(): Promise<void> {
     if (refresh.disabled) return;
     refresh.disabled = true;
+    list.setAttribute("aria-busy", "true");
     notice.textContent = "Загружаем банки для этого счёта…";
     list.replaceChildren();
     try {
@@ -1771,7 +1840,10 @@ function finikMethods(order: PaymentOrder): HTMLElement {
       if (current())
         notice.textContent = `${errorText(error)} Можно открыть официальную страницу Finik ниже.`;
     } finally {
-      if (current()) refresh.disabled = false;
+      if (current()) {
+        refresh.disabled = false;
+        list.setAttribute("aria-busy", "false");
+      }
     }
   }
   const fallback = sourceLink(safeUrl(order.invoiceUrl), "Другой банк / открыть Finik");
@@ -1804,6 +1876,155 @@ function finikMethods(order: PaymentOrder): HTMLElement {
   return panel;
 }
 
+async function showCheckout(params: URLSearchParams): Promise<void> {
+  const started = generation;
+  const vin = normalizeVin(params.get("vin") ?? "");
+  const product = params.get("product");
+  showState("Подготовка оплаты", "Проверяем доступ и подготавливаем способы оплаты…");
+  root.querySelector("main")?.setAttribute("aria-busy", "true");
+  try {
+    if (!vin || (product !== "vin_report" && product !== "vin_photos"))
+      throw new Error("Ссылка на покупку неполная. Вернитесь к проверке VIN.");
+    if (config?.reportBotUrl) {
+      const main = shell();
+      main.append(
+        element("h1", "", "Оплата в VIN-боте"),
+        reportBotLink(
+          `buy_${product === "vin_photos" ? "photos" : "report"}_${vin}${params.get("report_kind") === "carfax" || params.get("report_kind") === "korea" ? `_${params.get("report_kind")}` : ""}`,
+          "Выбрать банк или карту",
+        ),
+      );
+      return;
+    }
+    const savedId = params.get("order_id");
+    const eligibility = checkoutEligibility?.vin === vin ? checkoutEligibility : undefined;
+    checkoutEligibility = undefined;
+    const requestedKind = params.get("report_kind");
+    if (requestedKind !== null && requestedKind !== "korea" && requestedKind !== "carfax")
+      throw new Error("Неизвестный вид отчёта. Вернитесь к проверке VIN.");
+    let reportKind = requestedKind ?? eligibility?.reportKind;
+    let result = eligibility;
+    const { orders } = await request<{ orders: PaymentOrder[] }>("/miniapp/api/orders");
+    if (started !== generation) return;
+    // Known invoices need no live source; ambiguous report links must first resolve the report kind.
+    if (!savedId && product === "vin_report" && !reportKind) {
+      result ??= await request<MiniAppVinResult>("/miniapp/api/vin", { vin });
+      if (started !== generation) return;
+      if (result.vin !== vin) throw new Error("Получены данные для другого VIN.");
+      reportKind = result.reportKind;
+    }
+    const canPay = (value: PaymentOrder) =>
+      value.paymentStatus === "unpaid" &&
+      !value.needsReview &&
+      !value.refundPending &&
+      !value.preCheckoutId &&
+      value.invoiceStatus !== "cancelled" &&
+      Date.parse(value.expiresAt) > Date.now();
+    const candidates = orders.filter(
+      (order) =>
+        order.vin === vin &&
+        order.product === product &&
+        (savedId ||
+          (order.provider === "finik" &&
+            (product === "vin_photos" || order.reportKind === reportKind))),
+    );
+    let order = savedId
+      ? candidates.find((candidate) => candidate.id === savedId)
+      : (candidates.find((candidate) => candidate.paymentStatus === "paid") ??
+        candidates.find(
+          (candidate) => canPay(candidate) && candidate.acceptedAt && candidate.invoiceUrl,
+        ));
+    if (savedId && !order) throw new Error("Заказ не найден. Откройте раздел «Заказы».");
+    if (!order) {
+      result ??= await request<MiniAppVinResult>("/miniapp/api/vin", { vin });
+      if (started !== generation) return;
+      if (result.vin !== vin) throw new Error("Получены данные для другого VIN.");
+      if (product === "vin_report" && reportKind && result.reportKind !== reportKind)
+        throw new Error(
+          "Этот отчёт сейчас недоступен. Вернитесь к проверке VIN и обновите результат.",
+        );
+      const eligible =
+        product === "vin_photos"
+          ? result?.photoAccess?.available && result.photoAccess.salesEnabled
+          : result?.reportSalesEnabled &&
+            result.reportKind &&
+            confirmedVinReportKind(result) === result.reportKind;
+      if (!eligible)
+        throw new Error(
+          "Покупка сейчас недоступна. Вернитесь к проверке VIN и обновите результат.",
+        );
+      ({ order } = await request<{ order: PaymentOrder }>(
+        product === "vin_photos" ? "/miniapp/api/orders/photos" : "/miniapp/api/orders/report",
+        { vin },
+      ));
+    }
+    if (started !== generation) return;
+    if (product === "vin_report" && canPay(order))
+      await track({ event: "report_checkout_started", orderId: order.id });
+    if (started !== generation) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("order_id", order.id);
+    window.history.replaceState(null, "", url);
+    if (canPay(order) && !(order.acceptedAt && order.invoiceUrl)) {
+      ({ order } = await request<{ order: PaymentOrder }>("/miniapp/api/orders/checkout", {
+        orderId: order.id,
+        acceptTerms: true,
+      }));
+    }
+    if (started !== generation) return;
+    const main = shell();
+    const panel = element("section", "panel checkout-panel");
+    panel.id = `order-${order.id}`;
+    const status = element("p", "badge", paymentOrderStatus(order));
+    status.setAttribute("role", "status");
+    const terms = element("details", "disclosure");
+    terms.append(
+      element("summary", "", "Условия покупки и возврата"),
+      element("p", "reply-text", order.terms),
+      element("p", "footnote", PAYMENT_PRIVACY_NOTICE),
+    );
+    panel.append(
+      element("h1", "", product === "vin_photos" ? "Фотографии автомобиля" : "Полный отчёт по VIN"),
+      element("p", "vin", `VIN ${vin}`),
+      element("p", "price", paymentAmountText(order)),
+      status,
+      terms,
+    );
+    if (order.paymentStatus === "paid") {
+      panel.append(element("p", "notice", "Оплата подтверждена. Повторно оплачивать не нужно."));
+      if (
+        product === "vin_photos" &&
+        order.acceptedAt &&
+        !order.refundPending &&
+        !order.needsReview &&
+        order.invoiceStatus !== "cancelled" &&
+        order.fulfillmentStatus !== "cancelled"
+      )
+        panel.append(button("Открыть фотографии", () => navigate("vin", vin)));
+    } else if (canPay(order) && order.acceptedAt && order.invoiceUrl) {
+      if (order.provider === "finik") panel.append(finikMethods(order));
+      else panel.append(sourceLink(safeUrl(order.invoiceUrl), "Открыть существующий счёт"));
+    } else {
+      panel.append(
+        element(
+          "p",
+          "notice",
+          "Этот заказ сейчас нельзя оплатить. Проверьте его статус или обратитесь в поддержку.",
+        ),
+      );
+    }
+    const orderId = order.id;
+    panel.append(button("Открыть заказ", () => navigate("orders", orderId), "back-link"));
+    main.append(panel);
+  } catch (error) {
+    if (started === generation) {
+      showState("Не удалось подготовить оплату", errorText(error), true);
+      if (vin)
+        root.querySelector("main")?.append(button("Вернуться к VIN", () => navigate("vin", vin)));
+    }
+  }
+}
+
 async function showOrders(): Promise<void> {
   const started = generation;
   showState("Мои заказы", "Загружаем подтверждённые сервером статусы…");
@@ -1815,14 +2036,16 @@ async function showOrders(): Promise<void> {
       element(
         "p",
         "eyebrow",
-        config?.mode === "vin" ? "Полные отчёты по VIN" : "Отчёты и отдельно согласованные услуги",
+        config?.mode === "vin"
+          ? "Фотографии и отчёты по VIN"
+          : "Отчёты и отдельно согласованные услуги",
       ),
       element("h1", "", "Мои заказы"),
       element(
         "p",
         "muted",
         config?.mode === "vin"
-          ? "Статусы оплаты и ваши PDF. Проверка VIN бесплатна."
+          ? "Статусы оплаты, ваши фотографии и PDF. Проверка VIN бесплатна."
           : "Бесплатный поиск, уведомления и проверка VIN не требуют покупки.",
       ),
       button("Обновить статус", () => void load(), "button button-quiet"),
@@ -1932,6 +2155,18 @@ async function showOrders(): Promise<void> {
         report.append(open, notice);
         panel.append(report);
       }
+      if (
+        order.product === "vin_photos" &&
+        order.vin &&
+        order.paymentStatus === "paid" &&
+        order.acceptedAt &&
+        !order.needsReview &&
+        !order.refundPending &&
+        order.invoiceStatus !== "cancelled" &&
+        order.fulfillmentStatus !== "cancelled"
+      ) {
+        panel.append(button("Открыть фотографии", () => navigate("vin", order.vin!)));
+      }
       const active =
         order.paymentStatus === "unpaid" &&
         !order.needsReview &&
@@ -1941,12 +2176,18 @@ async function showOrders(): Promise<void> {
         Date.parse(order.expiresAt) > Date.now();
       if (
         active &&
-        order.product === "vin_report" &&
+        (order.product === "vin_report" || order.product === "vin_photos") &&
         order.provider === "finik" &&
         order.acceptedAt &&
         order.invoiceUrl
       ) {
         panel.append(finikMethods(order));
+      } else if (active && order.product === "vin_photos" && order.vin) {
+        panel.append(
+          button(`Выбрать банк · ${price}`, () =>
+            navigateCheckout(order.vin!, "vin_photos", order.id),
+          ),
+        );
       } else if (active) {
         const form = element("form", "vin-form");
         const consent = element("label", "payment-consent");
@@ -2059,6 +2300,8 @@ async function load(): Promise<void> {
   cancelRequests();
   const started = generation;
   if (!config) {
+    showState("Открываем приложение", "Загружаем настройки…");
+    root.querySelector("main")?.setAttribute("aria-busy", "true");
     try {
       await loadConfig();
       void track({ event: "miniapp_opened" });
@@ -2069,11 +2312,37 @@ async function load(): Promise<void> {
     }
     if (started !== generation) return;
   }
-  const params = new URLSearchParams(window.location.search);
+  const launchUrl = new URL(window.location.href);
+  if (!launchConsumed) {
+    launchConsumed = true;
+    const start =
+      launchUrl.searchParams.get("tgWebAppStartParam") ??
+      launchUrl.searchParams.get("startapp") ??
+      launchUrl.searchParams.get("start_param") ??
+      new URLSearchParams(telegram?.initData ?? "").get("start_param");
+    const purchase = /^(buy_report|buy_photos)_([A-HJ-NPR-Z0-9]{17})(?:_(korea|carfax))?$/.exec(
+      start ?? "",
+    );
+    if (purchase && !launchUrl.searchParams.has("view")) {
+      launchUrl.searchParams.set("view", "checkout");
+      launchUrl.searchParams.set("vin", purchase[2]!);
+      launchUrl.searchParams.set(
+        "product",
+        purchase[1] === "buy_photos" ? "vin_photos" : "vin_report",
+      );
+      if (purchase[1] === "buy_report" && purchase[3])
+        launchUrl.searchParams.set("report_kind", purchase[3]);
+      launchUrl.searchParams.delete("car");
+      launchUrl.searchParams.delete("order_id");
+      window.history.replaceState(null, "", launchUrl);
+    }
+  }
+  const params = launchUrl.searchParams;
   const view = params.get("view");
   const id = params.get("car");
   currentView =
     view === "vin" ||
+    view === "checkout" ||
     view === "carfax-example" ||
     view === "buy" ||
     view === "sell" ||
@@ -2087,6 +2356,7 @@ async function load(): Promise<void> {
   if (
     config?.mode === "vin" &&
     currentView !== "orders" &&
+    currentView !== "checkout" &&
     currentView !== "support" &&
     currentView !== "report-example" &&
     currentView !== "carfax-example"
@@ -2101,6 +2371,10 @@ async function load(): Promise<void> {
   window.scrollTo(0, 0);
   if (currentView === "home") {
     showHome();
+    return;
+  }
+  if (currentView === "checkout") {
+    await showCheckout(params);
     return;
   }
   if (currentView === "support") {

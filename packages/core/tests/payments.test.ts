@@ -57,6 +57,20 @@ describe("Stars rail validation", () => {
     expect(() => validatePaymentOffer({ ...report, amount: 0.5 })).toThrow();
     expect(() => validatePaymentOffer({ ...report, reportKind: "other" as never })).toThrow();
     expect(() =>
+      validatePaymentOffer({ ...report, product: "vin_photos", amount: 49900 }),
+    ).toThrow();
+    expect(() =>
+      validatePaymentOffer({
+        ...report,
+        product: "vin_photos",
+        amount: 19900,
+        reportKind: "korea",
+      }),
+    ).toThrow();
+    expect(() =>
+      validatePaymentOffer({ ...report, product: "vin_photos", amount: 19900, vin: null }),
+    ).toThrow();
+    expect(() =>
       validatePaymentOffer({ ...report, product: "inspection", vin: null, reportKind: "carfax" }),
     ).toThrow();
     expect(() => validatePaymentOffer({ ...report, product: "inspection" })).toThrow();

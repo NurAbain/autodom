@@ -5,6 +5,12 @@ export type MiniAppVinResult = VinCheckResult & {
   reportSalesEnabled: boolean;
   reportPrice: Pick<PaymentOrder, "amount" | "currency"> | null;
   reportKind: VinReportKind | null;
+  photoAccess: {
+    available: boolean;
+    granted: boolean;
+    salesEnabled: boolean;
+    price: { amount: number; currency: "KGS" };
+  };
 };
 
 export interface MiniAppFinikMethods {

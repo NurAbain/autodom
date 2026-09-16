@@ -32,7 +32,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -313,7 +313,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, SCHEMA_VERSION].includes(header.schema_version as number) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
           (header.schema_version as number) >= 8
@@ -454,6 +454,12 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
             throw new Error("Unexpected report kind in historical snapshot");
           row = { ...row, report_kind: row.product === "vin_report" ? "korea" : null };
         }
+        if (
+          (header.schema_version as number) < 11 &&
+          table === "payment_orders" &&
+          row.product === "vin_photos"
+        )
+          throw new Error("Unexpected photo product in historical snapshot");
         await insertSnapshotRow(target, table, row);
         counts[table]++;
       }
@@ -483,7 +489,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         ) OR EXISTS (
           SELECT 1 FROM payment_refunds r WHERE r.order_id = o.id AND (
             r.provider <> o.provider OR (r.status = 'confirmed' AND o.payment_status <> 'refunded')
-            OR ((o.provider = 'telegram_stars' OR (o.provider = 'finik' AND o.product = 'vin_report' AND o.channel = 'telegram')) AND (
+            OR ((o.provider = 'telegram_stars' OR (o.provider = 'finik' AND o.product IN ('vin_report','vin_photos') AND o.channel = 'telegram')) AND (
               r.amount <> o.amount OR (r.status IN ('requested','submitted')
                 AND (o.payment_status = 'refunded' OR o.fulfillment_status = 'delivering'))
             ))

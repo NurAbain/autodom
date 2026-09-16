@@ -44,6 +44,7 @@ export async function handlePaymentRequest(
 ): Promise<void> {
   const listing = url.pathname === "/miniapp/api/orders";
   const report = url.pathname === "/miniapp/api/orders/report";
+  const photos = url.pathname === "/miniapp/api/orders/photos";
   const download = report && request.method === "GET";
   if (!download && url.search)
     throw new RequestError(400, "Параметры заказа передаются только в теле запроса.");
@@ -62,6 +63,8 @@ export async function handlePaymentRequest(
       orders: (await payments.ledger.listOrders(userId)).filter((order) => !isWebVinReport(order)),
       reportSalesEnabled: payments.reportSalesEnabled,
       reportPrice: payments.reportPrice,
+      photoSalesEnabled: payments.photoSalesEnabled,
+      photoPrice: payments.photoPrice,
     });
     return;
   }
@@ -82,10 +85,12 @@ export async function handlePaymentRequest(
     return;
   }
   const raw = await readFlatJson(request, 512);
-  if (report) {
+  if (report || photos) {
     const parsed = reportBody.safeParse(raw);
     if (!parsed.success) throw new RequestError(400, "Нужен только VIN.");
-    const order = await payments.reportOffer(userId, parsed.data.vin);
+    const order = photos
+      ? await payments.photoOffer(userId, parsed.data.vin)
+      : await payments.reportOffer(userId, parsed.data.vin);
     if (!response.destroyed) json(response, 200, { order });
     return;
   }

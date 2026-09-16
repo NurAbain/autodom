@@ -1,6 +1,6 @@
 export type PaymentProvider = "finik" | "telegram_stars";
 export type PaymentChannel = "telegram" | "web";
-export type PaymentProduct = "inspection" | "vin_report";
+export type PaymentProduct = "inspection" | "vin_report" | "vin_photos";
 export const VIN_REPORT_KINDS = ["korea", "carfax"] as const;
 export type VinReportKind = (typeof VIN_REPORT_KINDS)[number];
 export type PaymentCurrency = "KGS" | "XTR";
@@ -122,11 +122,13 @@ export function validatePaymentOffer(input: PaymentOfferInput): void {
   if (
     !Number.isSafeInteger(input.userId) ||
     input.userId <= 0 ||
-    (input.product !== "inspection" && input.product !== "vin_report")
+    (input.product !== "inspection" &&
+      input.product !== "vin_report" &&
+      input.product !== "vin_photos")
   )
     throw new Error("Invalid payment buyer or product");
   if (
-    input.product === "vin_report"
+    input.product === "vin_report" || input.product === "vin_photos"
       ? typeof input.vin !== "string" || !/^[A-HJ-NPR-Z0-9]{17}$/u.test(input.vin)
       : input.vin != null
   )
@@ -138,6 +140,8 @@ export function validatePaymentOffer(input: PaymentOfferInput): void {
   )
     throw new Error("Invalid payment report kind");
   validatePaymentAmount(input.amount, input.product === "inspection");
+  if (input.product === "vin_photos" && input.amount !== 19900)
+    throw new Error("VIN photos require a 199-som quote");
   validatePaymentText(input.title, "title", 300);
   validatePaymentText(input.description, "description", 300);
   validatePaymentText(input.seller, "seller", 300);

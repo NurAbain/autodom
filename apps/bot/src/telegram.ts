@@ -50,12 +50,12 @@ import {
 } from "./payment-text.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
+import { confirmedVinPhotoCount } from "./vin-photo-access.js";
 import {
   confirmedEncarListings,
+  confirmedVinArchiveResult,
   confirmedVinReportKind,
-  VIN_ARCHIVE_CARWAY_NOTICE,
   VIN_ARCHIVE_LABEL,
-  VIN_ARCHIVE_STATUS_TEXT,
   VIN_DISCLOSURE,
   VIN_HELP,
   VIN_NOT_ENABLED,
@@ -445,6 +445,37 @@ export function createTelegramBot(
       },
     );
   }
+  function purchaseButton(
+    vin: string,
+    product: "vin_report" | "vin_photos",
+    text: string,
+    reportKind?: VinReportKind,
+  ): InlineKeyboardMarkup["inline_keyboard"][number][number] | undefined {
+    if (reportBotUrl) {
+      const url = new URL(reportBotUrl);
+      url.search = "";
+      url.searchParams.set(
+        "startapp",
+        `buy_${product === "vin_photos" ? "photos" : "report"}_${vin}${reportKind ? `_${reportKind}` : ""}`,
+      );
+      return { text, url: url.href, style: "primary" };
+    }
+    if (!options.miniAppUrl) return undefined;
+    const url = new URL("?view=checkout", options.miniAppUrl);
+    url.searchParams.set("vin", vin);
+    url.searchParams.set("product", product);
+    if (reportKind) url.searchParams.set("report_kind", reportKind);
+    return { text, web_app: { url: url.href }, style: "primary" };
+  }
+  async function navigateReportCheckout(context: Context, vin: string): Promise<void> {
+    const button = purchaseButton(vin, "vin_report", "Купить отчёт · 499 сом");
+    await context.reply(
+      button
+        ? "Откройте оплату: выберите банк или карту."
+        : "Оплата сейчас недоступна. Повторите позже.",
+      button ? { reply_markup: { inline_keyboard: [[button]] } } : {},
+    );
+  }
   async function vinPrivacy(chatId: number): Promise<void> {
     await bot.api.sendMessage(
       chatId,
@@ -491,10 +522,10 @@ export function createTelegramBot(
     if (reportKind === "carfax") {
       await bot.api.sendMessage(chatId, CARFAX_REPORT_EXAMPLE_PDF.caption, {
         link_preview_options: { is_disabled: true },
-        reply_markup: new InlineKeyboard()
-          .url(CARFAX_REPORT_EXAMPLE_PDF.label, CARFAX_REPORT_EXAMPLE_PDF.path)
-          .row()
-          .url("Страница источника образца", CARFAX_REPORT_EXAMPLE_PDF.sourceUrl),
+        reply_markup: new InlineKeyboard().url(
+          CARFAX_REPORT_EXAMPLE_PDF.label,
+          CARFAX_REPORT_EXAMPLE_PDF.path,
+        ),
       });
       return;
     }
@@ -510,6 +541,7 @@ export function createTelegramBot(
   }
   async function checkVin(chatId: number, vin: string): Promise<void> {
     if (normalizeVin(vin) !== vin) return;
+    await bot.api.sendMessage(chatId, "Проверяю VIN. Ищу доступные сведения и фотографии…");
     reportContexts.delete(chatId);
     await record(chatId, { event: "vin_submitted", flow: "report", contextKey: vin, step: "vin" });
     let outcome: AnalyticsEvent["outcome"] = "unavailable";
@@ -560,23 +592,18 @@ export function createTelegramBot(
                   amount: VIN_REPORT_FINIK_MINOR,
                   currency: "KGS" as const,
                 });
-          purchase = reportBotUrl
-            ? {
-                text: `Получить доступ · ${paymentAmountText(price)}`,
-                url: `${reportBotUrl}?start=vin_${vin}`,
-                style: "primary" as const,
-              }
-            : (
-                  reportKind === "carfax"
-                    ? options.payments?.carfaxReportSalesEnabled
-                    : options.payments?.reportSalesEnabled
-                )
-              ? {
-                  text: `Получить доступ · ${paymentAmountText(price)}`,
-                  callback_data: `vin-report-buy:${vin}`,
-                  style: "primary" as const,
-                }
-              : undefined;
+          if (
+            reportBotUrl ||
+            (reportKind === "carfax"
+              ? options.payments?.carfaxReportSalesEnabled
+              : options.payments?.reportSalesEnabled)
+          )
+            purchase = purchaseButton(
+              vin,
+              "vin_report",
+              `Купить отчёт · ${paymentAmountText(price)}`,
+              reportKind,
+            );
         }
         presentation = vinResultPresentation(checked);
         keyboard = actions.keyboard;
@@ -622,7 +649,7 @@ export function createTelegramBot(
         chatId,
         [
           reportKind === "carfax"
-            ? "CARFAX доступен по данным посредника VAGVIN. Сам отчёт ещё не получен."
+            ? "Для вашего авто есть полный отчёт CARFAX"
             : "Полный отчёт найден. Бесплатные данные — выше.",
           ...(reportKind === "korea"
             ? [
@@ -678,10 +705,25 @@ export function createTelegramBot(
         outcome: "available",
       });
     }
-    if (result) {
+    if (result && confirmedVinPhotoCount(result) > 0) {
       try {
-        await sendEncarPhotos(chatId, result);
+        if (await options.payments?.hasPhotoAccess(chatId, vin)) {
+          await bot.api.sendMessage(chatId, "Загружаю оплаченные фотографии…");
+          await sendEncarPhotos(chatId, result);
+          if (result.archives) await sendArchivePhotos(chatId, result.archives);
+          await bot.api.sendMessage(chatId, "Загрузка фотографий завершена.");
+        } else if (reportBotUrl || options.payments?.photoSalesEnabled) {
+          const button = purchaseButton(vin, "vin_photos", "Купить фотографии · 199 сом");
+          if (button)
+            await bot.api.sendMessage(chatId, "Найдены архивные фотографии этого автомобиля.", {
+              reply_markup: { inline_keyboard: [[button]] },
+            });
+        }
       } catch {
+        await bot.api.sendMessage(
+          chatId,
+          "Не удалось загрузить фотографии. Повторите проверку VIN позже.",
+        );
         await record(chatId, {
           event: "interaction_error",
           flow: "report",
@@ -689,19 +731,6 @@ export function createTelegramBot(
           step: "vin",
           outcome: "error",
         });
-      }
-      if (result.archives) {
-        try {
-          await sendArchivePhotos(chatId, result.archives);
-        } catch {
-          await record(chatId, {
-            event: "interaction_error",
-            flow: "report",
-            contextKey: vin,
-            step: "vin",
-            outcome: "error",
-          });
-        }
       }
     }
   }
@@ -733,6 +762,8 @@ export function createTelegramBot(
   }
   async function sendArchiveMetadata(chatId: number, result: VinArchiveResult): Promise<void> {
     const vin = result.vin;
+    result = confirmedVinArchiveResult(result);
+    if (!result.sources.length) return;
     await sendReplies(
       bot,
       chatId,
@@ -744,24 +775,6 @@ export function createTelegramBot(
       ),
       options,
     );
-    for (const source of result.sources) {
-      await sendReplies(
-        bot,
-        chatId,
-        packReplies(
-          escapeHtml(
-            [
-              `${source.provider === "carway" ? "Архив ОАЭ" : "Архив США"}: ${VIN_ARCHIVE_STATUS_TEXT[source.status]}`,
-              `Данные получены: ${vinArchiveTime(source.checked_at)}.`,
-              ...(source.provider === "carway" ? [VIN_ARCHIVE_CARWAY_NOTICE] : []),
-              ...(source.partial ? ["Поиск или получение фотографий выполнены не полностью."] : []),
-            ].join("\n"),
-          ),
-          [],
-        ),
-        options,
-      );
-    }
     for (const group of groupVinArchiveLots(result)) {
       const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
       const { provider, lot } = group.photo_source;
@@ -792,6 +805,7 @@ export function createTelegramBot(
   }
   async function sendArchivePhotos(chatId: number, result: VinArchiveResult): Promise<void> {
     const vin = result.vin;
+    result = confirmedVinArchiveResult(result);
     let photoSignal: AbortSignal | undefined;
     for (const group of groupVinArchiveLots(result)) {
       const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
@@ -925,7 +939,8 @@ export function createTelegramBot(
     const command = /^\/([a-z]+)(?:@\w+)?(?:\s|$)/iu.exec(text)?.[1]?.toLowerCase();
     if (text.startsWith("vin-report-buy:")) {
       const vin = normalizeVin(text.slice("vin-report-buy:".length));
-      await delegateReport(context, vin ? `vin_${vin}` : "orders");
+      if (vin) await navigateReportCheckout(context, vin);
+      else await delegateReport(context);
       return;
     }
     if (
@@ -959,6 +974,7 @@ export function createTelegramBot(
       await context.reply("Платежи недоступны.");
       return;
     }
+    await context.reply("Обрабатываю запрос…");
     try {
       await action(options.payments);
     } catch (error) {
@@ -994,44 +1010,6 @@ export function createTelegramBot(
         .row();
     }
     return keyboard.text("Проверить оплату", `vin-report-status:${order.id}`);
-  }
-
-  async function offerReport(context: Context, vin: string): Promise<void> {
-    await paymentAction(context, async (payments) => {
-      const order = await payments.reportOffer(context.from!.id, vin);
-      await record(context.from!.id, {
-        event: "report_checkout_started",
-        flow: "report",
-        contextKey: vin,
-        ...(order.reportKind ? { reportKind: order.reportKind } : {}),
-        step: "checkout",
-      });
-      const keyboard = new InlineKeyboard();
-      if (order.paymentStatus === "unpaid")
-        keyboard
-          .text(
-            `Принимаю условия · оплатить ${paymentAmountText(order)}`,
-            `vin-report-pay:${order.id}`,
-          )
-          .row();
-      keyboard.text(
-        order.reportKind === "carfax"
-          ? CARFAX_REPORT_EXAMPLE_PDF.label
-          : KOREAN_REPORT_EXAMPLE_PDF.label,
-        order.reportKind === "carfax" ? "carfax-report-example" : "vin-report-example",
-      );
-      const sent = await context.reply(
-        `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\n<b>Доступ к полному отчёту · до 60 минут после подтверждённой оплаты. Если предоставить доступ невозможно — полный возврат.</b>\n\n${escapeHtml(order.terms)}`,
-        { parse_mode: "HTML", reply_markup: keyboard },
-      );
-      const report = reportContexts.get(context.from!.id);
-      if (report?.vin === vin && report.expiresAt > Date.now()) {
-        if (report.messageIds.size >= 16)
-          report.messageIds.delete(report.messageIds.values().next().value!);
-        report.messageIds.add(sent.message_id);
-      }
-      await positiveFeedback(context, order);
-    });
   }
 
   bot.command("terms", async (context) => {
@@ -1455,7 +1433,7 @@ export function createTelegramBot(
           await context.reply("Некорректный VIN. Начните заново: /vin VIN.");
           return;
         }
-        await offerReport(context, vin);
+        await navigateReportCheckout(context, vin);
         return;
       }
       if (data.startsWith("vin-report-pay:")) {

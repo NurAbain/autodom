@@ -225,17 +225,17 @@ export const paymentOrders = pgTable(
     ),
     check(
       "payment_orders_kind",
-      sql`(${table.provider} = 'finik' AND ${table.currency} = 'KGS' AND ((${table.product} = 'inspection' AND ${table.vin} IS NULL) OR (${table.product} = 'vin_report' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'))) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
+      sql`(${table.provider} = 'finik' AND ${table.currency} = 'KGS' AND ((${table.product} = 'inspection' AND ${table.vin} IS NULL) OR (${table.product} IN ('vin_report','vin_photos') AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$'))) OR (${table.provider} = 'telegram_stars' AND ${table.product} = 'vin_report' AND ${table.currency} = 'XTR' AND ${table.vin} IS NOT NULL AND ${table.vin} ~ '^[A-HJ-NPR-Z0-9]{17}$')`,
     ),
     check(
       "payment_orders_report_kind",
-      sql`(${table.product} = 'inspection' AND ${table.report_kind} IS NULL)
+      sql`(${table.product} IN ('inspection','vin_photos') AND ${table.report_kind} IS NULL)
         OR (${table.product} = 'vin_report' AND (coalesce(${table.report_kind}, 'korea') = 'korea'
           OR (${table.report_kind} = 'carfax' AND ${table.provider} = 'finik' AND ${table.channel} = 'telegram')))`,
     ),
     check(
       "payment_orders_amount",
-      sql`${table.amount} BETWEEN 1 AND 9007199254740991 AND (${table.provider} <> 'finik' OR ${table.amount} % 100 = 0)`,
+      sql`${table.amount} BETWEEN 1 AND 9007199254740991 AND (${table.provider} <> 'finik' OR ${table.amount} % 100 = 0) AND (${table.product} <> 'vin_photos' OR ${table.amount} = 19900)`,
     ),
     check("payment_orders_buyer_id", sql`${table.user_id} BETWEEN 1 AND 9007199254740991`),
     check(
@@ -277,6 +277,14 @@ export const paymentOrders = pgTable(
         AND (${table.payment_status} = 'unpaid' OR ${table.paid_at} IS NOT NULL)
         AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.report_file_id} IS NOT NULL AND ${table.delivered_at} IS NOT NULL)
           OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.report_file_id} IS NULL AND ${table.delivered_at} IS NULL))
+        AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid')
+        AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))
+      OR (${table.provider} = 'finik' AND ${table.product} = 'vin_photos' AND ${table.channel} = 'telegram'
+        AND ${table.pre_checkout_id} IS NULL AND ${table.report_file_id} IS NULL AND ${table.report_message_id} IS NULL
+        AND ${table.fulfillment_status} NOT IN ('delivering','delivery_unknown')
+        AND (${table.payment_status} = 'unpaid' OR ${table.paid_at} IS NOT NULL)
+        AND ((${table.fulfillment_status} = 'fulfilled' AND ${table.delivered_at} IS NOT NULL)
+          OR (${table.fulfillment_status} <> 'fulfilled' AND ${table.delivered_at} IS NULL))
         AND (${table.admin_notified_at} IS NULL OR ${table.payment_status} <> 'unpaid')
         AND (${table.payment_status} <> 'refunded' OR ${table.fulfillment_status} <> 'ready'))`,
     ),

@@ -19,6 +19,7 @@ import {
   VIN_ARCHIVE_SOURCE_URLS,
   type VinArchiveLot,
   type VinArchiveProvider,
+  type VinArchiveResult,
   type VinArchiveStatus,
 } from "@autodom/core/vin-archive";
 import { escapeHtml } from "./html.js";
@@ -144,6 +145,7 @@ export function vinArchiveLotText(
   lot: VinArchiveLot,
   provider: VinArchiveProvider,
   includeReports = true,
+  includePhotos = true,
 ): string {
   const details = vinListingDetailsFacts(lot.details);
   return [
@@ -174,10 +176,10 @@ export function vinArchiveLotText(
           ),
           "Ставка не равна цене сделки и не гарантирует покупку. Статус не подтверждает переход права собственности.",
         ]),
-    ...(!lot.photos_complete
+    ...(includePhotos && !lot.photos_complete
       ? ["Полнота галереи не подтверждена; часть фотографий может быть недоступна."]
       : []),
-    ...(!lot.photos.length ? ["Фотографии этого лота недоступны."] : []),
+    ...(includePhotos && !lot.photos.length ? ["Фотографии этого лота недоступны."] : []),
     ...(includeReports ? vinListingReportsText(lot.reports) : []),
   ].join("\n");
 }
@@ -197,6 +199,20 @@ export function vinArchiveSourceUrl(
       : null;
 }
 
+/** Keep only VIN-matched archive evidence; failed or absent sources are not cards. */
+export function confirmedVinArchiveResult(result: VinArchiveResult): VinArchiveResult {
+  return {
+    ...result,
+    sources: result.sources.flatMap((source) => {
+      if (source.status !== "available" && source.status !== "no_photos") return [];
+      const lots = source.lots.filter((lot) =>
+        isVinArchiveLotUrl(lot.source_url, source.provider, lot.auction, lot.lot_id, result.vin),
+      );
+      return lots.length ? [{ ...source, lots }] : [];
+    }),
+  };
+}
+
 export const VIN_DISCLOSURE =
   "Для проверки VIN передаётся сервисам истории авто. В профиле поиска он не сохраняется.";
 export const VIN_NOT_ENABLED = "Бесплатная проверка VIN пока не подключена. Запрос не отправлен.";
@@ -214,7 +230,7 @@ export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
   encar: "Архив объявлений · Корея",
   nhtsa_vpic: "Характеристики · рынок США",
   autodev: "Характеристики · другие рынки",
-  vagvin_carfax: "Доступность CARFAX · VAGVIN",
+  vagvin_carfax: "Полный отчёт CARFAX",
 };
 
 export function confirmedEncarListings(result: VinCheckResult): EncarListing[] {
@@ -299,7 +315,13 @@ export function vinResultNotice(result: VinCheckResult): string | null {
   ) {
     return "Проверка неполная: часть записей не удалось получить или подтвердить. Недоступные данные неизвестны; это не отсутствие истории.";
   }
-  if (!vinVisibleProviders(result).length && !archives.some((source) => source.lots.length)) {
+  if (
+    !vinVisibleProviders(result).length &&
+    !(
+      result.archives?.vin === result.vin &&
+      confirmedVinArchiveResult(result.archives).sources.length
+    )
+  ) {
     return (
       "В проверенных источниках записи по VIN не найдены. Это не подтверждает отсутствие ДТП или ограничений." +
       (observations.some((observation) => observation.status === "disabled")
@@ -323,7 +345,7 @@ export function encarHistorySummary(result: VinCheckResult): string {
   ].join("\n");
 }
 
-export function encarListingFacts(listing: EncarListing): [string, string][] {
+export function encarListingFacts(listing: EncarListing, includePhotos = true): [string, string][] {
   const facts: [string, string][] = [];
   if (listing.model) facts.push(["Модель в объявлении", listing.model]);
   const odometer = listing.details?.odometer;
@@ -356,10 +378,11 @@ export function encarListingFacts(listing: EncarListing): [string, string][] {
   if (listing.modified_at) facts.push(["Обновлено", listing.modified_at]);
   if (listing.re_registered !== null)
     facts.push(["Повторное размещение", listing.re_registered ? "Да" : "Нет"]);
-  facts.push([
-    "Фотографии объявления",
-    String(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)).length),
-  ]);
+  if (includePhotos)
+    facts.push([
+      "Фотографии объявления",
+      String(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)).length),
+    ]);
   return facts;
 }
 
@@ -421,9 +444,9 @@ function vinSourceDescription(provider: VinProvider, result: VinCheckResult): st
         const record = confirmedVagvinCarfaxRecord(result);
         if (!record) return "";
         description = [
-          `По данным посредника VAGVIN, CARFAX доступен: записей в базе — ${record.record_count}.`,
-          ...(record.vehicle ? [`Автомобиль по данным VAGVIN: ${record.vehicle}`] : []),
-          "Это заявление стороннего сервиса о доступности, не официальный ответ CARFAX и не полученный отчёт. Сведения о ДТП, пробеге и владельцах здесь не проверены.",
+          "Для вашего авто есть полный отчёт CARFAX",
+          ...(record.vehicle ? [`Автомобиль: ${record.vehicle}`] : []),
+          "Сам отчёт ещё не получен. Сведения о ДТП, пробеге и владельцах здесь не проверены.",
           VIN_CAUTION,
         ].join("\n");
         break;
@@ -544,8 +567,6 @@ export function vinResultPresentation(result: VinCheckResult): { text: string } 
           ].join("\n")
         : escapeHtml(vinSourceDescription(provider, result));
     sections.push(`<b>${title}</b>\n${body}\n<i>${vinCheckedText(observation.checked_at)}</i>`);
-    if (provider === "vagvin_carfax")
-      sections.push(`<a href="${VIN_SOURCE_URLS.vagvin_carfax}">Источник: VAGVIN</a>`);
   }
   const notice = vinResultNotice(result);
   return {
@@ -553,7 +574,9 @@ export function vinResultPresentation(result: VinCheckResult): { text: string } 
       `<b>Бесплатная проверка VIN</b>\n<code>${escapeHtml(result.vin)}</code>`,
       ...(notice ? [escapeHtml(notice)] : []),
       ...sections,
-      ...(result.archives ? [escapeHtml(VIN_ARCHIVE_DISCLOSURE)] : []),
+      ...(result.archives && confirmedVinArchiveResult(result.archives).sources.length
+        ? [escapeHtml(VIN_ARCHIVE_DISCLOSURE)]
+        : []),
     ].join("\n\n"),
   };
 }

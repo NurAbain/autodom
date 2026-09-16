@@ -34,9 +34,14 @@ import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
-import { CARFAX_REPORT_FINIK_MINOR, VIN_REPORT_FINIK_MINOR } from "./payment-text.js";
+import {
+  CARFAX_REPORT_FINIK_MINOR,
+  VIN_PHOTOS_FINIK_MINOR,
+  VIN_REPORT_FINIK_MINOR,
+} from "./payment-text.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { handlePaymentRequest } from "./payments-http.js";
+import { confirmedVinPhotoCount, withoutVinPhotos } from "./vin-photo-access.js";
 import { confirmedVinReportKind, VIN_NOT_ENABLED } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
 import { handleWebReportRequest } from "./web-report-http.js";
@@ -203,6 +208,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/orders/checkout",
     "/miniapp/api/orders/cancel",
     "/miniapp/api/orders/report",
+    "/miniapp/api/orders/photos",
     "/miniapp/api/orders/payment-methods",
     "/miniapp/api/orders/card-payment",
     "/miniapp/api/analytics",
@@ -473,6 +479,11 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               "Передайте запрос фото только в теле.",
             );
           const photoRequest = await readVinArchivePhotoRequest(request);
+          if (!(await payments?.hasPhotoAccess(user.id, photoRequest.vin)))
+            throw new PaymentRequestError(
+              403,
+              "Фотографии доступны после оплаты доступа по этому VIN.",
+            );
           const controller = new AbortController();
           const onClose = () => controller.abort();
           response.once("close", onClose);
@@ -486,6 +497,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               photo.bytes.byteLength > VIN_ARCHIVE_PHOTO_MAX_BYTES
             )
               throw new Error("Invalid archive photo");
+            if (!(await payments?.hasPhotoAccess(user.id, photoRequest.vin)))
+              throw new PaymentRequestError(403, "Доступ к фотографиям приостановлен.");
             if (!response.destroyed) {
               response.writeHead(200, {
                 "Content-Type": photo.content_type,
@@ -493,7 +506,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               });
               response.end(photo.bytes);
             }
-          } catch {
+          } catch (error) {
+            if (error instanceof PaymentRequestError) throw error;
             if (!response.destroyed) {
               options.onError?.(new Error("VIN archive photo API request failed"));
               respond(response, 503, {
@@ -597,9 +611,17 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
                 outcome: "available",
                 dedupeKey: `report_offer:${vin}:${reportKind}`,
               });
+            const photosAvailable = confirmedVinPhotoCount(result) > 0;
+            const photoAccess = {
+              available: photosAvailable,
+              granted: photosAvailable && ((await payments?.hasPhotoAccess(user.id, vin)) ?? false),
+              salesEnabled: !!reportBotUrl || (payments?.photoSalesEnabled ?? false),
+              price: { amount: VIN_PHOTOS_FINIK_MINOR, currency: "KGS" as const },
+            };
             if (!response.destroyed)
               respond(response, 200, {
-                ...result,
+                ...(photoAccess.granted ? result : withoutVinPhotos(result)),
+                photoAccess,
                 reportSalesEnabled:
                   reportKind === "carfax"
                     ? (payments?.carfaxReportSalesEnabled ?? false)
