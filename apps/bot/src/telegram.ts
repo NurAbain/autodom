@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
+import { isWebVinReport, type PaymentOrder, type VinReportKind } from "@autodom/core/payments";
 import {
   ENCAR_HISTORY_MAX_LISTINGS,
   ENCAR_HISTORY_MAX_PHOTOS,
@@ -25,6 +25,7 @@ import { AbortController as TelegramAbortController } from "abort-controller";
 import { Bot, type Context, GrammyError, InlineKeyboard, InputFile } from "grammy";
 import type { InlineKeyboardMarkup } from "grammy/types";
 import type { BotMode } from "./bot-mode.js";
+import { CARFAX_REPORT_EXAMPLE_PDF } from "./carfax-report-example.js";
 import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
 import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
@@ -42,7 +43,7 @@ import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { type PhotoRecognizer, VIN_PHOTO_MAX_BYTES, VinPhotoError } from "./vin-photo.js";
 import {
   confirmedEncarListings,
-  hasKoreanVinRecord,
+  confirmedVinReportKind,
   VIN_ARCHIVE_CARWAY_NOTICE,
   VIN_ARCHIVE_LABEL,
   VIN_ARCHIVE_STATUS_TEXT,
@@ -284,7 +285,7 @@ export function createTelegramBot(
   }
   const photoHelp = recognizePhoto
     ? "Отправьте фото VIN крупным планом, без бликов: все 17 символов должны быть видны. Перед проверкой вы сможете подтвердить или исправить распознанный номер."
-    : "Распознавание фото не подключено. Введите VIN вручную: /vin VIN.";
+    : "Распознавание фото не подключено. Введите VIN текстом: /vin VIN.";
   function rememberPhoto(userId: number, candidates: readonly string[]) {
     const now = Date.now();
     for (const [id, pending] of pendingPhotos) {
@@ -326,7 +327,7 @@ export function createTelegramBot(
   async function delegateReport(context: Context, payload = "orders"): Promise<void> {
     if (!privateBuyer(context) || !reportBotUrl) return;
     await context.reply(
-      "Покупка корейского PDF, ваши заказы и поддержка — в @autokgbot. Продолжите там: оплата и выдача отчёта остаются в одном боте.",
+      "Доступ к полному отчёту, ваши заказы и поддержка — в @autokgbot. Продолжите там: оплата и доступ к отчёту остаются в одном боте.",
       {
         reply_markup: new InlineKeyboard().url(
           "Открыть отчёты и заказы",
@@ -379,16 +380,28 @@ export function createTelegramBot(
       options,
     );
   }
-  async function sendReportExample(chatId: number): Promise<void> {
+  async function sendReportExample(
+    chatId: number,
+    reportKind: VinReportKind = "korea",
+  ): Promise<void> {
+    if (reportKind === "carfax") {
+      await bot.api.sendMessage(chatId, CARFAX_REPORT_EXAMPLE_PDF.caption, {
+        link_preview_options: { is_disabled: true },
+        reply_markup: new InlineKeyboard()
+          .url(CARFAX_REPORT_EXAMPLE_PDF.label, CARFAX_REPORT_EXAMPLE_PDF.path)
+          .row()
+          .url("Страница источника образца", CARFAX_REPORT_EXAMPLE_PDF.sourceUrl),
+      });
+      return;
+    }
+    const example = KOREAN_REPORT_EXAMPLE_PDF;
     await bot.api.sendDocument(
       chatId,
       new InputFile(
-        fileURLToPath(
-          new URL(`./public/reports/${KOREAN_REPORT_EXAMPLE_PDF.filename}`, import.meta.url),
-        ),
-        KOREAN_REPORT_EXAMPLE_PDF.filename,
+        fileURLToPath(new URL(`./public/reports/${example.filename}`, import.meta.url)),
+        example.filename,
       ),
-      { caption: KOREAN_REPORT_EXAMPLE_PDF.caption },
+      { caption: example.caption },
     );
   }
   async function checkVin(chatId: number, vin: string): Promise<void> {
@@ -397,8 +410,9 @@ export function createTelegramBot(
     const revision = options.payments?.forgetVinResult(chatId, vin);
     let keyboard: InlineKeyboardMarkup | undefined;
     let purchase: InlineKeyboardMarkup["inline_keyboard"][number][number] | undefined;
+    let reportKind: VinReportKind | null = null;
     let photoOffer: VehiclePhotoOffer | undefined;
-    let presentation = { text: escapeHtml(VIN_NOT_ENABLED), richHtml: "" };
+    let presentation = { text: escapeHtml(VIN_NOT_ENABLED) };
     if (options.checkVin) {
       try {
         const checked = await options.checkVin(vin);
@@ -406,20 +420,21 @@ export function createTelegramBot(
         const actions = vinResultActions(checked);
         if (actions.photos.length) photoOffer = rememberVehiclePhotos(chatId, "encar", checked);
         if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
-        if (hasKoreanVinRecord(checked)) {
+        reportKind = confirmedVinReportKind(checked);
+        if (reportKind) {
           const price = options.payments?.reportPrice ?? {
             amount: VIN_REPORT_FINIK_MINOR,
             currency: "KGS" as const,
           };
           purchase = reportBotUrl
             ? {
-                text: `Полный PDF · ${paymentAmountText(price)}`,
+                text: `Получить доступ · ${paymentAmountText(price)}`,
                 url: `${reportBotUrl}?start=vin_${vin}`,
                 style: "primary" as const,
               }
             : options.payments?.reportSalesEnabled
               ? {
-                  text: `Полный PDF · ${paymentAmountText(price)}`,
+                  text: `Получить доступ · ${paymentAmountText(price)}`,
                   callback_data: `vin-report-buy:${vin}`,
                   style: "primary" as const,
                 }
@@ -441,7 +456,6 @@ export function createTelegramBot(
       [
         {
           text: presentation.text,
-          ...(presentation.richHtml ? { richHtml: presentation.richHtml } : {}),
           buttons: [],
         },
       ],
@@ -450,11 +464,44 @@ export function createTelegramBot(
         ...(photoOffer ? { onSent: (id: number) => photoOffer?.messageIds.add(id) } : {}),
       },
     );
-    if (purchase)
+    if (purchase && reportKind)
       await bot.api.sendMessage(
         chatId,
-        "Если нужен полный отчёт, его можно заказать отдельно. Это необязательно; бесплатные данные — выше.",
-        { reply_markup: { inline_keyboard: [[purchase]] } },
+        [
+          "Полный отчёт найден. Бесплатные данные — выше.",
+          ...(reportKind === "korea"
+            ? [
+                [
+                  "Проверьте историю автомобиля до покупки. В платном PDF CarHistory на корейском языке, при наличии записей:",
+                  "• ДТП: даты и суммы ремонта или сметы по страховым данным.",
+                  "• Что ремонтировали, меняли и красили; расходы на запчасти и работы.",
+                  "• Страховые случаи затопления, угона и полной гибели.",
+                  "• Смена владельцев и номеров, использование в аренде или такси.",
+                  "• Записанный пробег с датами — для сравнения с одометром.",
+                ].join("\n"),
+                "Эти сведения помогут оценить риски и подготовить вопросы продавцу. ДТП без обращения в страховую могут не попасть в отчёт; отсутствие записей не означает отсутствие ДТП.",
+              ]
+            : []),
+          "Перед покупкой посмотрите пример PDF: это образец, не отчёт по вашему VIN.",
+          "Доступ к полному отчёту — до 60 минут после подтверждённой оплаты. Если предоставить доступ невозможно — полный возврат.",
+        ].join("\n\n"),
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text:
+                    reportKind === "carfax"
+                      ? CARFAX_REPORT_EXAMPLE_PDF.label
+                      : KOREAN_REPORT_EXAMPLE_PDF.label,
+                  callback_data:
+                    reportKind === "carfax" ? "carfax-report-example" : "vin-report-example",
+                },
+              ],
+              [purchase],
+            ],
+          },
+        },
       );
   }
   async function sendEncarPhotos(chatId: number, result: VinCheckResult): Promise<void> {
@@ -779,13 +826,37 @@ export function createTelegramBot(
     return keyboard.text("Проверить оплату", `vin-report-status:${order.id}`);
   }
 
-  bot.command("terms", async (context) => {
-    if (privateBuyer(context))
-      await context.reply(
-        options.payments?.reportPrice.currency === "KGS" || (vinOnly && !options.payments)
-          ? VIN_REPORT_TELEGRAM_FINIK_TERMS
-          : VIN_REPORT_TERMS,
+  async function offerReport(context: Context, vin: string): Promise<void> {
+    await paymentAction(context, async (payments) => {
+      const order = await payments.reportOffer(context.from!.id, vin);
+      const keyboard = new InlineKeyboard();
+      if (order.paymentStatus === "unpaid")
+        keyboard
+          .text(
+            `Принимаю условия · оплатить ${paymentAmountText(order)}`,
+            `vin-report-pay:${order.id}`,
+          )
+          .row();
+      keyboard.text(
+        order.reportKind === "carfax"
+          ? CARFAX_REPORT_EXAMPLE_PDF.label
+          : KOREAN_REPORT_EXAMPLE_PDF.label,
+        order.reportKind === "carfax" ? "carfax-report-example" : "vin-report-example",
       );
+      await context.reply(
+        `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\n<b>Доступ к полному отчёту · до 60 минут после подтверждённой оплаты. Если предоставить доступ невозможно — полный возврат.</b>\n\n${escapeHtml(order.terms)}`,
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+    });
+  }
+
+  bot.command("terms", async (context) => {
+    if (!privateBuyer(context)) return;
+    await context.reply(
+      options.payments?.reportPrice.currency === "KGS" || (vinOnly && !options.payments)
+        ? VIN_REPORT_TELEGRAM_FINIK_TERMS
+        : VIN_REPORT_TERMS,
+    );
   });
   bot.command("start", async (context, next) => {
     if (!privateBuyer(context)) return;
@@ -883,7 +954,7 @@ export function createTelegramBot(
         throw new PaymentRequestError(404, "PDF-заказ не найден.");
       const refunds = await payments.ledger.listRefunds(order.id);
       await context.reply(
-        `${order.id}\nVIN ${order.vin}\nПокупатель ${order.userId}\n${paymentAmountText(order)}\n${paymentOrderStatus(order)}\nВыдан: ${order.deliveredAt ?? "нет"}\n${isWebVinReport(order) ? "Выдача: только сайт" : `Сообщение: ${order.reportMessageId ?? "не подтверждено"}`}\n${refunds.map((refund) => `Возврат: ${refund.status}${refund.confirmationReference ? ` · ${refund.confirmationReference} · подтвердил ${refund.confirmedBy}` : ""}`).join("\n")}`,
+        `${order.title}\nВид отчёта: ${order.reportKind === "carfax" ? "CARFAX" : "Корея"}\n${order.id}\nVIN ${order.vin}\nПокупатель ${order.userId}\n${paymentAmountText(order)}\n${paymentOrderStatus(order)}\nВыдан: ${order.deliveredAt ?? "нет"}\n${isWebVinReport(order) ? "Выдача: только сайт" : `Сообщение: ${order.reportMessageId ?? "не подтверждено"}`}\n${refunds.map((refund) => `Возврат: ${refund.status}${refund.confirmationReference ? ` · ${refund.confirmationReference} · подтвердил ${refund.confirmedBy}` : ""}`).join("\n")}`,
       );
     }),
   );
@@ -945,7 +1016,13 @@ export function createTelegramBot(
   }
   bot.command("orders", showOrders);
   bot.command("sample", async (context) => {
-    if (privateBuyer(context)) await sendReportExample(context.chat.id);
+    if (privateBuyer(context))
+      await context.reply("Публичные образцы PDF — не отчёт по вашему VIN. Выберите образец:", {
+        reply_markup: new InlineKeyboard()
+          .text(KOREAN_REPORT_EXAMPLE_PDF.label, "vin-report-example")
+          .row()
+          .text(CARFAX_REPORT_EXAMPLE_PDF.label, "carfax-report-example"),
+      });
   });
   bot.on("message", async (context) => {
     if (
@@ -982,7 +1059,7 @@ export function createTelegramBot(
         const photo = context.message.photo.at(-1);
         if (!photo || (photo.file_size !== undefined && photo.file_size > VIN_PHOTO_MAX_BYTES)) {
           await context.reply(
-            "Фото слишком большое. Отправьте обрезанный снимок VIN до 8 МБ или введите VIN вручную: /vin VIN.",
+            "Фото слишком большое. Отправьте обрезанный снимок VIN до 8 МБ или введите VIN текстом: /vin VIN.",
           );
           return;
         }
@@ -1021,7 +1098,7 @@ export function createTelegramBot(
         }
         if (!candidates.length) {
           await context.reply(
-            "Не удалось уверенно прочитать 17 символов VIN. Буквы I, O и Q не заменяем на цифры. Снимите VIN ближе, ровно и без бликов либо введите /vin VIN вручную.",
+            "Не удалось уверенно прочитать 17 символов VIN. Буквы I, O и Q не заменяем на цифры. Снимите VIN ближе, ровно и без бликов либо введите VIN текстом: /vin VIN.",
           );
           await vinHelp(userId, chatId);
           return;
@@ -1055,7 +1132,7 @@ export function createTelegramBot(
       const pending = pendingPhotos.get(userId);
       if (pending && pending.expiresAt > Date.now()) {
         await context.reply(
-          "Подтвердите VIN кнопкой под фото или введите все 17 символов вручную. Для другого действия: /cancel.",
+          "Подтвердите VIN кнопкой под фото или введите все 17 символов текстом. Для другого действия: /cancel.",
         );
         return;
       }
@@ -1091,23 +1168,13 @@ export function createTelegramBot(
         return;
       }
       if (data.startsWith("vin-report-buy:")) {
-        await paymentAction(context, async (payments) => {
-          const order = await payments.reportOffer(userId, data.slice("vin-report-buy:".length));
-          await context.reply(
-            `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\n<b>PDF вручную · до 60 минут после оплаты. Если выдача невозможна — полный возврат.</b>\n\n${escapeHtml(order.terms)}`,
-            {
-              parse_mode: "HTML",
-              ...(order.paymentStatus === "unpaid"
-                ? {
-                    reply_markup: new InlineKeyboard().text(
-                      `Принимаю условия · оплатить ${paymentAmountText(order)}`,
-                      `vin-report-pay:${order.id}`,
-                    ),
-                  }
-                : {}),
-            },
-          );
-        });
+        const value = data.slice("vin-report-buy:".length);
+        const vin = normalizeVin(value);
+        if (!vin || vin !== value) {
+          await context.reply("Некорректный VIN. Начните заново: /vin VIN.");
+          return;
+        }
+        await offerReport(context, vin);
         return;
       }
       if (data.startsWith("vin-report-pay:")) {
@@ -1115,7 +1182,7 @@ export function createTelegramBot(
           const order = await payments.checkout(userId, data.slice("vin-report-pay:".length), true);
           if (!order.invoiceUrl) throw new PaymentRequestError(503, "Счёт ещё не подтверждён.");
           await context.reply(
-            `<b>${escapeHtml(paymentAmountText(order))}</b> · VIN <code>${escapeHtml(order.vin ?? "")}</code>\n${order.provider === "finik" ? "Выберите банк или карту. Оплата — только по серверной квитанции Finik." : "Оплата — только по подтверждению сервера Telegram."}\n\n<b>PDF вручную до 60 минут после оплаты.</b> Если выдача невозможна — полный возврат.\nВернитесь сюда и нажмите «Проверить оплату». <b>Повторно не платите.</b>`,
+            `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b> · VIN <code>${escapeHtml(order.vin ?? "")}</code>\n${order.provider === "finik" ? "Выберите банк или карту. Оплата — только по серверной квитанции Finik." : "Оплата — только по подтверждению сервера Telegram."}\n\n<b>Доступ к полному отчёту до 60 минут после подтверждённой оплаты.</b> Если предоставить доступ невозможно — полный возврат.\nВернитесь сюда и нажмите «Проверить оплату». <b>Повторно не платите.</b>`,
             { parse_mode: "HTML", reply_markup: paymentKeyboard(order) },
           );
         });
@@ -1125,10 +1192,14 @@ export function createTelegramBot(
         await paymentAction(context, async (payments) => {
           const order = await payments.ownedOrder(userId, data.slice("vin-report-status:".length));
           await context.reply(
-            `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\nPDF вручную до 60 минут после оплаты; если выдача невозможна — полный возврат.\nПоддержка и возврат: /paysupport текст`,
+            `<b>${escapeHtml(order.title)} · ${escapeHtml(paymentAmountText(order))}</b>\nVIN <code>${escapeHtml(order.vin ?? "")}</code>\nЗаказ ${escapeHtml(order.id)}\n<b>${escapeHtml(paymentOrderStatus(order))}</b>\n\nДоступ к полному отчёту до 60 минут после подтверждённой оплаты; если предоставить доступ невозможно — полный возврат.\nПоддержка и возврат: /paysupport текст`,
             { parse_mode: "HTML", reply_markup: paymentKeyboard(order) },
           );
         });
+        return;
+      }
+      if (data === "carfax-report-example") {
+        await sendReportExample(chatId, "carfax");
         return;
       }
       if (data === "vin-report-example") {
@@ -1252,7 +1323,7 @@ export async function configureTelegramBot(
             { command: "start", description: "Бесплатная проверка VIN" },
             { command: "vin", description: "Новая проверка VIN или фото номера" },
             { command: "orders", description: "Мои PDF, оплата и статус выдачи" },
-            { command: "sample", description: "Пример корейского PDF — не ваш отчёт" },
+            { command: "sample", description: "Образцы корейского PDF и CARFAX — не ваш отчёт" },
             { command: "paysupport", description: "Поддержка по заказу и полный возврат" },
             { command: "terms", description: "Цена, срок выдачи и условия покупки" },
             { command: "privacy", description: "Как обрабатываются ваши данные" },
@@ -1269,13 +1340,14 @@ export async function configureTelegramBot(
             { command: "pause", description: "Приостановить уведомления" },
             { command: "tips", description: "Советы перед покупкой" },
             { command: "vin", description: "Бесплатная проверка VIN и фото номера" },
+            { command: "sample", description: "Образцы корейского PDF и CARFAX" },
             {
               command: "orders",
               description: options.reportBotUrl
                 ? "PDF и заказы — перейти в @autokgbot"
                 : "Мои заказы, оплата и поддержка услуг",
             },
-            { command: "terms", description: "Условия покупки полного корейского PDF" },
+            { command: "terms", description: "Условия доступа к полному отчёту" },
             { command: "paysupport", description: "Написать владельцу по оплате или возврату" },
             { command: "quiet", description: "Тихие часы: /quiet 23:00-08:00 или off" },
             { command: "privacy", description: "Хранение и удаление моих данных" },

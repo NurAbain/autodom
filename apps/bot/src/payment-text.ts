@@ -2,13 +2,14 @@ import { isWebVinReport, type PaymentOrder } from "@autodom/core/payments";
 
 export const VIN_REPORT_STARS = 500;
 export const VIN_REPORT_FINIK_MINOR = 49900;
+export const CARFAX_REPORT_FINIK_MINOR = 49900;
 export const VIN_REPORT_OWNER = 706854211;
 export const VIN_REPORT_SLA_MS = 60 * 60 * 1000;
 export const VIN_REPORT_MAX_BYTES = 20 * 1024 * 1024;
 export const VIN_REPORT_TERMS = `Полный корейский PDF · ${VIN_REPORT_STARS} Telegram Stars (XTR)
 Разовая покупка по указанному VIN, не подписка.
 
-Выдача вручную в этот бот — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если отчёт выдать невозможно — полный возврат ${VIN_REPORT_STARS} Stars.
+Вы получите доступ к PDF в этом боте — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если предоставить отчёт невозможно — полный возврат ${VIN_REPORT_STARS} Stars.
 
 Исторические записи могут быть неполными. Отчёт не гарантирует состояние авто. Образец — не отчёт по вашему VIN.
 
@@ -19,7 +20,7 @@ export const VIN_REPORT_TERMS = `Полный корейский PDF · ${VIN_RE
 export const VIN_REPORT_TELEGRAM_FINIK_TERMS = `Полный корейский PDF · ${VIN_REPORT_FINIK_MINOR / 100} сом (KGS)
 Разовая покупка по указанному VIN через Finik в боте, не подписка.
 
-Выдача вручную в этот бот — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если отчёт выдать невозможно — полный возврат через Finik.
+Вы получите доступ к PDF в этом боте — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если предоставить отчёт невозможно — полный возврат через Finik.
 
 Возврат выполняет владелец в кабинете Finik. Заявка на возврат ещё не означает, что деньги возвращены.
 
@@ -32,7 +33,7 @@ export const VIN_REPORT_TELEGRAM_FINIK_TERMS = `Полный корейский 
 export const VIN_REPORT_WEB_TERMS = `Полный корейский PDF · ${VIN_REPORT_FINIK_MINOR / 100} сом (KGS)
 Разовая покупка по указанному VIN на сайте через Finik.
 
-Выдача вручную в заказе на этом сайте — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если отчёт выдать невозможно — полный возврат через Finik.
+Вы получите доступ к PDF в заказе на этом сайте — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если предоставить отчёт невозможно — полный возврат через Finik.
 
 Возврат выполняет владелец в кабинете Finik. Заявка на возврат ещё не означает, что деньги возвращены.
 
@@ -43,6 +44,22 @@ export const VIN_REPORT_WEB_TERMS = `Полный корейский PDF · ${VI
 
 Нажимая кнопку согласия перед оплатой, вы подтверждаете VIN, цену, срок и все эти условия.`;
 
+export const CARFAX_REPORT_TELEGRAM_FINIK_TERMS = `CARFAX · PDF · ${CARFAX_REPORT_FINIK_MINOR / 100} сом (KGS)
+Разовая покупка отчёта CARFAX по указанному VIN через Finik в боте, не подписка.
+
+Вы получите доступ к настоящему PDF в этом боте — до ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. Если получить отчёт невозможно — полный возврат через Finik.
+
+Это заказ отчёта, а не подтверждение найденной истории. Состав и количество записей зависят от данных CARFAX. Отсутствие записей не означает отсутствие ДТП, ремонта или других проблем.
+
+Публичный образец показывает формат документа. Это не отчёт по вашему VIN и не результат вашей покупки.
+
+Возврат выполняет владелец в кабинете Finik. Заявка на возврат ещё не означает, что деньги возвращены.
+
+Продавец и исполнитель: владелец Autodom, Telegram ID ${VIN_REPORT_OWNER}. По покупке отвечает Autodom, не поддержка Telegram.
+Поддержка и полный возврат: /paysupport текст.
+
+Нажимая кнопку согласия перед оплатой, вы подтверждаете VIN, цену, срок и все эти условия.`;
+
 export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency">): string {
   return order.currency === "XTR"
     ? `${order.amount} Stars (XTR)`
@@ -50,7 +67,7 @@ export function paymentAmountText(order: Pick<PaymentOrder, "amount" | "currency
 }
 
 export const PAYMENT_PRIVACY_NOTICE =
-  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание (включая VIN для PDF) и сумму заказа на осмотр или PDF в боте либо на сайте, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для ручной выдачи и поддержки. PDF, купленный в боте, отправляется в Telegram; купленный на сайте — выдаётся только на сайте. Переход в приложение банка, на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
+  "Заказы и платежи хранятся отдельно от бесплатного поиска; /delete их не удаляет. Finik получает номер, описание (включая VIN для PDF) и сумму заказа на осмотр или PDF в боте либо на сайте, но не Telegram ID или профиль поиска. Telegram обрабатывает Stars-платежи и хранит сообщения и PDF; владелец Autodom получает Telegram ID покупателя, VIN, сумму и заказ для предоставления отчёта и поддержки. PDF, купленный в боте, доступен в Telegram; купленный на сайте — только на сайте. Переход в приложение банка, на платёжную страницу и закрытие счёта не подтверждают оплату. Заявка на возврат не означает возврат денег.";
 
 export function paymentOrderStatus(order: PaymentOrder): string {
   if (order.paymentStatus === "refunded")
@@ -75,7 +92,7 @@ export function paymentOrderStatus(order: PaymentOrder): string {
       return "Исход отправки PDF неизвестен · поддержка /paysupport, повторно не платите";
     if (order.paidAt && Date.parse(order.paidAt) + VIN_REPORT_SLA_MS <= Date.now())
       return "Оплата подтверждена · срок 60 минут истёк · обратитесь в /paysupport за PDF или полным возвратом";
-    return "Оплачено · PDF вручную до 60 минут после оплаты";
+    return "Оплачено · доступ к PDF до 60 минут после подтверждённой оплаты";
   }
   if (order.paymentStatus === "paid")
     return order.fulfillmentStatus === "fulfilled"

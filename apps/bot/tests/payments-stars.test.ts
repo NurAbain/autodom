@@ -107,6 +107,33 @@ it("never grants another buyer the first buyer's Korean eligibility", async () =
   await expect(service.reportOffer(43, vin)).rejects.toMatchObject({ status: 409 });
 });
 
+it("does not sell a full report from an export record without confirmed report availability", async () => {
+  const { service } = fixture();
+  vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(paidOrder());
+  const revision = service.forgetVinResult(42, vin);
+  service.rememberVinResult(
+    42,
+    {
+      ...result,
+      carhistory: { ...result.carhistory, status: "not_found" },
+      car365: {
+        ...result.car365,
+        status: "available",
+        data: {
+          vin,
+          model: "Hyundai",
+          last_mileage_km: 150000,
+          export_date: null,
+          first_registration_date: null,
+          total_loss: null,
+        },
+      },
+    },
+    revision,
+  );
+  await expect(service.reportOffer(42, vin)).rejects.toMatchObject({ status: 409 });
+});
+
 it("rejects unauthorized delivery, refund, support reply, and another buyer's PDF download", async () => {
   const { service } = fixture();
   vi.spyOn(service.ledger, "getOrder").mockResolvedValue(paidOrder());

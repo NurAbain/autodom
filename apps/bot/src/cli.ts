@@ -19,6 +19,7 @@ import {
 } from "./bot-mode.js";
 import { Conversation } from "./conversation.js";
 import {
+  loadCarfaxReportEnabled,
   loadFinikGatewaySettings,
   loadVinReportFinikEnabled,
   loadVinReportStarsEnabled,
@@ -138,6 +139,7 @@ export async function main(
               fetch,
               loadVinReportFinikEnabled(env),
               loadVinReportTelegramFinikEnabled(env),
+              loadCarfaxReportEnabled(env),
             );
         const botId = telegramIdentity(token);
         const registerRecipient = reportBotUrl

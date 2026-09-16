@@ -1,9 +1,10 @@
-import type { PaymentOrder } from "@autodom/core/payments";
+import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
 import type { VinCheckResult } from "@autodom/core/vin";
 
 export type MiniAppVinResult = VinCheckResult & {
   reportSalesEnabled: boolean;
   reportPrice: Pick<PaymentOrder, "amount" | "currency"> | null;
+  reportKind: VinReportKind | null;
 };
 
 export interface MiniAppFinikMethods {

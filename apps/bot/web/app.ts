@@ -1,4 +1,4 @@
-import type { PaymentOrder } from "@autodom/core/payments";
+import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
 import { isEncarPhotoUrl, normalizeVin, vinGoogleSearchUrl } from "@autodom/core/vin";
 import {
   groupVinArchiveLots,
@@ -10,6 +10,7 @@ import {
   type VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import { type BotMode, loadReportBotUrl } from "../src/bot-mode.js";
+import { CARFAX_REPORT_EXAMPLE_PDF, CARFAX_REPORT_PREVIEW } from "../src/carfax-report-example.js";
 import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE_PDF, KOREAN_REPORT_PREVIEW } from "../src/korean-report-example.js";
 import type { MiniAppCar, MiniAppFinikMethods, MiniAppVinResult } from "../src/miniapp-contract.js";
@@ -57,7 +58,16 @@ type TelegramApp = {
 const telegram = (window as Window & { Telegram?: { WebApp?: TelegramApp } }).Telegram?.WebApp;
 const root = document.getElementById("app")!;
 
-type View = "home" | "vin" | "buy" | "sell" | "report-example" | "car" | "orders" | "support";
+type View =
+  | "home"
+  | "vin"
+  | "buy"
+  | "sell"
+  | "report-example"
+  | "carfax-example"
+  | "car"
+  | "orders"
+  | "support";
 let currentView: View = "home";
 let generation = 0;
 const pending = new Set<AbortController>();
@@ -118,6 +128,7 @@ function navigate(view: View, targetId?: string): void {
   url.searchParams.delete("car");
   url.searchParams.delete("view");
   url.searchParams.delete("order_id");
+  url.searchParams.delete("vin");
   if (view === "car" && targetId) url.searchParams.set("car", targetId);
   else if (view !== "home") url.searchParams.set("view", view);
   if (view === "orders" && targetId) url.searchParams.set("order_id", targetId);
@@ -425,37 +436,52 @@ function showHome(): void {
   );
 }
 
-function samplePdfLink(): HTMLAnchorElement {
-  const link = element("a", "button sample-pdf", "Открыть оригинальный PDF");
-  link.href = appPath(KOREAN_REPORT_EXAMPLE_PDF.path);
+function samplePdfLink(reportKind: VinReportKind = "korea"): HTMLAnchorElement {
+  const example = reportKind === "carfax" ? CARFAX_REPORT_EXAMPLE_PDF : KOREAN_REPORT_EXAMPLE_PDF;
+  const link = element(
+    "a",
+    "button sample-pdf",
+    reportKind === "carfax" ? example.label : "Открыть оригинальный PDF",
+  );
+  link.href = reportKind === "carfax" ? example.path : appPath(example.path);
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   return link;
 }
 
-function premiumPanel(result: MiniAppVinResult): HTMLElement {
+function premiumPanel(
+  result: Pick<MiniAppVinResult, "vin" | "reportSalesEnabled" | "reportPrice" | "reportKind">,
+): HTMLElement | null {
+  const reportKind = result.reportKind;
+  if (!reportKind) return null;
   const started = generation;
-  const preview = KOREAN_REPORT_PREVIEW;
+  const preview = reportKind === "carfax" ? CARFAX_REPORT_PREVIEW : KOREAN_REPORT_PREVIEW;
   const panel = element("section", "panel premium-panel");
   const actions = element("div", "report-actions");
   const notice = element("p", "footnote");
   notice.setAttribute("role", "status");
+  const sample = samplePdfLink(reportKind);
+  sample.textContent = "Посмотреть образец PDF";
   panel.append(
-    element("p", "muted", "Дополнительно · платный PDF"),
-    element("h2", "", preview.title),
+    element("h2", "", "Полный отчёт найден"),
+    element("p", "footnote", preview.limitations),
+    sample,
   );
-  if (config?.reportBotUrl) {
-    actions.append(reportBotLink(`vin_${result.vin}`, "Условия отчёта в VIN-боте"));
-    notice.textContent = "Цена и доступность — в VIN-боте. Оплата, PDF и поддержка остаются там.";
-  } else if (result.reportSalesEnabled && result.reportPrice) {
-    const price = paymentAmountText(result.reportPrice);
-    panel.append(element("p", "report-price", price));
-    const buy = button(`Заказать отчёт · ${price}`, () => {
+  const price = result.reportPrice ? paymentAmountText(result.reportPrice) : null;
+  if (config?.reportBotUrl && price) {
+    actions.append(reportBotLink(`vin_${result.vin}`, `Получить доступ · ${price}`));
+    notice.textContent =
+      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
+      "Если получить отчёт невозможно — полный возврат. Условия и оплата — в VIN-боте.";
+  } else if (result.reportSalesEnabled && price) {
+    const buy = button(`Получить доступ · ${price}`, () => {
       if (buy.disabled) return;
       buy.disabled = true;
       buy.textContent = "Открываем заказ…";
       notice.textContent = "Сначала состав и условия. Деньги пока не списываются.";
-      void request<{ order: PaymentOrder }>("/miniapp/api/orders/report", { vin: result.vin })
+      void request<{ order: PaymentOrder }>("/miniapp/api/orders/report", {
+        vin: result.vin,
+      })
         .then(({ order }) => {
           if (started === generation && panel.isConnected) navigate("orders", order.id);
         })
@@ -465,23 +491,18 @@ function premiumPanel(result: MiniAppVinResult): HTMLElement {
         .finally(() => {
           if (started === generation && panel.isConnected) {
             buy.disabled = false;
-            buy.textContent = `Заказать отчёт · ${price}`;
+            buy.textContent = `Получить доступ · ${price}`;
           }
         });
     });
     actions.append(buy);
     notice.textContent =
-      `PDF вручную до ${VIN_REPORT_SLA_MS / 60_000} минут после оплаты. ` +
+      `Доступ к отчёту — в течение ${VIN_REPORT_SLA_MS / 60_000} минут после подтверждённой оплаты. ` +
       "Если получить отчёт невозможно — полный возврат. Условия — до оплаты.";
   } else {
-    notice.textContent = "Заказ нового отчёта пока недоступен.";
+    notice.textContent = "Покупка доступа пока недоступна.";
   }
-  panel.append(
-    actions,
-    notice,
-    button("Посмотреть образец PDF", () => navigate("report-example"), "button button-quiet"),
-    element("p", "footnote", preview.limitations),
-  );
+  panel.append(actions, notice);
   return panel;
 }
 
@@ -505,6 +526,23 @@ function showExample(): void {
   main.append(
     heading,
     viewer,
+    button("Перейти к проверке своего VIN", () => navigate("vin")),
+  );
+}
+
+function showCarfaxExample(): void {
+  const main = shell();
+  main.append(
+    element("p", "badge", "ПУБЛИЧНЫЙ ОБРАЗЕЦ · НЕ ВАШ ОТЧЁТ"),
+    element("h1", "", "CARFAX · образец PDF"),
+    element("p", "footnote", CARFAX_REPORT_EXAMPLE_PDF.caption),
+    samplePdfLink("carfax"),
+    element(
+      "p",
+      "footnote",
+      "Внешний публичный образец, не отчёт по вашему VIN. PDF откроется на сайте источника только после нажатия.",
+    ),
+    sourceLink(CARFAX_REPORT_EXAMPLE_PDF.sourceUrl, "Страница источника образца"),
     button("Перейти к проверке своего VIN", () => navigate("vin")),
   );
 }
@@ -1498,7 +1536,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         });
         results.append(getPhotos);
       }
-      if (korean) results.append(premiumPanel(result));
+      const report = premiumPanel(result);
+      if (report) results.append(report);
       if (!korean) {
         classifiedVin = vin;
         const url = vinGoogleSearchUrl(vin);
@@ -1716,7 +1755,7 @@ async function showOrders(): Promise<void> {
       element(
         "p",
         "eyebrow",
-        config?.mode === "vin" ? "Корейские PDF" : "Отчёты и отдельно согласованные услуги",
+        config?.mode === "vin" ? "Полные отчёты по VIN" : "Отчёты и отдельно согласованные услуги",
       ),
       element("h1", "", "Мои заказы"),
       element(
@@ -1736,7 +1775,7 @@ async function showOrders(): Promise<void> {
           "p",
           "",
           config?.mode === "vin"
-            ? "Проверьте VIN. Если корейская запись найдена, в результате появится предложение отчёта."
+            ? "Проверьте VIN бесплатно. Если полный отчёт найден, можно посмотреть образец PDF и получить доступ."
             : "Здесь появится отдельно согласованная услуга с реальным исполнителем, составом, ценой и условиями. Счета без такого заказа не создаются.",
         ),
       );
@@ -1779,7 +1818,11 @@ async function showOrders(): Promise<void> {
       if (order.product === "vin_report" && order.paymentStatus === "paid" && order.paidAt) {
         const deadline = new Date(Date.parse(order.paidAt) + VIN_REPORT_SLA_MS);
         panel.append(
-          element("p", "footnote", `Срок выдачи PDF: ${deadline.toLocaleString("ru-RU")}.`),
+          element(
+            "p",
+            "footnote",
+            `Срок предоставления доступа к PDF: ${deadline.toLocaleString("ru-RU")}.`,
+          ),
         );
       }
       if (
@@ -1967,6 +2010,7 @@ async function load(): Promise<void> {
   const id = params.get("car");
   currentView =
     view === "vin" ||
+    view === "carfax-example" ||
     view === "buy" ||
     view === "sell" ||
     view === "report-example" ||
@@ -1980,7 +2024,8 @@ async function load(): Promise<void> {
     config?.mode === "vin" &&
     currentView !== "orders" &&
     currentView !== "support" &&
-    currentView !== "report-example"
+    currentView !== "report-example" &&
+    currentView !== "carfax-example"
   ) {
     currentView = "vin";
     const url = new URL(window.location.href);
@@ -2001,6 +2046,10 @@ async function load(): Promise<void> {
   if (currentView === "orders") {
     if (config?.reportBotUrl) showDelegatedOrders();
     else await showOrders();
+    return;
+  }
+  if (currentView === "carfax-example") {
+    showCarfaxExample();
     return;
   }
   if (currentView === "vin") {

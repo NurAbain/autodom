@@ -5,7 +5,7 @@ import { z } from "zod";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { VIN_REPORT_FINIK_MINOR, VIN_REPORT_WEB_TERMS } from "./payment-text.js";
 import { type PaymentService, requirePaymentOrderId } from "./payments.js";
-import { hasKoreanVinRecord } from "./vin-text.js";
+import { confirmedVinReportKind } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
 
 const empty = z.object({}).strict();
@@ -136,14 +136,14 @@ export async function handleWebReportRequest(
       const result = await checkVin(vin, controller.signal);
       if (result.vin !== vin) throw new Error("VIN result mismatch");
       payments.rememberVinResult(userId, result, revision, "web");
-      const eligible = hasKoreanVinRecord(result);
+      const eligible = confirmedVinReportKind(result) !== null;
       if (!response.destroyed)
         json({
           vin,
           eligible,
           summary: eligible
-            ? "В подключённых корейских источниках найдена запись. Это не полный PDF и не гарантия состояния автомобиля."
-            : "Корейская запись не подтверждена: покупка PDF недоступна. Пустой результат или ошибка не доказывают отсутствие истории.",
+            ? "Полный отчёт найден. Посмотрите образец PDF и условия доступа."
+            : "Наличие полного отчёта не подтверждено: покупка недоступна. Пустой результат или ошибка не доказывают отсутствие истории.",
         });
     } finally {
       response.off("close", onClose);
