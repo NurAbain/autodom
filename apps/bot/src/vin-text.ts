@@ -107,6 +107,7 @@ export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
   encar: "Архив объявлений · Корея",
   nhtsa_vpic: "Характеристики · рынок США",
   autodev: "Характеристики · другие рынки",
+  vagvin_carfax: "Доступность CARFAX · VAGVIN",
 };
 
 export function confirmedEncarListings(result: VinCheckResult): EncarListing[] {
@@ -206,7 +207,9 @@ function vinSourceDescription(provider: VinProvider, result: VinCheckResult): st
             ? "Объявления не найдены. Это не означает отсутствие истории автомобиля."
             : provider === "nhtsa_vpic" || provider === "autodev"
               ? "Характеристики по VIN не установлены."
-              : "Экспортная запись с пробегом не найдена. Это не означает отсутствие повреждений.";
+              : provider === "vagvin_carfax"
+                ? "VAGVIN не подтвердил наличие записей CARFAX. Это не означает отсутствие истории автомобиля."
+                : "Экспортная запись с пробегом не найдена. Это не означает отсутствие повреждений.";
       break;
     case "available": {
       if (provider === "carhistory") {
@@ -256,6 +259,16 @@ function vinSourceDescription(provider: VinProvider, result: VinCheckResult): st
         if (record?.origin_country) lines.push(`Страна происхождения: ${record.origin_country}`);
         lines.push("Неуказанные характеристики неизвестны.");
         description = lines.join("\n");
+        break;
+      }
+      if (provider === "vagvin_carfax") {
+        const record = result.vagvin_carfax?.data;
+        description =
+          record?.vin === result.vin &&
+          Number.isSafeInteger(record.record_count) &&
+          record.record_count > 0
+            ? `VAGVIN сообщает о ${record.record_count} записях CARFAX.${record.vehicle ? `\nАвтомобиль по данным VAGVIN: ${record.vehicle}.` : ""}\nПроверена только доступность: это не сам отчёт и не сведения о ДТП.\nИсточник: https://vagvin.ru/home`
+            : "Доступность CARFAX не удалось подтвердить.";
         break;
       }
       const record = result.car365.data;

@@ -12,6 +12,7 @@ describe("VIN lookup source independence", () => {
       const result = await service.check(VIN);
       expect(result.carhistory).toMatchObject({ status: "disabled", checked_at: null });
       expect(result.car365).toMatchObject({ status: "disabled", checked_at: null, data: null });
+      expect(result).not.toHaveProperty("vagvin_carfax");
       await expect(service.check("not-a-vin")).rejects.toThrow(RangeError);
     } finally {
       await service.close();
@@ -275,6 +276,9 @@ describe("Korean-first VIN lookup", () => {
     const events: string[] = [];
     const directRequests: string[] = [];
     const korean = [new MockAgent(), new MockAgent()];
+    const carfax = new MockAgent();
+    carfax.disableNetConnect();
+    const carfaxRequests: string[] = [];
     const entry = `<form method="post" name="searchForm" action="initSearch.car">
       <select name="carnumSel"><option value="1">VIN</option></select>
       <input name="carbodynum"><input name="carnum"><input name="carnum2"><input name="realm">
@@ -361,20 +365,41 @@ describe("Korean-first VIN lookup", () => {
         });
       if (options.directDelay) response.delay(options.directDelay);
     }
+    const carfaxResponse = carfax
+      .get("https://vagvin.ru")
+      .intercept({ path: `/check_vin_car_aut?input=${VIN}`, method: "GET" })
+      .reply(() => {
+        carfaxRequests.push(VIN);
+        events.push("vagvin_carfax");
+        return {
+          statusCode: 200,
+          data: JSON.stringify({
+            VIN,
+            "📍 Записи в базе CARFAX": 47,
+            "✅ VIN определен как": "Hyundai Porter",
+          }),
+          responseOptions: { headers: { "content-type": "application/json" } },
+        };
+      });
+    if (options.directDelay) carfaxResponse.delay(options.directDelay);
     const lookup = new VinCheckService({
-      providers: ["carhistory", "car365", "nhtsa_vpic", "autodev"],
-      routes: [new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz")],
+      providers: ["carhistory", "car365", "nhtsa_vpic", "autodev", "vagvin_carfax"],
+      routes: [
+        new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz"),
+        new ProxyRoute("residential", "http://proxy.invalid:7000", "Basic dXNlcjpwYXNz"),
+      ],
       requestDelaySeconds: 0,
       autoDevApiKey: "not-a-production-test-key",
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-      dispatcherFactory: (_route, page) => {
+      dispatcherFactory: (route, page) => {
+        if (route.tier === "residential") return carfax;
         const mock = korean[page - 1];
         if (!mock) throw new Error("Unexpected Korean workflow");
         return mock;
       },
     });
     services.push(lookup);
-    return { lookup, directRequests, events };
+    return { lookup, directRequests, events, carfaxRequests };
   }
 
   it.each([
@@ -385,13 +410,15 @@ describe("Korean-first VIN lookup", () => {
   ] as const)(
     "does not contact either decoder for Korean outcomes %s / %s",
     async (carhistory, car365) => {
-      const { lookup, directRequests } = fixture(carhistory, car365);
+      const { lookup, directRequests, carfaxRequests } = fixture(carhistory, car365);
       const result = await lookup.check(VIN);
       expect(result.carhistory.status).toBe(carhistory);
       expect(result.car365.status).toBe(car365);
       expect(directRequests).toEqual([]);
       expect(result).not.toHaveProperty("nhtsa_vpic");
       expect(result).not.toHaveProperty("autodev");
+      expect(carfaxRequests).toEqual([]);
+      expect(result).not.toHaveProperty("vagvin_carfax");
     },
   );
 
@@ -442,18 +469,24 @@ describe("Korean-first VIN lookup", () => {
   );
 
   it("waits for both Korean misses before contacting both decoders", async () => {
-    const { lookup, events, directRequests } = fixture("not_found", "not_found", {
+    const { lookup, events, directRequests, carfaxRequests } = fixture("not_found", "not_found", {
       koreanDelay: 300,
     });
     const pending = lookup.check(VIN);
     await expect.poll(() => events.includes("car365")).toBe(true);
     expect(directRequests).toEqual([]);
+    expect(carfaxRequests).toEqual([]);
     const result = await pending;
     expect(result.carhistory.status).toBe("not_found");
     expect(result.car365.status).toBe("not_found");
     expect(directRequests.toSorted()).toEqual(["autodev", "nhtsa_vpic"]);
     expect(result.nhtsa_vpic).toMatchObject({ status: "available", data: { vin: VIN } });
     expect(result.autodev).toMatchObject({ status: "available", data: { vin: VIN } });
+    expect(carfaxRequests).toEqual([VIN]);
+    expect(result.vagvin_carfax).toMatchObject({
+      status: "available",
+      data: { vin: VIN, record_count: 47 },
+    });
   });
 
   it("does not give the decoder phase a fresh whole-lookup timeout", async () => {
@@ -468,12 +501,13 @@ describe("Korean-first VIN lookup", () => {
     expect(directRequests.toSorted()).toEqual(["autodev", "nhtsa_vpic"]);
     expect(result.nhtsa_vpic).toMatchObject({ status: "unavailable", data: null });
     expect(result.autodev).toMatchObject({ status: "unavailable", data: null });
+    expect(result.vagvin_carfax).toMatchObject({ status: "unavailable", data: null });
   });
 
   it.each(["caller", "close"] as const)(
     "does not start the decoder phase after %s cancellation in Korea",
     async (action) => {
-      const { lookup, events, directRequests } = fixture("not_found", "not_found", {
+      const { lookup, events, directRequests, carfaxRequests } = fixture("not_found", "not_found", {
         koreanDelay: 300,
       });
       const caller = new AbortController();
@@ -485,6 +519,7 @@ describe("Korean-first VIN lookup", () => {
       const [result] = await settled;
       expect(result?.status).toBe(action === "caller" ? "rejected" : "fulfilled");
       expect(directRequests).toEqual([]);
+      expect(carfaxRequests).toEqual([]);
     },
   );
 });
