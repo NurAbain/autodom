@@ -17,7 +17,7 @@ Usage: pnpm vin [serve|health] [--help]
   health    Probe the local /health endpoint with a five-second timeout
 
 serve requires AUTODOM_VIN_API_TOKEN (32+ non-space ASCII characters) and at least
-one explicit AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev) or
+one explicit AUTODOM_VIN_PROVIDERS (carhistory,car365,encar,nhtsa_vpic,autodev,vagvin_carfax) or
 AUTODOM_VIN_ARCHIVE_PROVIDERS (copart,bidcars,carway). Archive photos require an explicit
 action. Copart/Bid.Cars require existing proxies; Carway uses direct public HTTPS.
 Carway returns partial UAE archive cards with unconfirmed outcome, dates and bids,
@@ -26,10 +26,14 @@ Korean providers require both existing SMARTPROXY tiers. nhtsa_vpic uses the
 free public NHTSA API directly. autodev requires AUTODOM_AUTODEV_API_KEY and
 uses the direct Auto.dev VIN Decode API. Both decoders return technical data,
 not vehicle history. Auto.dev Free is capped at 1,000 calls/month; no paid upgrades.
+vagvin_carfax checks VAGVIN's public CARFAX record count, not the report or accident history.
+It requires the existing residential proxy, pins its first route, and never rotates or buys reports.
+Its queue admits at most 10 checks, runs one request at a time, and waits at least five seconds
+after each attempt. Rate limits pause the source; authorization/CAPTCHA blocks require review.
 encar discovers public advertisement IDs through Carcheck and confirms full VIN,
 metadata and retained photos from official Encar pages; no complete history or sale is implied.
-Configured Korean providers run first. Decoders run only after all return not_found,
-or directly if no Korean provider is configured. Korean hits/errors skip both decoders.
+Configured Korean providers run first. Decoders and vagvin_carfax run only after all return
+not_found, or directly if no Korean provider is configured. Korean hits/errors skip that phase.
 AUTODOM_VIN_API_HOST defaults to 127.0.0.1; AUTODOM_VIN_API_PORT to 8080.
 AUTODOM_VIN_API_MAX_IN_FLIGHT defaults to 10; AUTODOM_CRAWL_DELAY to 2 seconds.
 health needs only host/port. No database, Redis or Telegram configuration is used.
@@ -99,7 +103,11 @@ export async function main(
     const routes =
       archiveProviders.some((provider) => provider !== "carway") ||
       providers.some(
-        (provider) => provider === "carhistory" || provider === "car365" || provider === "encar",
+        (provider) =>
+          provider === "carhistory" ||
+          provider === "car365" ||
+          provider === "encar" ||
+          provider === "vagvin_carfax",
       )
         ? loadProxyRoutes(env)
         : [];

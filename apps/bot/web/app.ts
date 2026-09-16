@@ -1,5 +1,10 @@
 import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
-import { isEncarPhotoUrl, normalizeVin, vinGoogleSearchUrl } from "@autodom/core/vin";
+import {
+  isEncarPhotoUrl,
+  normalizeVin,
+  VIN_SOURCE_URLS,
+  vinGoogleSearchUrl,
+} from "@autodom/core/vin";
 import {
   groupVinArchiveLots,
   isVinArchivePhotoUrl,
@@ -28,6 +33,7 @@ import {
 } from "../src/payment-text.js";
 import {
   confirmedEncarListings,
+  confirmedVinReportKind,
   encarHistorySummary,
   encarListingFacts,
   hasKoreanVinRecord,
@@ -546,11 +552,9 @@ function samplePdfLink(reportKind: VinReportKind = "korea", vin?: string): HTMLA
   return link;
 }
 
-function premiumPanel(
-  result: Pick<MiniAppVinResult, "vin" | "reportSalesEnabled" | "reportPrice" | "reportKind">,
-): HTMLElement | null {
-  const reportKind = result.reportKind;
-  if (!reportKind) return null;
+function premiumPanel(result: MiniAppVinResult): HTMLElement | null {
+  const reportKind = confirmedVinReportKind(result);
+  if (!reportKind || reportKind !== result.reportKind) return null;
   const started = generation;
   const preview = reportKind === "carfax" ? CARFAX_REPORT_PREVIEW : KOREAN_REPORT_PREVIEW;
   const panel = element("section", "panel premium-panel");
@@ -560,7 +564,11 @@ function premiumPanel(
   const sample = samplePdfLink(reportKind, result.vin);
   sample.textContent = "Посмотреть образец PDF";
   panel.append(
-    element("h2", "", "Полный отчёт найден"),
+    element(
+      "h2",
+      "",
+      reportKind === "carfax" ? "CARFAX доступен по данным VAGVIN" : "Полный отчёт найден",
+    ),
     element("p", "footnote", preview.limitations),
     sample,
   );
@@ -1530,7 +1538,9 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               ? result.encar?.data?.partial
                 ? "Объявления найдены · частичный результат"
                 : "Подтверждённые объявления найдены"
-              : "Запись найдена",
+              : provider === "vagvin_carfax"
+                ? "Доступность по данным посредника"
+                : "Запись найдена",
           ),
         );
         if (provider === "car365" && observation.status === "available") {
@@ -1626,6 +1636,8 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         } else {
           section.append(element("p", "vin-observation", vinSourceText(provider, result)));
         }
+        if (provider === "vagvin_carfax")
+          section.append(sourceLink(VIN_SOURCE_URLS.vagvin_carfax, "Источник: VAGVIN"));
         results.append(section);
       }
       if (result.carhistory.status === "available")

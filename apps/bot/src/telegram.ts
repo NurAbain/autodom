@@ -7,6 +7,7 @@ import {
   ENCAR_HISTORY_MAX_PHOTOS,
   isEncarPhotoUrl,
   normalizeVin,
+  VIN_PROVIDERS,
   type VinCheckResult,
   type VinLookup,
 } from "@autodom/core/vin";
@@ -39,6 +40,7 @@ import { type Buttons, Conversation, packReplies, type Reply } from "./conversat
 import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import {
+  CARFAX_REPORT_FINIK_MINOR,
   PAYMENT_PRIVACY_NOTICE,
   paymentAmountText,
   paymentOrderStatus,
@@ -556,13 +558,10 @@ export function createTelegramBot(
       try {
         const checked = await options.checkVin(vin);
         if (checked.vin !== vin) throw new Error("VIN result does not match the request");
-        const statuses = [
-          checked.carhistory,
-          checked.car365,
-          checked.encar,
-          checked.nhtsa_vpic,
-          checked.autodev,
-        ].flatMap((source) => (source && source.status !== "disabled" ? [source.status] : []));
+        const statuses = VIN_PROVIDERS.flatMap((provider) => {
+          const source = checked[provider];
+          return source && source.status !== "disabled" ? [source.status] : [];
+        });
         outcome = statuses.includes("available")
           ? statuses.includes("unavailable")
             ? "partial"
@@ -575,17 +574,24 @@ export function createTelegramBot(
         if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
         reportKind = confirmedVinReportKind(checked);
         if (reportKind) {
-          const price = options.payments?.reportPrice ?? {
-            amount: VIN_REPORT_FINIK_MINOR,
-            currency: "KGS" as const,
-          };
+          const price =
+            reportKind === "carfax"
+              ? { amount: CARFAX_REPORT_FINIK_MINOR, currency: "KGS" as const }
+              : (options.payments?.reportPrice ?? {
+                  amount: VIN_REPORT_FINIK_MINOR,
+                  currency: "KGS" as const,
+                });
           purchase = reportBotUrl
             ? {
                 text: `Получить доступ · ${paymentAmountText(price)}`,
                 url: `${reportBotUrl}?start=vin_${vin}`,
                 style: "primary" as const,
               }
-            : options.payments?.reportSalesEnabled
+            : (
+                  reportKind === "carfax"
+                    ? options.payments?.carfaxReportSalesEnabled
+                    : options.payments?.reportSalesEnabled
+                )
               ? {
                   text: `Получить доступ · ${paymentAmountText(price)}`,
                   callback_data: `vin-report-buy:${vin}`,
@@ -637,7 +643,9 @@ export function createTelegramBot(
       const sent = await bot.api.sendMessage(
         chatId,
         [
-          "Полный отчёт найден. Бесплатные данные — выше.",
+          reportKind === "carfax"
+            ? "CARFAX доступен по данным посредника VAGVIN. Сам отчёт ещё не получен."
+            : "Полный отчёт найден. Бесплатные данные — выше.",
           ...(reportKind === "korea"
             ? [
                 [

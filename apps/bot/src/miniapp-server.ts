@@ -39,7 +39,7 @@ import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
-import { VIN_REPORT_FINIK_MINOR } from "./payment-text.js";
+import { CARFAX_REPORT_FINIK_MINOR, VIN_REPORT_FINIK_MINOR } from "./payment-text.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { handlePaymentRequest } from "./payments-http.js";
 import { confirmedVinReportKind, VIN_NOT_ENABLED } from "./vin-text.js";
@@ -576,8 +576,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             if (result.vin !== vin) throw new Error("VIN result does not match the request");
             if (reportRevision !== undefined && "carhistory" in result)
               payments?.rememberVinResult(user.id, result, reportRevision);
+            const reportKind = "carhistory" in result ? confirmedVinReportKind(result) : null;
             if (!archive && "carhistory" in result) {
-              const reportKind = confirmedVinReportKind(result);
               if (evidenceKey && offers.get(evidenceKey) === evidence)
                 evidence.reportKind = reportKind;
               const statuses = VIN_PROVIDERS.map((provider) => result[provider]?.status);
@@ -618,11 +618,20 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
                   ? result
                   : {
                       ...result,
-                      reportSalesEnabled: payments?.reportSalesEnabled ?? false,
+                      reportSalesEnabled:
+                        reportKind === "carfax"
+                          ? (payments?.carfaxReportSalesEnabled ?? false)
+                          : reportKind === "korea" && (payments?.reportSalesEnabled ?? false),
                       reportPrice:
-                        payments?.reportPrice ??
-                        (reportBotUrl ? { amount: VIN_REPORT_FINIK_MINOR, currency: "KGS" } : null),
-                      reportKind: "carhistory" in result ? confirmedVinReportKind(result) : null,
+                        reportKind === "carfax"
+                          ? { amount: CARFAX_REPORT_FINIK_MINOR, currency: "KGS" }
+                          : reportKind === "korea"
+                            ? (payments?.reportPrice ??
+                              (reportBotUrl
+                                ? { amount: VIN_REPORT_FINIK_MINOR, currency: "KGS" }
+                                : null))
+                            : null,
+                      reportKind,
                     },
               );
           } catch {

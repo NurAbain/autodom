@@ -11,6 +11,7 @@ import { checkCar365 } from "./car365.js";
 import { checkCarHistory } from "./carhistory.js";
 import { checkEncarHistory } from "./encar-history.js";
 import { checkNhtsaVpic } from "./nhtsa-vpic.js";
+import { VagvinCarfaxLookup } from "./vagvin-carfax.js";
 import { VinTransport, type VinTransportOptions } from "./vin-session.js";
 
 export class VinCheckService {
@@ -20,8 +21,10 @@ export class VinCheckService {
     encar: false,
     nhtsa_vpic: false,
     autodev: false,
+    vagvin_carfax: false,
   };
   readonly #transport: VinTransport | undefined;
+  readonly #vagvinCarfax: VagvinCarfaxLookup | undefined;
   readonly #abort = new AbortController();
   readonly #signal: AbortSignal;
   readonly #timeoutMs: number;
@@ -51,7 +54,7 @@ export class VinCheckService {
     }
     this.#timeoutMs = options.timeoutMs ?? 40_000;
     if (
-      (this.#enabled.nhtsa_vpic || this.#enabled.autodev) &&
+      (this.#enabled.nhtsa_vpic || this.#enabled.autodev || this.#enabled.vagvin_carfax) &&
       (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 1)
     ) {
       throw new SourceError("Direct VIN request timeout must be a positive integer");
@@ -59,6 +62,9 @@ export class VinCheckService {
     this.#signal = options.signal
       ? AbortSignal.any([this.#abort.signal, options.signal])
       : this.#abort.signal;
+    if (this.#enabled.vagvin_carfax) {
+      this.#vagvinCarfax = new VagvinCarfaxLookup({ ...options, signal: this.#signal });
+    }
   }
 
   readonly check: VinLookup = async (value, signal): Promise<VinCheckResult> => {
@@ -67,7 +73,7 @@ export class VinCheckService {
     signal?.throwIfAborted();
     // Both phases share the existing lookup budget; fallback must not extend it.
     const fallbackSignal =
-      this.#enabled.nhtsa_vpic || this.#enabled.autodev
+      this.#enabled.nhtsa_vpic || this.#enabled.autodev || this.#enabled.vagvin_carfax
         ? AbortSignal.any([
             this.#signal,
             AbortSignal.timeout(this.#timeoutMs),
@@ -94,7 +100,7 @@ export class VinCheckService {
           result.carhistory.status = await transport.run(
             "carhistory",
             (session) => checkCarHistory(vin, session),
-            signal,
+            fallbackSignal ?? signal,
           );
         } catch {
           signal?.throwIfAborted();
@@ -108,7 +114,7 @@ export class VinCheckService {
           result.car365.data = await transport.run(
             "car365",
             (session) => checkCar365(vin, session),
-            signal,
+            fallbackSignal ?? signal,
           );
           result.car365.status = result.car365.data ? "available" : "not_found";
         } catch {
@@ -129,7 +135,7 @@ export class VinCheckService {
           observation.data = await transport.run(
             "encar",
             (session) => checkEncarHistory(vin, session),
-            signal,
+            fallbackSignal ?? signal,
           );
           observation.status = observation.data ? "available" : "not_found";
         } catch {
@@ -139,7 +145,7 @@ export class VinCheckService {
       })(),
     ]);
     signal?.throwIfAborted();
-    // A failed Korean lookup is not absence and must not trigger decoder egress.
+    // A failed Korean lookup is not absence and must not trigger fallback egress.
     if (
       !fallbackSignal ||
       this.#signal.aborted ||
@@ -192,12 +198,33 @@ export class VinCheckService {
           this.#active.delete(task);
         }
       })(),
+      (async () => {
+        if (!this.#vagvinCarfax) return;
+        const observation: NonNullable<VinCheckResult["vagvin_carfax"]> = {
+          status: "unavailable",
+          source_url: VIN_SOURCE_URLS.vagvin_carfax,
+          checked_at: Date.now() / 1000,
+          data: null,
+        };
+        result.vagvin_carfax = observation;
+        try {
+          observation.data = await this.#vagvinCarfax.check(vin, fallbackSignal);
+          observation.status = observation.data ? "available" : "not_found";
+        } catch {
+          signal?.throwIfAborted();
+          observation.status = "unavailable";
+        }
+      })(),
     ]);
     return result;
   };
 
   async close(): Promise<void> {
     this.#abort.abort();
-    await Promise.all([this.#transport?.close(), Promise.allSettled(this.#active)]);
+    await Promise.all([
+      this.#transport?.close(),
+      this.#vagvinCarfax?.close(),
+      Promise.allSettled(this.#active),
+    ]);
   }
 }

@@ -11,14 +11,28 @@ export function retryAfterSeconds(value: string | null, now = Date.now() / 1000)
   return Number.isFinite(instant) ? Math.max(60, Math.trunc(instant - now)) : 300;
 }
 
-export async function readBody(response: Response | ImpitResponse): Promise<string> {
+export async function readBody(
+  response: Response | ImpitResponse,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted) {
+    await response.body?.cancel().catch(() => undefined);
+    signal.throwIfAborted();
+  }
   const reader = response.body?.getReader();
   if (!reader) throw new SourceError("Source returned an empty response body");
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  const abort = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
   try {
     while (true) {
+      signal?.throwIfAborted();
       const chunk = await reader.read();
+      signal?.throwIfAborted();
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > MAX_RESPONSE_BYTES) throw new SourceError("Source response exceeds size limit");
@@ -26,6 +40,7 @@ export async function readBody(response: Response | ImpitResponse): Promise<stri
     }
     return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, bytes));
   } finally {
+    signal?.removeEventListener("abort", abort);
     await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }

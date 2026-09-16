@@ -64,6 +64,13 @@ const autoDevRecord = z
     ambiguous: z.boolean(),
   })
   .strict();
+const vagvinCarfaxRecord = z
+  .object({
+    vin: z.string(),
+    record_count: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    vehicle: z.string().min(1).max(512).nullable(),
+  })
+  .strict();
 const encarListing = z
   .object({
     id: z.string().regex(/^[1-9]\d{0,9}$/u),
@@ -121,6 +128,13 @@ const resultSchema = z
       .optional(),
     autodev: observation
       .extend({ source_url: z.literal(VIN_SOURCE_URLS.autodev), data: autoDevRecord.nullable() })
+      .strict()
+      .optional(),
+    vagvin_carfax: observation
+      .extend({
+        source_url: z.literal(VIN_SOURCE_URLS.vagvin_carfax),
+        data: vagvinCarfaxRecord.nullable(),
+      })
       .strict()
       .optional(),
   })

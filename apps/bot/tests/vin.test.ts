@@ -2,6 +2,7 @@ import type { EncarListing, VinCheckResult } from "@autodom/core/vin";
 import { load } from "cheerio";
 import { describe, expect, it } from "vitest";
 import {
+  confirmedVinReportKind,
   hasKoreanVinRecord,
   vinResultActions,
   vinResultNotice,
@@ -103,6 +104,7 @@ describe("VIN observations presented without buying or certifying a report", () 
       },
     };
     expect(hasKoreanVinRecord(decoded)).toBe(false);
+    expect(confirmedVinReportKind(decoded)).toBeNull();
     expect(vinVisibleProviders(decoded)).toEqual(["nhtsa_vpic"]);
     expect(vinResultNotice(decoded)).toBeNull();
     const actions = vinResultActions(decoded);
@@ -298,4 +300,73 @@ describe("VIN observations presented without buying or certifying a report", () 
       expect(presentation.text).not.toMatch(/vin-report-example|Полный отчёт|Заказ/);
     }
   });
+
+  it("offers CARFAX only from positive matching VAGVIN evidence, with Korean report precedence", () => {
+    const positive = carfaxResult();
+    expect(confirmedVinReportKind(positive)).toBe("carfax");
+    expect(confirmedVinReportKind({ ...positive, carhistory: result.carhistory })).toBe("korea");
+    expect(confirmedVinReportKind({ ...positive, vagvin_carfax: undefined })).toBeNull();
+    for (const status of ["not_found", "unavailable", "disabled"] as const) {
+      expect(
+        confirmedVinReportKind({
+          ...positive,
+          vagvin_carfax: { ...positive.vagvin_carfax!, status },
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("rejects malformed counts and mismatched or missing source evidence for CARFAX", () => {
+    const positive = carfaxResult();
+    const observation = positive.vagvin_carfax!;
+    for (const record_count of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN]) {
+      expect(
+        confirmedVinReportKind({
+          ...positive,
+          vagvin_carfax: { ...observation, data: { ...observation.data!, record_count } },
+        }),
+      ).toBeNull();
+    }
+    for (const invalid of [
+      { ...observation, data: null },
+      { ...observation, data: { ...observation.data!, vin: "WBAJE7C55JG891379" } },
+      { ...observation, source_url: "https://attacker.invalid/" },
+      { ...observation, checked_at: null },
+    ]) {
+      const rejected = { ...positive, vagvin_carfax: invalid };
+      expect(confirmedVinReportKind(rejected)).toBeNull();
+      expect(vinVisibleProviders(rejected)).not.toContain("vagvin_carfax");
+    }
+    expect(confirmedVinReportKind({ ...positive, vin: positive.vin.toLowerCase() })).toBeNull();
+  });
+
+  it("attributes the actual CARFAX count to VAGVIN without presenting a fetched report", () => {
+    const positive = carfaxResult();
+    const source = vinSourceText("vagvin_carfax", positive);
+    expect(source).toContain("VAGVIN");
+    expect(source).toContain("CARFAX");
+    expect(source).toContain("47");
+    expect(source).toContain("BMW 530i");
+    const rendered = load(vinResultPresentation(positive).text);
+    expect(rendered('a[href="https://vagvin.ru/home"]').text()).toContain("VAGVIN");
+    expect(rendered.root().text()).toContain("47");
+    const unsafe = carfaxResult();
+    unsafe.vagvin_carfax!.data!.vehicle = '<a href="https://attacker.invalid/">BMW</a>';
+    expect(load(vinResultPresentation(unsafe).text)('a[href*="attacker"]').length).toBe(0);
+  });
 });
+
+function carfaxResult(): VinCheckResult {
+  return {
+    vin: "WBAJA9C56KB389776",
+    checked_at: result.checked_at,
+    carhistory: { ...result.carhistory, status: "not_found" },
+    car365: { ...result.car365, status: "not_found", data: null },
+    vagvin_carfax: {
+      status: "available",
+      source_url: "https://vagvin.ru/home",
+      checked_at: result.checked_at + 0.125,
+      data: { vin: "WBAJA9C56KB389776", record_count: 47, vehicle: "BMW 530i" },
+    },
+  };
+}
