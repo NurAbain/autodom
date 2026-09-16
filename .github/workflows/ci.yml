@@ -116,6 +116,25 @@ jobs:
           docker run --rm --network none autodom-vin:ci --help
           docker run --rm --network none autodom-outreach:ci --help
 
+      - name: Exercise the outreach Compose runtime
+        timeout-minutes: 1
+        env:
+          AUTODOM_DATABASE_URL: ${{ env.AUTODOM_TEST_DATABASE_URL }}
+          AUTODOM_OUTREACH_ADMIN_USER: ci
+          AUTODOM_OUTREACH_ADMIN_PASSWORD: isolated-outreach-ci-password-not-production
+          AUTODOM_OUTREACH_ORIGIN: https://outreach.example.test
+          AUTODOM_OUTREACH_SESSION_DIR: /tmp/autodom-outreach-ci-sessions
+          AUTODOM_OUTREACH_IMAGE: autodom-outreach:ci
+          AUTODOM_NETWORK: autodom-outreach-ci
+          AUTODOM_PROXY_NETWORK: autodom-outreach-proxy-ci
+        run: |
+          mkdir -p "$AUTODOM_OUTREACH_SESSION_DIR"
+          docker network create --internal "$AUTODOM_NETWORK"
+          docker network create --internal "$AUTODOM_PROXY_NETWORK"
+          docker compose -f compose.outreach.yaml run --rm --no-deps -T outreach --help
+          docker network rm "$AUTODOM_NETWORK" "$AUTODOM_PROXY_NETWORK"
+          rmdir "$AUTODOM_OUTREACH_SESSION_DIR"
+
       - name: Migrate isolated PostgreSQL without Redis or a bot token
         timeout-minutes: 2
         # Health requires active runtime heartbeats; do not start pollers in CI.

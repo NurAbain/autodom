@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 120s
     read_only: true
-    tmpfs: [/tmp:size=16m,mode=1777]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 256m
