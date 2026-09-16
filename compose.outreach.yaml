@@ -23,7 +23,7 @@ services:
     environment:
       AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:?Set the existing Autodom catalog database URL}
       AUTODOM_OUTREACH_ADMIN_USER: ${AUTODOM_OUTREACH_ADMIN_USER:?Set an admin username}
-      AUTODOM_OUTREACH_ADMIN_PASSWORD: ${AUTODOM_OUTREACH_ADMIN_PASSWORD:?Set a distinct 32+ character admin password}
+      AUTODOM_OUTREACH_ADMIN_PASSWORD: ${AUTODOM_OUTREACH_ADMIN_PASSWORD:?Set an admin password of at least 8 characters}
       AUTODOM_OUTREACH_ORIGIN: ${AUTODOM_OUTREACH_ORIGIN:?Set the exact HTTPS admin origin}
       AUTODOM_OUTREACH_SEND_ENABLED: ${AUTODOM_OUTREACH_SEND_ENABLED:-false}
       AUTODOM_OUTREACH_MASHINA_SESSION_FILE: /run/outreach-sessions/mashina.json

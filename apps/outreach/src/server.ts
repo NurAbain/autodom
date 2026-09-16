@@ -69,10 +69,10 @@ export async function startOutreachServer(
   if (
     !options.username ||
     /[:\r\n]/.test(options.username) ||
-    options.password.length < 32 ||
+    options.password.length < 8 ||
     /[\r\n]/.test(options.password)
   )
-    throw new Error("Configure a nonempty admin username and a 32+ character admin password");
+    throw new Error("Configure a nonempty admin username and an 8+ character admin password");
   const origin = new URL(options.origin);
   if (
     !["http:", "https:"].includes(origin.protocol) ||

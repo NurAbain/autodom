@@ -20,7 +20,7 @@ pnpm outreach login-lalafo   Establish a private ISP-bound session; no messages
 Required for serve:
   AUTODOM_DATABASE_URL                 Existing Autodom catalog PostgreSQL
   AUTODOM_OUTREACH_ADMIN_USER          Admin HTTP Basic username
-  AUTODOM_OUTREACH_ADMIN_PASSWORD      Separate 32+ character password; never marketplace password
+  AUTODOM_OUTREACH_ADMIN_PASSWORD      8+ characters; prefer a unique generated password
   AUTODOM_OUTREACH_ORIGIN              Exact browser origin, HTTPS behind your reverse proxy
 Optional:
   AUTODOM_OUTREACH_HOST                127.0.0.1 by default; keep service private

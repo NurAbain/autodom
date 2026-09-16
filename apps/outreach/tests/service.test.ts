@@ -5,6 +5,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Store } from "../../../packages/storage/src/store.js";
 import { type Candidate, campaignSchema, DeliveryError, type Messenger } from "../src/contracts.js";
+import { type ServerOptions, startOutreachServer } from "../src/server.js";
 import { OutreachService } from "../src/service.js";
 
 let admin: pg.Pool;
@@ -95,6 +96,38 @@ async function releasePacing() {
 }
 
 describe("durable marketplace delivery boundary", () => {
+  it("enforces the eight-character admin password boundary and rejects incorrect credentials", async () => {
+    const options: ServerOptions = {
+      host: "127.0.0.1",
+      port: 0,
+      origin: "http://127.0.0.1",
+      username: "admin",
+      password: "testpass",
+      pool,
+      messengers: new Map(),
+      sendEnabled: false,
+    };
+    await expect(startOutreachServer({ ...options, password: "shortpw" })).rejects.toThrow();
+    const runtime = await startOutreachServer(options);
+    try {
+      const address = runtime.server.address();
+      if (!address || typeof address === "string") throw new Error("Expected a TCP listener");
+      const url = `http://127.0.0.1:${address.port}/api/campaigns`;
+      const authorized = await fetch(url, {
+        headers: { Authorization: `Basic ${Buffer.from("admin:testpass").toString("base64")}` },
+      });
+      expect(authorized.status).toBe(200);
+      expect(await authorized.json()).toEqual({ campaigns: [] });
+      const incorrect = await fetch(url, {
+        headers: { Authorization: `Basic ${Buffer.from("admin:wrongpwd").toString("base64")}` },
+      });
+      expect(incorrect.status).toBe(401);
+      expect((await fetch(url)).status).toBe(401);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("initializes a pre-created schema without catalog-write or database-create privileges", async () => {
     const role = `outreach_role_${randomUUID().replaceAll("-", "")}`;
     await pool.query(`CREATE ROLE "${role}"`);
