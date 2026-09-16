@@ -86,6 +86,52 @@ function paidOrder(): PaymentOrder {
   };
 }
 
+it.each([403, 500])(
+  "keeps notifying later PDF orders after a photo delivery error %s",
+  async (code) => {
+    const { service, api } = fixture();
+    const photo: PaymentOrder = {
+      ...paidOrder(),
+      id: "00000000-0000-4000-8000-000000000043",
+      product: "vin_photos",
+      reportKind: null,
+      provider: "finik",
+      currency: "KGS",
+      amount: 19900,
+      preCheckoutId: null,
+      fulfillmentStatus: "fulfilled",
+    };
+    const pdf = paidOrder();
+    const notified = new Set<string>();
+    const delivered: string[] = [];
+    vi.spyOn(service.ledger, "listPendingVinReports").mockResolvedValue([photo, pdf]);
+    vi.spyOn(service.ledger, "getOrder").mockImplementation(async (orderId) =>
+      orderId === photo.id ? photo : pdf,
+    );
+    vi.spyOn(service, "hasPhotoAccess").mockResolvedValue(true);
+    vi.spyOn(service.ledger, "markReportNotified").mockImplementation(async (orderId) => {
+      notified.add(orderId);
+    });
+    api.config.use(async (_previous, method, payload) => {
+      if (method === "sendMessage" && "chat_id" in payload && payload.chat_id === photo.userId)
+        return {
+          ok: false,
+          error_code: code,
+          description: "Photo recipient delivery failed",
+        } as never;
+      if ("text" in payload && typeof payload.text === "string") delivered.push(payload.text);
+      return { ok: true, result: { message_id: delivered.length } } as never;
+    });
+    const failure = await service.notifyPendingReports().catch((error: unknown) => error);
+    expect(delivered.some((text) => text.includes(`/deliver ${pdf.id}`))).toBe(true);
+    expect(notified.has(pdf.id)).toBe(true);
+    expect(delivered.some((text) => text.includes(photo.id))).toBe(code === 403);
+    expect(notified.has(photo.id)).toBe(code === 403);
+    if (code === 500) expect(failure).toMatchObject({ error_code: 500 });
+    else expect(failure).toBeUndefined();
+  },
+);
+
 it("requires exact opt-in and rejects misspelled sales configuration", () => {
   expect(loadVinReportStarsEnabled({})).toBe(false);
   expect(loadVinReportStarsEnabled({ AUTODOM_VIN_REPORT_STARS_ENABLED: "true" })).toBe(true);

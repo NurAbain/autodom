@@ -535,40 +535,54 @@ export class PaymentService {
 
   async notifyPendingReports(): Promise<void> {
     const api = this.requireTelegramApi();
+    let firstError: unknown;
     for (const order of await this.ledger.listPendingVinReports()) {
-      await this.store.withLock(`autodom:report:notify:${order.id}`, async () => {
-        const current = await this.ledger.getOrder(order.id);
-        if (!current || current.adminNotifiedAt || current.paymentStatus !== "paid") return;
-        if (current.product === "vin_photos") {
-          if (await this.hasPhotoAccess(current.userId, current.vin!)) {
-            await api.sendMessage(
-              current.userId,
-              `Оплата подтверждена. Все найденные фотографии по VIN ${current.vin} доступны в мини-приложении.\nОткрыть проверку: /vin ${current.vin}\nЗаказ ${current.id}\nПоддержка: /paysupport`,
-            );
-          } else {
-            await api.sendMessage(
-              VIN_REPORT_OWNER,
-              `Покупка фотографий требует проверки.\nЗаказ ${current.id}\nVIN ${current.vin}\n${paymentOrderStatus(current)}\n/refund ${current.id}`,
-            );
+      try {
+        await this.store.withLock(`autodom:report:notify:${order.id}`, async () => {
+          const current = await this.ledger.getOrder(order.id);
+          if (!current || current.adminNotifiedAt || current.paymentStatus !== "paid") return;
+          if (current.product === "vin_photos") {
+            if (await this.hasPhotoAccess(current.userId, current.vin!)) {
+              try {
+                await api.sendMessage(
+                  current.userId,
+                  `Оплата подтверждена. Все найденные фотографии по VIN ${current.vin} доступны в мини-приложении.\nОткрыть проверку: /vin ${current.vin}\nЗаказ ${current.id}\nПоддержка: /paysupport`,
+                );
+              } catch (error) {
+                if (!(error instanceof GrammyError && error.error_code === 403)) throw error;
+                await api.sendMessage(
+                  VIN_REPORT_OWNER,
+                  `Фото оплачены, но Telegram запретил уведомление покупателя ${current.userId}. Доступ к фотографиям сохранён.\nЗаказ ${current.id}\nVIN ${current.vin}\nСтатус: /report ${current.id}`,
+                );
+              }
+            } else {
+              await api.sendMessage(
+                VIN_REPORT_OWNER,
+                `Покупка фотографий требует проверки.\nЗаказ ${current.id}\nVIN ${current.vin}\n${paymentOrderStatus(current)}\n/refund ${current.id}`,
+              );
+            }
+            await this.ledger.markReportNotified(current.id);
+            return;
           }
+          const deadline = current.paidAt
+            ? new Date(Date.parse(current.paidAt) + VIN_REPORT_SLA_MS).toISOString()
+            : "требует проверки";
+          const canDeliver =
+            !current.needsReview && !current.refundPending && current.fulfillmentStatus === "ready";
+          const instructions = canDeliver
+            ? `Пришлите настоящий PDF документом с подписью:\n/deliver ${current.id} ${current.vin}\n${isWebVinReport(current) ? "Покупатель скачает PDF только на сайте." : "PDF будет отправлен покупателю в Telegram."}\n${current.provider === "finik" ? "/refund блокирует выдачу и создаёт заявку: выполните полный возврат в кабинете Finik, затем /refundconfirm ORDER_ID РЕФЕРЕНС_ВОЗВРАТА." : "Если выдать невозможно — полный возврат:"}\n/refund ${current.id}`
+            : `Выдача приостановлена. Сначала проверьте состояние:\n/report ${current.id}`;
+          await api.sendMessage(
+            VIN_REPORT_OWNER,
+            `Оплачен отчёт: ${current.title}\nЗаказ: ${current.id}\nVIN: ${current.vin}\nПокупатель: ${current.userId}\nСумма: ${paymentAmountText(current)}\nВыдать до: ${deadline}\n${paymentOrderStatus(current)}\n\n${instructions}\nСтатус: /report ${current.id}`,
+          );
           await this.ledger.markReportNotified(current.id);
-          return;
-        }
-        const deadline = current.paidAt
-          ? new Date(Date.parse(current.paidAt) + VIN_REPORT_SLA_MS).toISOString()
-          : "требует проверки";
-        const canDeliver =
-          !current.needsReview && !current.refundPending && current.fulfillmentStatus === "ready";
-        const instructions = canDeliver
-          ? `Пришлите настоящий PDF документом с подписью:\n/deliver ${current.id} ${current.vin}\n${isWebVinReport(current) ? "Покупатель скачает PDF только на сайте." : "PDF будет отправлен покупателю в Telegram."}\n${current.provider === "finik" ? "/refund блокирует выдачу и создаёт заявку: выполните полный возврат в кабинете Finik, затем /refundconfirm ORDER_ID РЕФЕРЕНС_ВОЗВРАТА." : "Если выдать невозможно — полный возврат:"}\n/refund ${current.id}`
-          : `Выдача приостановлена. Сначала проверьте состояние:\n/report ${current.id}`;
-        await api.sendMessage(
-          VIN_REPORT_OWNER,
-          `Оплачен отчёт: ${current.title}\nЗаказ: ${current.id}\nVIN: ${current.vin}\nПокупатель: ${current.userId}\nСумма: ${paymentAmountText(current)}\nВыдать до: ${deadline}\n${paymentOrderStatus(current)}\n\n${instructions}\nСтатус: /report ${current.id}`,
-        );
-        await this.ledger.markReportNotified(current.id);
-      });
+        });
+      } catch (error) {
+        firstError ??= error;
+      }
     }
+    if (firstError !== undefined) throw firstError;
   }
 
   async deliverReport(actorId: number, orderId: string, fileId: string): Promise<PaymentOrder> {
