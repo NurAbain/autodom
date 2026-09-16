@@ -82,6 +82,7 @@ jobs:
         env:
           AUTODOM_POSTGRES_PASSWORD: autodom_ci_password
           AUTODOM_REDIS_PASSWORD: autodom_ci_redis_password
+          AUTODOM_DATABASE_URL: ${{ env.AUTODOM_TEST_DATABASE_URL }}
           AUTODOM_OUTREACH_ADMIN_USER: ci
           AUTODOM_OUTREACH_ADMIN_PASSWORD: isolated-outreach-ci-password-not-production
           AUTODOM_OUTREACH_ORIGIN: https://outreach.example.test
