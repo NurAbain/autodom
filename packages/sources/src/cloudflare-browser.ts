@@ -92,7 +92,7 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return result;
 }
 
-function nativeClient(proxy: URL, jar: CookieJar, userAgent?: string): Impit {
+export function nativeClient(proxy: URL, jar: CookieJar, userAgent?: string): Impit {
   // Impit's declaration expects void, while tough-cookie resolves to the stored Cookie.
   const cookieJar: NonNullable<ImpitOptions["cookieJar"]> = {
     async setCookie(cookie, url) {

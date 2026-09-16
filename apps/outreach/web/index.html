@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Autodom · Рассылки продавцам</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Перейти к содержимому</a>
+  <header class="masthead">
+    <div class="shell header-row"><div><p class="eyebrow">AUTODOM / OUTREACH</p><h1>Рассылки продавцам</h1><p class="subtitle">Отдельный сервис · VIN-предложения · ручной запуск</p></div><span class="admin-label">Панель администратора</span></div>
+  </header>
+  <main id="main" class="shell">
+    <aside class="risk-notice" aria-label="Риск холодной рассылки"><strong>Это холодная рекламная рассылка.</strong> Продавцы не запрашивали предложение. Сообщения могут нарушать правила площадок и привести к жалобам или блокировке аккаунта. Медленная отправка не устраняет этот риск.</aside>
+    <section class="panel health-panel" aria-labelledby="health-heading">
+      <div class="section-heading"><h2 id="health-heading">Готовность отправки</h2><button id="refresh" type="button" class="secondary">Обновить</button></div>
+      <p id="global-status" class="status-line" role="status">Проверяем состояние сервиса…</p>
+      <ul id="source-status" class="source-list"></ul>
+      <p id="refresh-time" class="hint">Обновление каждые 5 секунд, пока вкладка открыта.</p>
+      <p id="sync-error" class="error" role="alert" hidden></p>
+    </section>
+    <p id="notice" class="notice" role="status" hidden></p>
+    <p id="operation-error" class="error page-error" role="alert" hidden></p>
+    <div class="workspace">
+      <section class="panel composer" aria-labelledby="compose-heading">
+        <div class="section-heading"><div><p class="eyebrow">01 / ПОДГОТОВКА</p><h2 id="compose-heading">Новая кампания</h2></div><span class="badge">Без отправки</span></div>
+        <form id="campaign-form">
+          <label for="name">Название кампании</label><input id="name" name="name" maxlength="100" required placeholder="Например: Бишкек · Toyota · сентябрь" autocomplete="off">
+          <fieldset id="audience-fields"><legend>Кому показать предложение</legend>
+            <div class="field-grid"><div><label for="source">Площадка</label><select id="source" name="source"><option value="mashina.kg">Mashina.kg</option><option value="lalafo.kg">Lalafo.kg</option></select></div><div><label for="query">Марка / модель</label><input id="query" name="query" maxlength="120" placeholder="Например: Toyota Camry"></div></div>
+            <label for="city">Город</label><input id="city" name="city" maxlength="80" placeholder="Любой город">
+            <div class="field-grid"><div><label for="year-min">Год от</label><input id="year-min" name="yearMin" type="number" min="1900" max="2100" step="1" inputmode="numeric" placeholder="Не задан"></div><div><label for="year-max">Год до</label><input id="year-max" name="yearMax" type="number" min="1900" max="2100" step="1" inputmode="numeric" placeholder="Не задан"></div></div>
+            <label for="currency">Валюта фильтра цены</label><select id="currency" name="currency"><option value="USD">USD — доллар США</option><option value="KGS">KGS — кыргызский сом</option></select>
+            <div class="field-grid"><div><label for="price-min">Цена от</label><input id="price-min" name="priceMin" type="number" min="0" max="10000000000" step="any" inputmode="decimal" placeholder="Не задана"></div><div><label for="price-max">Цена до</label><input id="price-max" name="priceMax" type="number" min="0" max="10000000000" step="any" inputmode="decimal" placeholder="Не задана"></div></div>
+            <label for="limit">Максимум записей получателей</label><input id="limit" name="limit" type="number" min="1" max="1000" step="1" value="100" required inputmode="numeric" aria-describedby="audience-help">
+            <p id="audience-help" class="hint">Выборка из локального каталога за последние 48 часов, не весь рынок. Несколько объявлений могут принадлежать одному продавцу. Фактических отправок может быть меньше из-за исключений и ошибок.</p>
+            <button id="preview-audience" type="button" class="secondary">Показать выборку</button>
+            <p id="audience-summary" class="hint" role="status">Сначала проверьте выборку. Пустую кампанию создать нельзя.</p>
+            <div id="audience-results" class="listing-list bounded-list" aria-label="Объявления в выборке"></div>
+          </fieldset>
+          <fieldset><legend>Что отправить</legend>
+            <label for="image">Фото · JPEG или PNG, до 5 МБ</label><input id="image" type="file" accept="image/jpeg,image/png" aria-describedby="image-status">
+            <div class="inline-actions"><p id="image-status" class="hint" role="status">Фото не выбрано. Можно отправить только текст.</p><button id="remove-image" class="text-button" type="button" hidden>Убрать фото</button></div>
+            <p class="hint">Lalafo отправляет текст и фото двумя отдельными сообщениями. При частичной доставке сервис остановится для ручной проверки, без повторной отправки.</p>
+            <div class="label-row"><label for="message">Текст сообщения</label><span id="message-count" class="hint">0 / 2000</span></div>
+            <textarea id="message" name="text" rows="7" maxlength="2000" required aria-describedby="message-help message-count" placeholder="Напишите предложение без неподтверждённых обещаний"></textarea>
+            <button id="suggest-text" type="button" class="text-button">Вставить нейтральный пример</button>
+            <p id="message-help" class="hint">Пример можно изменить. Не обещайте полную историю или отсутствие ДТП: покрытие VIN-источников различается.</p>
+            <details open><summary>Предпросмотр сообщения</summary><div class="message-preview"><img id="message-image" alt="Фото для сообщения" hidden><p id="message-preview-text" class="message-text muted">Здесь появится текст сообщения.</p></div></details>
+          </fieldset>
+          <fieldset><legend>Темп отправки</legend><div class="field-grid"><div><label for="interval">Интервал, секунд</label><input id="interval" name="intervalSeconds" type="number" min="60" max="86400" step="1" value="300" required inputmode="numeric"></div><div><label for="daily-limit">Попыток за сутки</label><input id="daily-limit" name="dailyLimit" type="number" min="1" max="500" step="1" value="20" required inputmode="numeric"></div></div><p class="hint">Интервал и суточный лимит считаются по попыткам контакта с продавцом, суммарно для площадки. День — по Бишкеку. Минимальный интервал — 60 секунд. Закрытие панели не останавливает запущенную кампанию.</p></fieldset>
+          <button id="create-campaign" type="submit" disabled>Создать черновик</button><p class="hint">Создание фиксирует выборку заново по фильтрам и ничего не отправляет. Перед отдельным запуском проверьте сохранённый состав справа.</p>
+        </form>
+      </section>
+      <div class="campaign-column">
+        <section class="panel" aria-labelledby="campaigns-heading"><div class="section-heading"><div><p class="eyebrow">02 / КОНТРОЛЬ</p><h2 id="campaigns-heading">Кампании</h2></div></div><div id="campaign-list" class="campaign-list"><p class="muted">Загрузка кампаний…</p></div></section>
+        <section class="panel" aria-labelledby="detail-heading"><h2 id="detail-heading">Детали кампании</h2><div id="campaign-detail"><p class="muted">Выберите кампанию, чтобы проверить состав, запустить или приостановить отправку.</p></div></section>
+      </div>
+    </div>
+    <footer>Неизвестный результат отправки требует ручной проверки и не повторяется автоматически. Исключение продавца действует только на последующие отправки.</footer>
+  </main>
+</body>
+</html>

@@ -1,0 +1,53 @@
+# Independent resource: existing Autodom catalog + its own autodom_outreach schema.
+# Never switch bot/worker/VIN compose files to this service. No live sends by default.
+# Mount a private directory owned by uid 10001; session JSON must be mode 0600.
+# Connect through HTTPS reverse proxy (or a private SSH tunnel), not public plain HTTP.
+services:
+  outreach:
+    build:
+      context: .
+      dockerfile: apps/outreach/Dockerfile
+    image: ${AUTODOM_OUTREACH_IMAGE:-autodom-outreach:local}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 120s
+    read_only: true
+    tmpfs: [/tmp:size=16m,mode=1777]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+    labels:
+      - io.autodom.application=autodom
+      - io.autodom.role=outreach
+    environment:
+      AUTODOM_DATABASE_URL: ${AUTODOM_DATABASE_URL:?Set the existing Autodom catalog database URL}
+      AUTODOM_OUTREACH_ADMIN_USER: ${AUTODOM_OUTREACH_ADMIN_USER:?Set an admin username}
+      AUTODOM_OUTREACH_ADMIN_PASSWORD: ${AUTODOM_OUTREACH_ADMIN_PASSWORD:?Set a distinct 32+ character admin password}
+      AUTODOM_OUTREACH_ORIGIN: ${AUTODOM_OUTREACH_ORIGIN:?Set the exact HTTPS admin origin}
+      AUTODOM_OUTREACH_SEND_ENABLED: ${AUTODOM_OUTREACH_SEND_ENABLED:-false}
+      AUTODOM_OUTREACH_MASHINA_SESSION_FILE: /run/outreach-sessions/mashina.json
+      AUTODOM_OUTREACH_LALAFO_SESSION_FILE: /run/outreach-sessions/lalafo.json
+    volumes:
+      - type: bind
+        source: ${AUTODOM_OUTREACH_SESSION_DIR:?Set a private session directory}
+        target: /run/outreach-sessions
+        read_only: true
+        bind:
+          create_host_path: false
+    expose: ["8092"]
+    ports: ["${AUTODOM_OUTREACH_PUBLISH:-127.0.0.1:18092}:8092"]
+    networks:
+      default: {}
+      proxy:
+        aliases: [autodom-outreach]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+networks:
+  default:
+    name: ${AUTODOM_NETWORK:-autodom}
+    external: true
+  proxy:
+    name: ${AUTODOM_PROXY_NETWORK:-coolify}
+    external: true

@@ -15,6 +15,14 @@
     "./vin": {
       "types": "./src/vin.ts",
       "default": "./src/vin.ts"
+    },
+    "./cloudflare-browser": {
+      "types": "./src/cloudflare-browser.ts",
+      "default": "./src/cloudflare-browser.ts"
+    },
+    "./riskbypass": {
+      "types": "./src/riskbypass.ts",
+      "default": "./src/riskbypass.ts"
     }
   },
   "dependencies": {
