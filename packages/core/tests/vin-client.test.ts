@@ -135,6 +135,18 @@ describe("remote VIN API consumer", () => {
       modified_at: null,
       re_registered: null,
       photo_urls: ["https://ci.encar.com/carpicture/carpicture02/pic3972/39720103_001.jpg"],
+      details: { odometer: { value: 21986, unit: "km" }, first_registration_date: "2022-09" },
+      reports: [
+        {
+          kind: "inspection",
+          status: "available",
+          source_url: "https://api.encar.com/legacy/usedcar/inspect/39720103",
+          partial: true,
+          checked_at: result.checked_at,
+          report_date: "2025-05-27",
+          facts: [{ section: "Кузов", label: "Передняя панель", value: "Замена" }],
+        },
+      ],
     };
     const history = {
       vin: VIN,
@@ -151,7 +163,18 @@ describe("remote VIN API consumer", () => {
     const valid = await upstream({ ...result, encar: observation });
     await expect(valid(VIN)).resolves.toMatchObject({
       car365: { status: "unavailable" },
-      encar: { status: "available", data: { partial: true } },
+      encar: {
+        status: "available",
+        data: {
+          partial: true,
+          listings: [
+            {
+              details: { odometer: { value: 21986, unit: "km" } },
+              reports: [{ facts: [{ label: "Передняя панель", value: "Замена" }] }],
+            },
+          ],
+        },
+      },
     });
 
     for (const data of [
@@ -170,6 +193,16 @@ describe("remote VIN API consumer", () => {
         ],
       },
       { ...history, discovery_url: "https://carcheck.by/auto/KMFXKN7BPXU258801" },
+      { ...history, partial: false },
+      ...[
+        {
+          ...listing.reports[0],
+          source_url: "https://api.encar.com/legacy/usedcar/inspect/39711062",
+        },
+        { ...listing.reports[0], kind: "diagnostic" },
+        { ...listing.reports[0], facts: [] },
+        { ...listing.reports[0], status: "not_found" },
+      ].map((report) => ({ ...history, listings: [{ ...listing, reports: [report] }] })),
     ]) {
       const invalid = await upstream({ ...result, encar: { ...observation, data } });
       await expect(invalid(VIN)).rejects.toThrow();

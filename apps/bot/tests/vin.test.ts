@@ -2,7 +2,9 @@ import type { EncarListing, VinCheckResult } from "@autodom/core/vin";
 import { load } from "cheerio";
 import { describe, expect, it } from "vitest";
 import {
+  confirmedVinReportKind,
   hasKoreanVinRecord,
+  vinListingDetailsFacts,
   vinResultActions,
   vinResultNotice,
   vinResultPresentation,
@@ -253,6 +255,96 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinVisibleProviders(history)).toEqual([]);
     expect(vinResultActions(history).photos).toEqual([]);
     expect(vinResultNotice(history)).toMatch(/неполная/);
+  });
+
+  it("escapes retrieved document facts and keeps incomplete free evidence separate from full-report availability", () => {
+    const markup = '<a href="https://attacker.invalid">source & value</a>';
+    const listing: EncarListing = {
+      id: "39720103",
+      vin: result.vin,
+      source_url: "https://attacker.invalid/ad",
+      model: null,
+      mileage_km: null,
+      advertisement_status: null,
+      created_at: null,
+      first_advertised_at: null,
+      modified_at: null,
+      re_registered: null,
+      photo_urls: [],
+      details: { primary_damage: markup },
+      reports: [
+        {
+          kind: "inspection",
+          status: "available",
+          source_url: "https://attacker.invalid/document",
+          partial: true,
+          checked_at: result.checked_at,
+          report_date: "2025-03-01",
+          facts: [{ section: markup, label: markup, value: markup }],
+        },
+      ],
+    };
+    const history: VinCheckResult = {
+      ...result,
+      carhistory: { ...result.carhistory, status: "not_found" },
+      car365: { ...result.car365, status: "not_found" },
+      encar: {
+        status: "available",
+        checked_at: result.checked_at,
+        source_url: listing.source_url,
+        data: { vin: result.vin, discovery_url: "", partial: false, listings: [listing] },
+      },
+    };
+    const rendered = load(vinResultPresentation(history).text);
+    expect(rendered("a, script")).toHaveLength(0);
+    expect(rendered.root().text()).toContain(markup);
+    expect(rendered.root().text()).toContain("2025-03-01");
+    expect(rendered.root().text()).not.toContain("https://attacker.invalid/document");
+    expect(vinResultNotice(history)).not.toBeNull();
+    expect(confirmedVinReportKind(history)).toBeNull();
+    listing.reports = [
+      {
+        ...listing.reports![0]!,
+        status: "unavailable",
+        report_date: null,
+        facts: [],
+      },
+    ];
+    const unavailable = vinResultPresentation(history).text;
+    expect(unavailable).not.toContain("2025-03-01");
+    expect(unavailable).toContain("Документ недоступен");
+    expect(unavailable).toContain("Основное повреждение");
+    expect(confirmedVinReportKind(history)).toBeNull();
+  });
+
+  it("preserves recorded units, explicit false and zero without inventing omitted facts", () => {
+    expect(vinListingDetailsFacts()).toEqual([]);
+    expect(vinListingDetailsFacts({})).toEqual([]);
+    const recorded = Object.fromEntries(
+      vinListingDetailsFacts({
+        odometer: { value: 100, unit: "mi", status: "Not Actual" },
+        keys_present: false,
+        asking_price: { amount_minor: 0, currency: "USD" },
+      }),
+    );
+    expect(recorded["Записанный пробег (не текущий)"]).toContain("100 миль");
+    expect(recorded["Записанный пробег (не текущий)"]).toContain("160,9 км");
+    expect(recorded["Записанный пробег (не текущий)"]).toContain("Not Actual");
+    expect(recorded["Ключи по записи"]).toBe("Нет");
+    expect(recorded["Цена предложения (не цена покупки)"]).toContain("0");
+    expect(recorded).not.toHaveProperty("Основное повреждение по записи");
+    const unknownUnit = vinListingDetailsFacts({
+      odometer: { value: 75414, unit: null, status: "ACTUAL" },
+    })[0]![1];
+    expect(unknownUnit).toContain("ACTUAL");
+    expect(unknownUnit).not.toMatch(/км|миль|≈/);
+    expect(unknownUnit).toContain("единицы не указаны");
+    const won = vinListingDetailsFacts({
+      asking_price: { amount_minor: 100, currency: "KRW" },
+    })[0]![1];
+    expect(won).toBe(
+      new Intl.NumberFormat("ru-RU", { style: "currency", currency: "KRW" }).format(100),
+    );
   });
 
   it("keeps provider markup as visible text rather than links or purchase buttons", () => {

@@ -7,6 +7,8 @@ import {
   normalizeVin,
   VIN_PROVIDERS,
   type VinCheckResult,
+  type VinListingDetails,
+  type VinListingReport,
   type VinProvider,
   vinGoogleSearchUrl,
 } from "@autodom/core/vin";
@@ -47,9 +49,109 @@ const archiveBid = new Intl.NumberFormat("ru-RU", {
   currency: "USD",
 });
 
-export function vinArchiveLotText(lot: VinArchiveLot, provider: VinArchiveProvider): string {
+const recordedDistance = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
+const askingPrices = {
+  USD: archiveBid,
+  KRW: new Intl.NumberFormat("ru-RU", { style: "currency", currency: "KRW" }),
+  AED: new Intl.NumberFormat("ru-RU", { style: "currency", currency: "AED" }),
+};
+
+/** Plain source text; Telegram escapes the complete message, the browser uses textContent. */
+export function vinListingDetailsFacts(details?: VinListingDetails): [string, string][] {
+  if (!details) return [];
+  const facts: [string, string][] = [];
+  for (const [key, label] of [
+    ["make", "Марка в записи"],
+    ["model", "Модель в записи"],
+    ["model_year", "Модельный год"],
+    ["first_registration_date", "Первая регистрация"],
+    ["primary_damage", "Основное повреждение по записи"],
+    ["secondary_damage", "Дополнительное повреждение по записи"],
+    ["loss_type", "Тип ущерба по записи"],
+    ["title", "Документ / статус права по записи"],
+    ["start_status", "Запуск / движение по записи"],
+    ["engine", "Двигатель"],
+    ["transmission", "Трансмиссия"],
+    ["fuel", "Топливо"],
+    ["drive", "Привод"],
+    ["body_style", "Кузов"],
+    ["color", "Цвет"],
+    ["location", "Место в записи"],
+    ["seller_type", "Тип продавца"],
+  ] as const) {
+    const value = details[key];
+    if (value !== undefined && value !== "") facts.push([label, String(value)]);
+  }
+  if (details.odometer) {
+    const { value, unit, status } = details.odometer;
+    facts.push([
+      "Записанный пробег (не текущий)",
+      `${value.toLocaleString("ru-RU", { maximumFractionDigits: 20 })} ${unit === "mi" ? `миль (≈ ${recordedDistance.format(value * 1.609344)} км)` : unit === "km" ? "км" : "(единицы не указаны)"}${status ? ` · отметка источника: ${status}` : ""}`,
+    ]);
+  }
+  if (details.keys_present !== undefined)
+    facts.push(["Ключи по записи", details.keys_present ? "Есть" : "Нет"]);
+  if (details.asking_price)
+    facts.push([
+      "Цена предложения (не цена покупки)",
+      askingPrices[details.asking_price.currency].format(
+        details.asking_price.amount_minor / (details.asking_price.currency === "KRW" ? 1 : 100),
+      ),
+    ]);
+  return facts;
+}
+
+export const VIN_LISTING_REPORT_NAMES: Record<VinListingReport["kind"], string> = {
+  inspection: "Технический осмотр",
+  diagnostic: "Диагностика",
+  insurance: "Страховые сведения",
+};
+
+export const VIN_LISTING_REPORT_NOTICE =
+  "Сведения из документа источника, не текущая диагностика и не полная история автомобиля. Не подтверждают наличие платного полного отчёта. Неуказанные сведения неизвестны.";
+
+export function vinListingReportText(report: VinListingReport): string {
+  const lines = [
+    VIN_LISTING_REPORT_NAMES[report.kind],
+    ...(report.report_date ? [`Дата документа: ${report.report_date}`] : []),
+    `Документ проверен: ${vinArchiveTime(report.checked_at)}`,
+  ];
+  if (report.status === "unavailable") {
+    lines.push("Документ недоступен; сведения неизвестны.");
+  } else if (report.status === "not_found") {
+    lines.push("Документ не найден. Это не подтверждает отсутствие ДТП или неисправностей.");
+  } else {
+    let section: string | undefined;
+    for (const fact of report.facts) {
+      if (fact.section !== section) {
+        if (fact.section) lines.push(`\n${fact.section}`);
+        section = fact.section;
+      }
+      lines.push(`${fact.label}: ${fact.value}`);
+    }
+  }
+  if (report.partial) lines.push("Проверка документа неполная; часть сведений неизвестна.");
+  return lines.join("\n");
+}
+
+function vinListingReportsText(reports?: readonly VinListingReport[]): string[] {
+  return reports?.length ? [VIN_LISTING_REPORT_NOTICE, ...reports.map(vinListingReportText)] : [];
+}
+
+export function vinArchiveLotText(
+  lot: VinArchiveLot,
+  provider: VinArchiveProvider,
+  includeReports = true,
+): string {
+  const details = vinListingDetailsFacts(lot.details);
   return [
     provider === "carway" ? "Архивная запись ОАЭ." : "Архивная запись США.",
+    ...(details.length
+      ? [
+          "Сведения этой архивной записи; не текущая диагностика автомобиля.",
+          ...details.map(([label, value]) => `${label}: ${value}`),
+        ]
+      : []),
     ...(provider === "carway"
       ? [
           "Исход торгов, дата аукциона и финальная ставка не подтверждены.",
@@ -74,6 +176,7 @@ export function vinArchiveLotText(lot: VinArchiveLot, provider: VinArchiveProvid
       ? ["Полнота галереи не подтверждена; часть фотографий может быть недоступна."]
       : []),
     ...(!lot.photos.length ? ["Фотографии этого лота недоступны."] : []),
+    ...(includeReports ? vinListingReportsText(lot.reports) : []),
   ].join("\n");
 }
 
@@ -160,7 +263,11 @@ export function vinResultNotice(result: VinCheckResult): string | null {
   if (
     observations.some((observation) => observation.status === "unavailable") ||
     (result.encar?.status === "available" &&
-      (result.encar.data?.partial || !confirmedEncarListings(result).length))
+      (result.encar.data?.partial ||
+        confirmedEncarListings(result).some((listing) =>
+          listing.reports?.some((report) => report.partial),
+        ) ||
+        !confirmedEncarListings(result).length))
   ) {
     return "Проверка неполная: часть записей не удалось получить или подтвердить. Недоступные данные неизвестны; это не отсутствие истории.";
   }
@@ -180,7 +287,10 @@ export function encarHistorySummary(result: VinCheckResult): string {
   if (!listings.length) return "Объявления с подтверждённым VIN недоступны. История неизвестна.";
   return [
     `Найдены объявления Encar: ${listings.length}.`,
-    ...(result.encar?.data?.partial ? ["Архив неполный."] : []),
+    ...(result.encar?.data?.partial ||
+    listings.some((listing) => listing.reports?.some((report) => report.partial))
+      ? ["Архив неполный."]
+      : []),
     "Пробег, фото и даты относятся к объявлениям, не к текущему состоянию или подтверждённой продаже.",
   ].join("\n");
 }
@@ -188,10 +298,23 @@ export function encarHistorySummary(result: VinCheckResult): string {
 export function encarListingFacts(listing: EncarListing): [string, string][] {
   const facts: [string, string][] = [];
   if (listing.model) facts.push(["Модель в объявлении", listing.model]);
-  facts.push([
-    "Записанный пробег (не текущий)",
-    listing.mileage_km === null ? "Неизвестен" : `${listing.mileage_km.toLocaleString("ru-RU")} км`,
-  ]);
+  const odometer = listing.details?.odometer;
+  if (
+    !odometer ||
+    (listing.mileage_km !== null &&
+      (odometer.unit !== "km" || odometer.value !== listing.mileage_km))
+  )
+    facts.push([
+      odometer ? "Пробег объявления (км; отдельная запись)" : "Записанный пробег (не текущий)",
+      listing.mileage_km === null
+        ? "Неизвестен"
+        : `${listing.mileage_km.toLocaleString("ru-RU")} км`,
+    ]);
+  facts.push(
+    ...vinListingDetailsFacts(listing.details).filter(
+      ([label, value]) => label !== "Модель в записи" || value !== listing.model,
+    ),
+  );
   facts.push([
     "Статус объявления",
     listing.advertisement_status === "SOLD"
@@ -260,6 +383,7 @@ function vinSourceDescription(provider: VinProvider, result: VinCheckResult): st
             [
               `Объявление №${listing.id}`,
               ...encarListingFacts(listing).map(([label, value]) => `${label}: ${value}`),
+              ...vinListingReportsText(listing.reports),
             ].join("\n"),
           ),
         ].join("\n\n");

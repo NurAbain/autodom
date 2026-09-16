@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { normalizeVin, type ProxyRoute, SourceError } from "@autodom/core";
+import { normalizeVin, type ProxyRoute, SourceError, type VinListingDetails } from "@autodom/core";
 import {
   isCopartPhotoUrl,
   parseVinArchivePhotoRequest,
@@ -104,6 +104,61 @@ function auctionAt(value: unknown): number | null {
     value <= Date.now()
     ? Math.floor(value / 1000)
     : null;
+}
+
+function listingDetails(source: JsonObject): VinListingDetails | undefined {
+  const text = (value: unknown): string | undefined => {
+    if (typeof value !== "string") return undefined;
+    const normalized = value.replace(/\s+/gu, " ").trim();
+    return normalized.length > 0 &&
+      normalized.length <= 512 &&
+      !/^(?:-+|unknown|n\/a)$/iu.test(normalized)
+      ? normalized
+      : undefined;
+  };
+  const details: VinListingDetails = {};
+  const fields = {
+    make: source.mkn,
+    model: source.lm,
+    primary_damage: source.dd,
+    secondary_damage: source.sdd,
+    title: source.td,
+    start_status: source.lcd,
+    engine: source.egn,
+    transmission: source.tmtp,
+    fuel: source.ft,
+    drive: source.drv,
+    body_style: source.bstl,
+    color: source.clr,
+    location: source.yn,
+  };
+  for (const key of Object.keys(fields) as (keyof typeof fields)[]) {
+    const normalized = text(fields[key]);
+    if (normalized !== undefined) details[key] = normalized;
+  }
+  if (
+    typeof source.lcy === "number" &&
+    Number.isSafeInteger(source.lcy) &&
+    source.lcy >= 1886 &&
+    source.lcy <= 9999
+  )
+    details.model_year = source.lcy;
+  // hk is the explicit keys label; driveStatus/pnr and report availability flags are not evidence.
+  if (source.hk === "YES" || source.hk === "NO") details.keys_present = source.hk === "YES";
+  // Some retained responses use qualification codes (e.g. A) here, not distance units.
+  // Never infer miles from the yard/currency or mistake ACTUAL for a unit.
+  const rawUnit = text(source.odometerUOM)?.toLowerCase();
+  const unit =
+    rawUnit === "mi" || rawUnit === "mile" || rawUnit === "miles"
+      ? "mi"
+      : rawUnit === "km" || rawUnit === "kilometer" || rawUnit === "kilometers"
+        ? "km"
+        : null;
+  if (typeof source.orr === "number" && Number.isSafeInteger(source.orr) && source.orr >= 0) {
+    const status = text(source.ord);
+    details.odometer = { value: source.orr, unit, ...(status ? { status } : {}) };
+  }
+  return Object.keys(details).length ? details : undefined;
 }
 
 export class VinArchiveService {
@@ -514,6 +569,7 @@ export class VinArchiveService {
         if (lotId(details) !== id) throw new SourceError("Copart returned a different lot");
         requireVin(entry, details, vin);
         if (!sold(details)) continue;
+        const evidence = listingDetails(details);
         const lot: VinArchiveLot = {
           auction: "copart",
           lot_id: id,
@@ -528,6 +584,7 @@ export class VinArchiveService {
           ],
           photos: [],
           photos_complete: false,
+          ...(evidence ? { details: evidence } : {}),
         };
         // Once confirmed, a sold event survives gallery failures and expired photographs.
         lots.push(lot);

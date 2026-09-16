@@ -57,6 +57,53 @@ export const ENCAR_HISTORY_MAX_LISTINGS = 5;
 export const ENCAR_HISTORY_MAX_PHOTOS = 32;
 export const ENCAR_DISCOVERY_ORIGIN = "https://carcheck.by";
 
+/** Source-recorded odometer reading, not a verified current distance. */
+export interface VinRecordedOdometer {
+  value: number;
+  /** Null retains a reading whose source does not establish its distance unit. */
+  unit: "km" | "mi" | null;
+  /** Original source qualification, such as Actual or Not Actual, when supplied. */
+  status?: string | undefined;
+}
+
+/** Only observed fields are present; omission never means zero or no damage. */
+export interface VinListingDetails {
+  make?: string | undefined;
+  model?: string | undefined;
+  model_year?: number | undefined;
+  first_registration_date?: string | undefined;
+  odometer?: VinRecordedOdometer | undefined;
+  primary_damage?: string | undefined;
+  secondary_damage?: string | undefined;
+  loss_type?: string | undefined;
+  title?: string | undefined;
+  start_status?: string | undefined;
+  keys_present?: boolean | undefined;
+  engine?: string | undefined;
+  transmission?: string | undefined;
+  fuel?: string | undefined;
+  drive?: string | undefined;
+  body_style?: string | undefined;
+  color?: string | undefined;
+  location?: string | undefined;
+  seller_type?: string | undefined;
+  /** KRW uses whole won; USD/AED use cents/fils, matching catalog money conventions. */
+  asking_price?: { amount_minor: number; currency: "USD" | "KRW" | "AED" } | undefined;
+}
+
+/** A retrieved source document, not a paid full-history availability signal. */
+export interface VinListingReport {
+  kind: "inspection" | "diagnostic" | "insurance";
+  status: "available" | "not_found" | "unavailable";
+  source_url: string;
+  /** Truncated or incomplete source evidence, distinct from no adverse findings. */
+  partial: boolean;
+  checked_at: number;
+  report_date: string | null;
+  /** Whitelisted vehicle facts only; no owner identities or contact information. */
+  facts: readonly { section: string; label: string; value: string }[];
+}
+
 /** An Encar advertisement confirmed by its full VIN, not a completed transaction. */
 export interface EncarListing {
   id: string;
@@ -71,6 +118,10 @@ export interface EncarListing {
   modified_at: string | null;
   re_registered: boolean | null;
   photo_urls: string[];
+  /** Optional for compatibility with older VIN servers. */
+  details?: VinListingDetails | undefined;
+  /** Omitted when no document lookup was attempted. */
+  reports?: readonly VinListingReport[] | undefined;
 }
 
 export interface EncarHistory {

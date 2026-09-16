@@ -64,6 +64,83 @@ const autoDevRecord = z
     ambiguous: z.boolean(),
   })
   .strict();
+const detailText = z.string().min(1).max(512);
+const listingDetails = z
+  .object({
+    make: detailText.optional(),
+    model: detailText.optional(),
+    model_year: z.number().int().min(1886).max(9999).optional(),
+    first_registration_date: z
+      .union([z.iso.date(), z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/u)])
+      .optional(),
+    odometer: z
+      .object({
+        value: z.number().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        unit: z.enum(["km", "mi"]).nullable(),
+        status: detailText.optional(),
+      })
+      .strict()
+      .optional(),
+    primary_damage: detailText.optional(),
+    secondary_damage: detailText.optional(),
+    loss_type: detailText.optional(),
+    title: detailText.optional(),
+    start_status: detailText.optional(),
+    keys_present: z.boolean().optional(),
+    engine: detailText.optional(),
+    transmission: detailText.optional(),
+    fuel: detailText.optional(),
+    drive: detailText.optional(),
+    body_style: detailText.optional(),
+    color: detailText.optional(),
+    location: detailText.optional(),
+    seller_type: detailText.optional(),
+    asking_price: z
+      .object({
+        amount_minor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        currency: z.enum(["USD", "KRW", "AED"]),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+const listingReport = z
+  .object({
+    kind: z.enum(["inspection", "diagnostic", "insurance"]),
+    status: z.enum(["available", "not_found", "unavailable"]),
+    source_url: z.string().url().max(2048),
+    partial: z.boolean(),
+    checked_at: instant.int(),
+    report_date: z.iso.date().nullable(),
+    facts: z
+      .array(
+        z
+          .object({
+            section: z.string().max(64),
+            label: z.string().min(1).max(96),
+            value: z.string().min(1).max(384),
+          })
+          .strict(),
+      )
+      .max(80),
+  })
+  .strict()
+  .superRefine((report, context) => {
+    if (
+      (report.status === "available") !== report.facts.length > 0 ||
+      (report.status === "unavailable" && !report.partial) ||
+      (report.status === "not_found" && (report.partial || report.report_date !== null))
+    )
+      context.addIssue({ code: "custom", message: "Invalid source report state" });
+  });
+const listingReports = z
+  .array(listingReport)
+  .max(3)
+  .refine(
+    (reports) => new Set(reports.map((report) => report.kind)).size === reports.length,
+    "Duplicate source report kind",
+  );
+
 const encarListing = z
   .object({
     id: z.string().regex(/^[1-9]\d{0,9}$/u),
@@ -77,13 +154,27 @@ const encarListing = z
     modified_at: z.iso.datetime({ local: true }).nullable(),
     re_registered: z.boolean().nullable(),
     photo_urls: z.array(z.string().max(256)).max(ENCAR_HISTORY_MAX_PHOTOS),
+    details: listingDetails.optional(),
+    reports: listingReports.optional(),
   })
   .strict()
   .superRefine((listing, context) => {
     if (
       listing.source_url !== encarListingUrl(listing.id) ||
       listing.photo_urls.some((url) => !isEncarPhotoUrl(url, listing.id)) ||
-      new Set(listing.photo_urls).size !== listing.photo_urls.length
+      new Set(listing.photo_urls).size !== listing.photo_urls.length ||
+      listing.reports?.some(
+        (report) =>
+          report.source_url !== listing.source_url &&
+          !(
+            report.kind === "inspection" &&
+            report.source_url === `https://api.encar.com/legacy/usedcar/inspect/${listing.id}`
+          ) &&
+          !(
+            report.kind === "diagnostic" &&
+            report.source_url === `https://api.encar.com/legacy/usedcar/diagnosis/${listing.id}`
+          ),
+      )
     )
       context.addIssue({ code: "custom", message: "Untrusted Encar advertisement links" });
   });
@@ -99,6 +190,8 @@ const encarRecord = z
     if (
       history.discovery_url !== encarHistoryDiscoveryUrl(history.vin) ||
       history.listings.some((listing) => listing.vin !== history.vin) ||
+      (history.listings.some((listing) => listing.reports?.some((report) => report.partial)) &&
+        !history.partial) ||
       new Set(history.listings.map((listing) => listing.id)).size !== history.listings.length
     )
       context.addIssue({ code: "custom", message: "Encar history identity mismatch" });
@@ -266,6 +359,8 @@ const archiveLotSchema = z
     events: z.array(archiveEventSchema).max(200),
     photos: z.array(z.string().max(2048)).max(200),
     photos_complete: z.boolean(),
+    details: listingDetails.optional(),
+    reports: listingReports.optional(),
   })
   .strict();
 const archiveResultSchema = z
@@ -322,7 +417,10 @@ function parseVinArchiveResult(value: unknown, vin: string): VinArchiveResult {
           (photo) => !isVinArchivePhotoUrl(photo, source.provider, lot.auction, lot.lot_id, vin),
         ) ||
         new Set(lot.photos).size !== lot.photos.length ||
-        (!lot.photos_complete && !source.partial)
+        (!lot.photos_complete && !source.partial) ||
+        lot.reports?.some(
+          (report) => report.source_url !== lot.source_url || (report.partial && !source.partial),
+        )
       )
         throw new Error("Invalid archive lot provenance or state");
       if (
@@ -356,7 +454,7 @@ export function createVinApiLookup(
   env: Readonly<Record<string, string | undefined>> = process.env,
   signal?: AbortSignal,
 ): VinLookup | undefined {
-  return createApiLookup("/v1/vin/check", parseVinResult, env, signal, 64 * 1024);
+  return createApiLookup("/v1/vin/check", parseVinResult, env, signal, 1024 * 1024);
 }
 
 export function createVinArchiveApiLookup(

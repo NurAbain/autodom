@@ -1,5 +1,10 @@
 import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
-import { isEncarPhotoUrl, normalizeVin, vinGoogleSearchUrl } from "@autodom/core/vin";
+import {
+  isEncarPhotoUrl,
+  normalizeVin,
+  type VinListingReport,
+  vinGoogleSearchUrl,
+} from "@autodom/core/vin";
 import {
   groupVinArchiveLots,
   isVinArchivePhotoUrl,
@@ -39,10 +44,12 @@ import {
   VIN_DISCLOSURE,
   VIN_GOOGLE_SEARCH_LABEL,
   VIN_GOOGLE_SEARCH_NOTICE,
+  VIN_LISTING_REPORT_NOTICE,
   VIN_PHOTOS_LABEL,
   VIN_SOURCE_NAMES,
   vinArchiveLotText,
   vinArchiveTime,
+  vinListingReportText,
   vinResultNotice,
   vinSourceText,
   vinVisibleProviders,
@@ -1158,6 +1165,26 @@ function gallery(
   return section;
 }
 
+function appendVinListingReports(host: HTMLElement, reports?: readonly VinListingReport[]): void {
+  if (!reports?.length) return;
+  const documents = element("details", "disclosure");
+  documents.append(
+    element(
+      "summary",
+      "",
+      `Осмотры и документы${reports.some((report) => report.partial) ? " · неполные данные" : ""}`,
+    ),
+    element("p", "footnote", VIN_LISTING_REPORT_NOTICE),
+  );
+  for (const report of reports) {
+    const document = element("section", "vin-source");
+    document.dataset.status = report.status;
+    document.append(element("p", "vin-observation", vinListingReportText(report)));
+    documents.append(document);
+  }
+  host.append(documents);
+}
+
 function vinPanel(car?: MiniAppCar): HTMLElement {
   const started = generation;
   const panel = element("section", "panel vin-panel");
@@ -1323,8 +1350,20 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
         const lotSection = element("section", "vin-source");
         lotSection.append(element("h3", "", title));
-        for (const { provider, lot } of group.sources) {
-          lotSection.append(element("p", "vin-observation", vinArchiveLotText(lot, provider)));
+        for (const [index, { provider, lot }] of group.sources.entries()) {
+          if (group.sources.length > 1)
+            lotSection.append(
+              element("h4", "", `Версия архивной записи ${index + 1}`),
+              element(
+                "p",
+                "footnote",
+                "Отдельная запись источника; сведения разных версий могут противоречить друг другу.",
+              ),
+            );
+          lotSection.append(
+            element("p", "vin-observation", vinArchiveLotText(lot, provider, false)),
+          );
+          appendVinListingReports(lotSection, lot.reports);
           if (
             lot.photos.some(
               (photo) => !isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
@@ -1590,6 +1629,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
               facts.append(fact);
             }
             advertisement.append(facts);
+            appendVinListingReports(advertisement, listing.reports);
             const photoUrls = [
               ...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id))),
             ];

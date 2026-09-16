@@ -97,6 +97,11 @@ it("accepts Bid.Cars archive evidence but rejects photos belonging to a differen
     ],
     photos: [photo],
     photos_complete: true,
+    details: {
+      odometer: { value: 164957, unit: "mi", status: "Not Actual" },
+      keys_present: false,
+      title: "Salvage",
+    },
   };
   const source = {
     provider: "bidcars",
@@ -128,7 +133,21 @@ it("accepts Bid.Cars archive evidence but rejects photos belonging to a differen
       AUTODOM_VIN_API_TOKEN: "archive-client-test-token-with-32-characters",
     })!;
     await expect(lookup(vin)).resolves.toMatchObject({
-      sources: [{ provider: "bidcars", lots: [{ auction: "iaai", photos: [photo] }] }],
+      sources: [
+        {
+          provider: "bidcars",
+          lots: [
+            {
+              auction: "iaai",
+              photos: [photo],
+              details: {
+                odometer: { value: 164957, unit: "mi", status: "Not Actual" },
+                keys_present: false,
+              },
+            },
+          ],
+        },
+      ],
     });
     for (const wrong of [
       photo.replace("/0-45397077/", "/0-45397078/"),
@@ -151,6 +170,23 @@ it("accepts Bid.Cars archive evidence but rejects photos belonging to a differen
         { ...lot, auction: "copart" },
         { ...lot, source_url: lot.source_url.replace(vin, "1FTFW1ED9NFB06107") },
         { ...lot, source_url: lot.source_url.replace("/0-45397077/", "/0-45397078/") },
+        { ...lot, details: { odometer: { value: -1, unit: "mi" } } },
+        { ...lot, details: { odometer: { value: 164957, unit: "miles" } } },
+        { ...lot, details: { keys_present: "No" } },
+        {
+          ...lot,
+          reports: [
+            {
+              kind: "inspection",
+              status: "available",
+              source_url: "https://attacker.invalid/report",
+              checked_at: result.checked_at,
+              report_date: null,
+              partial: false,
+              facts: [{ section: "", label: "VIN", value: vin }],
+            },
+          ],
+        },
         ...[
           { ...lot.events[0], auction_date: "2026-02-30" },
           { ...lot.events[0], auction_date: "2026-09-15" },

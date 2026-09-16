@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { ProxyRoute, SourceError, SourceRateLimited } from "@autodom/core";
 import { MockAgent, Response } from "undici";
@@ -129,6 +130,11 @@ describe("proxy-only VIN sessions", () => {
     "https://carcheck.by/vin/WBA51AG03NCK98884",
     "https://fem.encar.com/cars/detail/39720103?vin=WBA51AG03NCK98884",
     "https://attacker.invalid/auto/WBA51AG03NCK98884",
+    "https://api.encar.com/legacy/usedcar/inspect/39720103?token=private",
+    "https://api.encar.com/legacy/usedcar/inspect/039720103",
+    "https://api.encar.com/legacy/usedcar/record/39720103",
+    "https://api.encar.com/legacy/usedcar/inspect/39720103/extra",
+    "https://api.encar.com.attacker.invalid/legacy/usedcar/inspect/39720103",
   ])("blocks non-discovery Encar requests before network access: %s", async (target) => {
     const { transport, mocks } = setup();
     const url = new URL(target);
@@ -145,6 +151,42 @@ describe("proxy-only VIN sessions", () => {
       SourceError,
     );
     expect(requests).toBe(0);
+  });
+
+  it("retrieves only fixed Encar technical acts through the session without leaking listing cookies to the API", async () => {
+    const { transport, mocks } = setup();
+    const mock = mocks[0]!;
+    mock
+      .get("https://fem.encar.com")
+      .intercept({ path: "/cars/detail/39720103" })
+      .reply(200, "listing", {
+        headers: { "set-cookie": "listing=private; Path=/; Domain=.encar.com" },
+      });
+    mock
+      .get("https://api.encar.com")
+      .intercept({
+        path: "/legacy/usedcar/inspect/39720103",
+        headers: (headers) => !JSON.stringify(headers).toLowerCase().includes("cookie"),
+      })
+      .reply(200, "inspection");
+    mock
+      .get("https://api.encar.com")
+      .intercept({
+        path: "/legacy/usedcar/diagnosis/39720103",
+      })
+      .reply(404, "");
+    const result = await transport.run("encar", async (session) => {
+      await session.request("https://fem.encar.com/cars/detail/39720103");
+      return [
+        await session.request("https://api.encar.com/legacy/usedcar/inspect/39720103"),
+        await session.request("https://api.encar.com/legacy/usedcar/diagnosis/39720103"),
+      ];
+    });
+    expect(result).toEqual([
+      { status: 200, body: "inspection" },
+      { status: 404, body: "" },
+    ]);
+    mock.assertNoPendingInterceptors();
   });
 
   it("rejects unsafe paths and credential headers before calling the discovery hook", async () => {
@@ -210,11 +252,11 @@ describe("proxy-only VIN sessions", () => {
         }),
     );
     const { transport, mocks } = setup({ fetch });
-    mocks[0]
+    mocks[1]
       ?.get("https://fem.encar.com")
       .intercept({ path: "/cars/detail/39720103" })
       .reply(403, "");
-    mocks[1]
+    mocks[0]
       ?.get("https://fem.encar.com")
       .intercept({
         path: "/cars/detail/39720103",
@@ -229,7 +271,47 @@ describe("proxy-only VIN sessions", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("recovers an Encar candidate blocked on datacenter through the residential route", async () => {
+  it("retrieves acts when the datacenter can serve only the listing", async () => {
+    const { transport, mocks } = setup();
+    const vin = "WBA51AG03NCK98884";
+    const id = "39720103";
+    const inspection = readFileSync(
+      new URL("./fixtures/encar-inspection-39720103.json", import.meta.url),
+      "utf8",
+    );
+    for (const [index, mock] of mocks.entries()) {
+      mock
+        .get("https://fem.encar.com")
+        .intercept({ path: `/cars/detail/${id}` })
+        .reply(
+          200,
+          `<script>__PRELOADED_STATE__ = ${JSON.stringify({
+            cars: {
+              base: {
+                vehicleId: Number(id),
+                vin,
+                condition: { inspection: { formats: ["TABLE"] } },
+              },
+            },
+          })};</script>`,
+        );
+      mock
+        .get("https://api.encar.com")
+        .intercept({ path: `/legacy/usedcar/inspect/${id}` })
+        .reply(index === 0 ? 403 : 200, index === 0 ? "" : inspection);
+    }
+    const result = await transport.run("encar", (session) => checkEncarHistory(vin, session, [id]));
+    expect(result?.listings[0]?.reports).toMatchObject([
+      {
+        kind: "inspection",
+        status: "available",
+        report_date: "2025-05-23",
+        facts: expect.arrayContaining([expect.objectContaining({ value: "21982" })]),
+      },
+    ]);
+  });
+
+  it("recovers a blocked Encar candidate through the next configured route", async () => {
     const { transport, mocks } = setup();
     const vin = "WBA51AG03NCK98884";
     const id = "39720103";
@@ -241,11 +323,11 @@ describe("proxy-only VIN sessions", () => {
         .get("https://carcheck.by")
         .intercept({ path: `/auto/${vin}` })
         .reply(200, discovery);
-    mocks[0]
+    mocks[1]
       ?.get("https://fem.encar.com")
       .intercept({ path: `/cars/detail/${id}` })
       .reply(403, "");
-    mocks[1]
+    mocks[0]
       ?.get("https://fem.encar.com")
       .intercept({ path: `/cars/detail/${id}` })
       .reply(

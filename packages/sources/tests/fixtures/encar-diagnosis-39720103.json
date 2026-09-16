@@ -1,0 +1,54 @@
+{
+  "carId": 39720103,
+  "diagnosisDt": 1748271600000,
+  "items": [
+    {
+      "code": "006003",
+      "name": "FRONT_DOOR_LEFT",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006006",
+      "name": "BACK_DOOR_LEFT",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006009",
+      "name": "TRUNK_LID",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006018",
+      "name": "BACK_DOOR_RIGHT",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006023",
+      "name": "FRONT_DOOR_RIGHT",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006026",
+      "name": "HOOD",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006027",
+      "name": "FRONT_FENDER_RIGHT",
+      "result": null,
+      "resultCd": "NORMAL"
+    },
+    {
+      "code": "006033",
+      "name": "FRONT_FENDER_LEFT",
+      "result": null,
+      "resultCd": "NORMAL"
+    }
+  ]
+}

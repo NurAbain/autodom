@@ -103,6 +103,57 @@ describe("Copart retained SOLD archive", () => {
     });
   });
 
+  it("keeps explicit sold-lot details without treating ambiguous flags as facts", async () => {
+    const { service, mock } = setup();
+    search(mock);
+    const body = fixture("lot-sold");
+    body.data.lotDetails.pnr = true;
+    lot(mock, "52446376", body);
+    const result = await service.check(VIN);
+    expect(result.sources[0]?.lots[0]?.details).toEqual({
+      make: "MERCEDES-BENZ",
+      model: "GLE",
+      model_year: 2020,
+      odometer: { value: 75414, unit: null, status: "ACTUAL" },
+      primary_damage: "MINOR DENT/SCRATCHES",
+      start_status: "RUNS AND DRIVES",
+      keys_present: true,
+      engine: "2.0L 4",
+      transmission: "AUTOMATIC",
+      fuel: "GAS",
+      drive: "REAR WHEEL DRIVE",
+      body_style: "SPORT UTILITY VEHICLE",
+      color: "RED",
+      location: "MA - NORTH BOSTON",
+    });
+    // odometerUOM=A does not confirm a distance unit; carFaxReportAvailable is not a document.
+    expect(result.sources[0]?.lots[0]?.reports).toBeUndefined();
+    expect(result.sources[0]?.lots[0]?.events[0]?.status).toBe("sold");
+  });
+
+  it.each([
+    ["mi", 0, "NOT ACTUAL", { value: 0, unit: "mi", status: "NOT ACTUAL" }],
+    ["km", 17500, "ACTUAL", { value: 17500, unit: "km", status: "ACTUAL" }],
+    ["A", 75414, "ACTUAL", { value: 75414, unit: null, status: "ACTUAL" }],
+    [undefined, 0, "EXEMPT", { value: 0, unit: null, status: "EXEMPT" }],
+    ["mi", null, "NOT ACTUAL", undefined],
+  ])(
+    "preserves explicit %s odometer units and qualification without guessing",
+    async (unit, reading, status, expected) => {
+      const { service, mock } = setup();
+      search(mock);
+      const body = fixture("lot-sold");
+      Object.assign(body.data.lotDetails, { odometerUOM: unit, orr: reading, ord: status });
+      delete body.data.lotDetails.hk;
+      body.data.lotDetails.pnr = false;
+      lot(mock, "52446376", body);
+      const result = await service.check(VIN);
+      expect(result.sources[0]?.lots[0]?.details?.odometer).toEqual(expected);
+      expect(result.sources[0]?.lots[0]?.details?.keys_present).toBeUndefined();
+      expect(result.sources[0]?.lots[0]?.details?.start_status).toBe("RUNS AND DRIVES");
+    },
+  );
+
   it("does not present a currently active lot as an archive event", async () => {
     const { service, mock } = setup();
     const body = fixture("search-active");

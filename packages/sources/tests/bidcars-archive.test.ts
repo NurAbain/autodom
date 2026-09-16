@@ -171,6 +171,96 @@ describe("Bid.Cars photo downloads", () => {
 });
 
 describe("Bid.Cars exact VIN archive", () => {
+  it("retains the source miles, title and start evidence from the English BMW card", async () => {
+    // Captured 2026-09-16 from this canonical English URL (not the Russian card).
+    const vin = "WBAJA9C56KB389776";
+    const url = `https://bid.cars/en/lot/1-77230345/2019-BMW-5-Series-${vin}`;
+    const detail = readFileSync(
+      new URL("./fixtures/bidcars-archive/bmw-detail.html", import.meta.url),
+      "utf8",
+    );
+    const { service } = setup({
+      fetch: async (request) => {
+        if (request.pathname === `/app/search/en/vin-lot/${vin}/true`)
+          return new Response(JSON.stringify({ results: 1, url }));
+        if (request.pathname === "/app/search/archived/request")
+          return new Response(JSON.stringify({ ...rows(), data: [], next_page_url: null }));
+        if (request.href === url) return new Response(detail);
+        if (request.origin === "https://mercury.bid.cars")
+          return new Response(Buffer.from([255, 216, 255, 224]), { status: 206 });
+        throw new Error(`Unexpected request ${request.href}`);
+      },
+    });
+    const result = await service.check(vin, new AbortController().signal);
+    expect(result.lots[0]).toMatchObject({
+      lot_id: "77230345",
+      details: {
+        make: "BMW",
+        model: "5 Series",
+        model_year: 2019,
+        odometer: { value: 164957, unit: "mi" },
+        primary_damage: "Minor dent / scratches",
+        title: "Dis/dlr/exp clean w/salv hist (CA)",
+        keys_present: true,
+        start_status: "Run and Drive",
+        engine: "2.0L 4",
+        transmission: "Automatic",
+        drive: "Rear wheel drive",
+        color: "Black",
+      },
+    });
+    expect(result.lots[0]?.details).not.toHaveProperty("secondary_damage");
+    expect(result.lots[0]?.details).not.toHaveProperty("asking_price");
+    expect(result.lots[0]?.reports).toBeUndefined();
+  });
+
+  it("uses IAAI specifications instead of model decoding or adjacent vehicle metadata", async () => {
+    // Native IAAI specifications say Hybrid/400HP, while Bid.Cars' generic panel says Gasoline/430HP.
+    const metadata = readFileSync(
+      new URL("./fixtures/bidcars-archive/ford-metadata.html", import.meta.url),
+      "utf8",
+    );
+    const { service } = setup({
+      detail: html.replace(
+        "</body>",
+        `${metadata}<div class="option">Odometer<span class="right-info">1 km</span></div></body>`,
+      ),
+    });
+    const result = await service.check(VIN, new AbortController().signal);
+    expect(result.lots[0]?.details).toMatchObject({
+      odometer: { value: 100588, unit: "mi" },
+      loss_type: "Collision",
+      primary_damage: "Front end",
+      start_status: "Stationary",
+      keys_present: true,
+      fuel: "Hybrid",
+      drive: "4x4",
+      body_style: "Crew Cab",
+      engine: "3.5L V-6 DI, DOHC, VVT, turbo, 400HP",
+    });
+  });
+
+  it.each([
+    ["0 km", "Missing", { value: 0, unit: "km" }, false],
+    ["-", "-", undefined, undefined],
+    ["999999", "Unknown", undefined, undefined],
+  ])(
+    "does not turn %s odometer/key uncertainty into a zero or false fact",
+    async (odometer, key, expected, keys) => {
+      const metadata = `<div id="secondary-info"><div class="option">Odometer<span class="right-info">${odometer}</span></div><div class="option">Key<span class="right-info">${key}</span></div></div>`;
+      const { service } = setup({ detail: html.replace("</body>", `${metadata}</body>`) });
+      const result = await service.check(VIN, new AbortController().signal);
+      expect(result.lots[0]?.details?.odometer).toEqual(expected);
+      expect(result.lots[0]?.details?.keys_present).toBe(keys);
+      expect(result.lots[0]?.events).toContainEqual({
+        status: "sold",
+        auction_at: null,
+        auction_date: "2026-09-12",
+        final_bid_usd_minor: 1550000,
+      });
+    },
+  );
+
   it("recovers versioned photos through native fast search when both VIN lookups are ambiguous", async () => {
     let fastUrl = LOT.replace("/en/lot/", "/lot/");
     const { service, requests } = setup({

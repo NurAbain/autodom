@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { normalizeVin, type ProxyRoute, SourceError } from "@autodom/core";
+import { normalizeVin, type ProxyRoute, SourceError, type VinListingDetails } from "@autodom/core";
 import {
   isVinArchiveLotUrl,
   isVinArchivePhotoUrl,
@@ -11,7 +11,7 @@ import {
   type VinArchivePhoto,
   type VinArchivePhotoRequest,
 } from "@autodom/core/vin-archive";
-import { load } from "cheerio";
+import { type CheerioAPI, load } from "cheerio";
 import pLimit from "p-limit";
 import { type BrowserClient, CloudflareBrowser } from "./cloudflare-browser.js";
 import {
@@ -110,6 +110,78 @@ function declaration(text: string, name: string): string {
   if (!values.length || values.some((value) => value !== values[0]))
     throw new SourceError("Conflicting Bid.Cars archive declaration");
   return values[0]!;
+}
+
+function detailText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/gu, " ").trim();
+  return text.length > 0 && text.length <= 512 && !/^(?:-+|unknown|n\/a)$/iu.test(text)
+    ? text
+    : undefined;
+}
+
+function listingDetails($: CheerioAPI, identity?: JsonObject): VinListingDetails | undefined {
+  const labels = new Map<string, string | undefined>();
+  const native = new Map<string, string | undefined>();
+  $("#main-info .option, #secondary-info .option, #tertiary-info .option").each((_index, node) => {
+    const label = $(node)
+      .contents()
+      .filter((_i, child) => child.type === "text")
+      .text()
+      .replace(/\s+/gu, " ")
+      .trim()
+      .toLowerCase();
+    const value = detailText(
+      $(node)
+        .children(".right-info")
+        .text()
+        .replace(/\s*\|\s*$/u, ""),
+    );
+    const target = $(node).closest(".more-specs").length ? native : labels;
+    target.set(label, target.has(label) && target.get(label) !== value ? undefined : value);
+  });
+  const details: VinListingDetails = {};
+  const fields = {
+    make: detailText(identity?.manufacturer),
+    model: detailText(identity?.model),
+    primary_damage: labels.get("primary damage"),
+    secondary_damage: labels.get("secondary damage"),
+    loss_type: labels.get("loss"),
+    title: labels.get("sale document"),
+    start_status: labels.get("start code"),
+    // Native auction specifications take precedence over Bid.Cars' generic model decoding.
+    engine: native.get("engine") ?? labels.get("engine"),
+    transmission: native.get("transmission") ?? labels.get("transmission"),
+    fuel: native.get("fuel type") ?? labels.get("fuel type"),
+    drive: native.get("drive line type") ?? native.get("drive") ?? labels.get("drive type"),
+    body_style: native.get("body style"),
+    color: native.get("exterior") ?? labels.get("exterior color"),
+    location: detailText(
+      typeof identity?.description === "string"
+        ? /Location: ([^|]+) \| Odometer:/u.exec(identity.description)?.[1]
+        : undefined,
+    ),
+  };
+  for (const key of Object.keys(fields) as (keyof typeof fields)[]) {
+    const value = fields[key];
+    if (value !== undefined) details[key] = value;
+  }
+  const year = identity?.vehicleModelDate;
+  if (typeof year === "string" && /^\d{4}$/u.test(year) && Number(year) >= 1886)
+    details.model_year = Number(year);
+  const key = labels.get("key")?.toLowerCase();
+  if (key === "present" || key === "missing" || key === "not present")
+    details.keys_present = key === "present";
+  // Preserve the first, source-unit reading; the parenthesized distance is a conversion.
+  const reading = /^(\d+|\d{1,3}(?:[ ,]\d{3})+)\s+(mi|km)(?:\s+\([\d ,]+\s+(?:mi|km)\))?$/u.exec(
+    labels.get("odometer") ?? "",
+  );
+  if (reading) {
+    const value = Number(reading[1]!.replace(/[ ,]/gu, ""));
+    if (Number.isSafeInteger(value) && value >= 0)
+      details.odometer = { value, unit: reading[2] as "mi" | "km" };
+  }
+  return Object.keys(details).length ? details : undefined;
 }
 
 function parseDetail(text: string, candidate: Candidate, vin: string): Detail {
@@ -358,6 +430,7 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail {
     if (!found) complete = false;
   }
   if (photos.size > MAX_IMAGES) complete = false;
+  const details = listingDetails($, identity);
   return {
     lot: {
       auction: candidate.auction,
@@ -366,6 +439,7 @@ function parseDetail(text: string, candidate: Candidate, vin: string): Detail {
       events: unique,
       photos: [...photos].slice(0, MAX_IMAGES),
       photos_complete: complete,
+      ...(details ? { details } : {}),
     },
     partial,
     related: [...related],

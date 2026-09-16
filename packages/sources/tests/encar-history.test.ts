@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { ENCAR_HISTORY_MAX_PHOTOS, SourceError } from "@autodom/core";
 import { describe, expect, it } from "vitest";
 import { checkEncarHistory } from "../src/encar-history.js";
@@ -8,6 +9,14 @@ const OTHER_VIN = "KMHEC41MAAA015218";
 const DISCOVERY = `https://carcheck.by/auto/${VIN}`;
 const FIRST = "39720103";
 const SECOND = "39711062";
+const INSPECTION_URL = `https://api.encar.com/legacy/usedcar/inspect/${FIRST}`;
+const DIAGNOSIS_URL = `https://api.encar.com/legacy/usedcar/diagnosis/${FIRST}`;
+const INSPECTION = JSON.parse(
+  readFileSync(new URL("./fixtures/encar-inspection-39720103.json", import.meta.url), "utf8"),
+);
+const DIAGNOSIS = JSON.parse(
+  readFileSync(new URL("./fixtures/encar-diagnosis-39720103.json", import.meta.url), "utf8"),
+);
 
 type Reply = { body: string; status: number } | Error;
 
@@ -25,7 +34,7 @@ function sessionWith(
       async request(url) {
         requested.push(url);
         const id = url.match(/^https:\/\/fem\.encar\.com\/cars\/detail\/([1-9]\d*)$/u)?.[1];
-        const response = url === DISCOVERY ? discovery : id ? cards[id] : undefined;
+        const response = url === DISCOVERY ? discovery : id ? cards[id] : cards[url];
         if (response === undefined) throw new SourceError("Unexpected request");
         if (response instanceof Error) throw response;
         return typeof response === "string" ? { body: response, status: 200 } : response;
@@ -101,6 +110,7 @@ describe("VIN-confirmed Encar advertisement history", () => {
         modified_at: "2025-05-31T19:21:55",
         re_registered: false,
         photo_urls: [`https://ci.encar.com/carpicture/carpicture02/pic3972/${FIRST}_001.jpg`],
+        details: { make: "BMW", model: "5-Series", odometer: { value: 21986, unit: "km" } },
       },
     ]);
     expect(result?.partial).toBe(true);
@@ -396,5 +406,183 @@ describe("VIN-confirmed Encar advertisement history", () => {
       created_at: null,
     });
     expect(result?.partial).toBe(false);
+  });
+
+  it("extracts real listing units and registration month without retaining contact details or inventing damage", async () => {
+    const { session } = sessionWith(discovery(), {
+      [FIRST]: html(
+        base(FIRST, {
+          category: {
+            manufacturerEnglishName: "BMW",
+            modelGroupEnglishName: "5-Series",
+            gradeEnglishName: "530e M Sport",
+            formYear: "2022",
+            yearMonth: "202209",
+          },
+          spec: {
+            mileage: 0,
+            displacement: 1998,
+            transmissionName: "오토",
+            fuelName: "가솔린+전기",
+            colorName: "은회색",
+            bodyName: "중형차",
+          },
+          advertisement: {
+            status: "SOLD",
+            price: 9999,
+            advertisementType: "NORMAL",
+            leaseRentInfo: null,
+          },
+          contact: {
+            userType: "DEALER",
+            address: "경기 private street",
+            no: "private phone",
+            userId: "private user",
+          },
+        }),
+      ),
+    });
+    const result = await checkEncarHistory(VIN, session);
+    expect(result?.listings[0]?.details).toEqual({
+      make: "BMW",
+      model: "5-Series 530e M Sport",
+      model_year: 2022,
+      first_registration_date: "2022-09",
+      odometer: { value: 0, unit: "km" },
+      engine: "1998 cc",
+      transmission: "오토",
+      fuel: "가솔린+전기",
+      color: "은회색",
+      body_style: "중형차",
+      location: "경기",
+      seller_type: "DEALER",
+      asking_price: { amount_minor: 99990000, currency: "KRW" },
+    });
+    expect(result?.listings[0]?.reports).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("private");
+  });
+
+  it("does not turn lease payments or malformed registration metadata into asking prices or dates", async () => {
+    const { session } = sessionWith(discovery(), {
+      [FIRST]: html(
+        base(FIRST, {
+          category: { formYear: "2022x", yearMonth: "202213" },
+          advertisement: {
+            price: 75,
+            advertisementType: "NORMAL",
+            leaseRentInfo: { type: "LEASE" },
+          },
+        }),
+      ),
+    });
+    const details = (await checkEncarHistory(VIN, session))?.listings[0]?.details;
+    expect(details).not.toHaveProperty("asking_price");
+    expect(details).not.toHaveProperty("first_registration_date");
+    expect(details).not.toHaveProperty("model_year");
+  });
+
+  it("binds real acts to the canonical VIN and keeps act mileage and dates separate from the advertisement", async () => {
+    const alias = "42458676";
+    const { session, requested } = sessionWith(discovery("", alias), {
+      [alias]: html(
+        base(FIRST, {
+          queryCarId: Number(alias),
+          manage: { dummy: true, dummyVehicleId: Number(alias) },
+          condition: { inspection: { formats: ["TABLE"] } },
+          advertisement: { status: "SOLD", diagnosisCar: true },
+        }),
+      ),
+      [INSPECTION_URL]: JSON.stringify({
+        ...INSPECTION,
+        master: { ...INSPECTION.master, comments: "Private owner and contact" },
+      }),
+      [DIAGNOSIS_URL]: JSON.stringify({
+        ...DIAGNOSIS,
+        items: [
+          ...DIAGNOSIS.items,
+          { name: "CHECKER_COMMENT", result: "Private owner and contact" },
+        ],
+      }),
+    });
+    const result = await checkEncarHistory(VIN, session);
+    const listing = result?.listings[0];
+    expect(listing?.details?.odometer).toEqual({ value: 21986, unit: "km" });
+    expect(listing?.reports?.[0]).toMatchObject({
+      kind: "inspection",
+      status: "available",
+      source_url: INSPECTION_URL,
+      report_date: "2025-05-23",
+      partial: true,
+    });
+    expect(listing?.reports?.[0]?.facts).toContainEqual({
+      section: "Автомобиль",
+      label: "Пробег в акте (км)",
+      value: "21982",
+    });
+    expect(listing?.reports?.[1]).toMatchObject({
+      kind: "diagnostic",
+      status: "available",
+      report_date: "2025-05-27",
+    });
+    expect(listing?.reports?.[1]?.facts).toContainEqual({
+      section: "Диагностика кузова",
+      label: "Капот",
+      value: "норма (NORMAL)",
+    });
+    expect(result?.partial).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("Private");
+    expect(requested).toEqual([
+      DISCOVERY,
+      `https://fem.encar.com/cars/detail/${alias}`,
+      INSPECTION_URL,
+      DIAGNOSIS_URL,
+    ]);
+  });
+
+  it.each([
+    { body: "", status: 404 },
+    {
+      body: JSON.stringify({
+        ...INSPECTION,
+        master: { ...INSPECTION.master, carregiStration: OTHER_VIN },
+      }),
+      status: 200,
+    },
+    new DOMException("Optional report timed out", "TimeoutError"),
+  ])(
+    "keeps confirmed listing evidence when an act is unavailable, wrong-VIN or times out",
+    async (reply) => {
+      const { session } = sessionWith(discovery(), {
+        [FIRST]: html(base(FIRST, { condition: { inspection: { formats: ["TABLE"] } } })),
+        [INSPECTION_URL]: reply,
+      });
+      const result = await checkEncarHistory(VIN, session);
+      expect(result?.listings[0]?.reports?.[0]).toMatchObject({
+        status: "unavailable",
+        partial: true,
+        report_date: null,
+        facts: [],
+      });
+      expect(result?.listings[0]?.photo_urls).toEqual([
+        `https://ci.encar.com/carpicture/carpicture02/pic3972/${FIRST}_001.jpg`,
+      ]);
+      expect(result?.partial).toBe(true);
+    },
+  );
+
+  it("does not spend reserved deadline time on optional acts or manufacture lookup status from badges", async () => {
+    const { session, requested } = sessionWith(discovery(), {
+      [FIRST]: html(
+        base(FIRST, {
+          condition: { inspection: { formats: ["TABLE"] } },
+          advertisement: { diagnosisCar: true },
+        }),
+      ),
+    });
+    session.remainingMs = () => 16_999;
+    const result = await checkEncarHistory(VIN, session);
+    expect(result?.listings[0]?.reports).toBeUndefined();
+    expect(result?.partial).toBe(true);
+    expect(requested).toEqual([DISCOVERY, `https://fem.encar.com/cars/detail/${FIRST}`]);
   });
 });

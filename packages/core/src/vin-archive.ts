@@ -1,4 +1,4 @@
-import { normalizeVin } from "./vin.js";
+import { normalizeVin, type VinListingDetails, type VinListingReport } from "./vin.js";
 
 export const VIN_ARCHIVE_PROVIDERS = ["copart", "bidcars", "carway"] as const;
 export type VinArchiveProvider = (typeof VIN_ARCHIVE_PROVIDERS)[number];
@@ -55,6 +55,9 @@ export interface VinArchiveLot {
   photos: readonly string[];
   /** False when the manifest or any of its photographs could not be verified. */
   photos_complete: boolean;
+  /** Source facts for this VIN-confirmed lot, not its current condition. */
+  details?: VinListingDetails | undefined;
+  reports?: readonly VinListingReport[] | undefined;
 }
 
 export interface VinArchiveObservation {

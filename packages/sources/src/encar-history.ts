@@ -12,6 +12,12 @@ import {
   SourceRateLimited,
 } from "@autodom/core";
 import { load } from "cheerio";
+import {
+  type EncarReportKind,
+  encarDetails,
+  encarReportUrl,
+  parseEncarReport,
+} from "./encar-evidence.js";
 import { VinRequestError, type VinSession } from "./vin-session.js";
 
 /** Positive evidence that a candidate was removed or belongs to a different full VIN. */
@@ -102,6 +108,7 @@ function parseListing(
 ): {
   listing: EncarListing;
   alias: string | null;
+  reportKinds: EncarReportKind[];
 } {
   const $ = load(html);
   const scripts = $("script")
@@ -160,6 +167,7 @@ function parseListing(
       if (photos.size === ENCAR_HISTORY_MAX_PHOTOS) break;
     }
   }
+  const inspectionFormats = record(record(base.condition)?.inspection)?.formats;
   return {
     listing: {
       id,
@@ -176,8 +184,15 @@ function parseListing(
       modified_at: dateTime(manage?.modifyDateTime),
       re_registered: typeof manage?.reRegistered === "boolean" ? manage.reRegistered : null,
       photo_urls: [...photos],
+      details: encarDetails(base),
     },
     alias: typeof manage?.dummy === "boolean" && alias !== id ? alias : null,
+    reportKinds: [
+      ...(Array.isArray(inspectionFormats) && inspectionFormats.length > 0
+        ? ["inspection" as const]
+        : []),
+      ...(record(base.advertisement)?.diagnosisCar === true ? ["diagnostic" as const] : []),
+    ],
   };
 }
 
@@ -207,6 +222,7 @@ export async function checkEncarHistory(
 
   const listings = new Map<string, EncarListing>();
   const confirmed = new Set<string>();
+  const reportKinds = new Map<string, EncarReportKind[]>();
   let requests = 0;
   let partial = candidateIds !== undefined;
   let retryableFailure: VinRequestError | undefined;
@@ -226,8 +242,12 @@ export async function checkEncarHistory(
       const response = await session.request(encarListingUrl(candidate) as string);
       if (response.status === 404) throw new EncarIdentityError("Encar advertisement was removed");
       if (response.status !== 200) throw new SourceError("Encar advertisement unavailable");
-      const { listing, alias } = parseListing(response.body, candidate, normalizedVin);
-      if (!listings.has(listing.id)) listings.set(listing.id, listing);
+      const parsed = parseListing(response.body, candidate, normalizedVin);
+      const { listing, alias } = parsed;
+      if (!listings.has(listing.id)) {
+        listings.set(listing.id, listing);
+        reportKinds.set(listing.id, parsed.reportKinds);
+      }
       confirmed.add(listing.id);
       if (alias) confirmed.add(alias);
     } catch (error) {
@@ -257,6 +277,40 @@ export async function checkEncarHistory(
       unavailableFailure ??
       new EncarIdentityError("No discovered Encar advertisement could be verified")
     );
+  // Optional acts never displace confirmed advertisement evidence or renew the workflow deadline.
+  reports: for (const listing of listings.values()) {
+    for (const kind of reportKinds.get(listing.id) ?? []) {
+      if ((session.remainingMs?.() ?? Infinity) < 17_000) {
+        partial = true;
+        break reports;
+      }
+      const sourceUrl = encarReportUrl(listing.id, kind);
+      try {
+        const response = await session.request(sourceUrl);
+        if (response.status !== 200) throw new SourceError("Encar technical report unavailable");
+        const report = parseEncarReport(response.body, listing, kind);
+        listing.reports = [...(listing.reports ?? []), report];
+        if (report.partial) partial = true;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") throw error;
+        listing.reports = [
+          ...(listing.reports ?? []),
+          {
+            kind,
+            status: "unavailable",
+            source_url: sourceUrl,
+            partial: true,
+            checked_at: Math.floor(Date.now() / 1000),
+            report_date: null,
+            facts: [],
+          },
+        ];
+        partial = true;
+        if (error instanceof SourceRateLimited || (session.remainingMs?.() ?? Infinity) < 17_000)
+          break reports;
+      }
+    }
+  }
   return {
     vin: normalizedVin,
     discovery_url: discoveryUrl,

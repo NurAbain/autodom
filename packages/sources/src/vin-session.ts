@@ -60,6 +60,7 @@ export class VinRequestError extends SourceError {}
 
 export class VinTransport {
   readonly #options: VinTransportOptions;
+  readonly #encarRoutes: readonly [number, ProxyRoute][];
   readonly #abort = new AbortController();
   readonly #limit = pLimit(10);
   readonly #active = new Set<Promise<unknown>>();
@@ -80,6 +81,11 @@ export class VinTransport {
     if (!Number.isSafeInteger(options.timeoutMs ?? 40_000) || (options.timeoutMs ?? 40_000) < 1)
       throw new SourceError("VIN workflow timeout must be a positive integer");
     this.#options = { ...options, routes };
+    // Listing SSR can succeed on a datacenter IP that the document API rejects.
+    this.#encarRoutes = [...routes.entries()].sort(
+      ([, left], [, right]) =>
+        Number(right.tier === "residential") - Number(left.tier === "residential"),
+    );
   }
 
   async run<T>(
@@ -97,7 +103,8 @@ export class VinTransport {
     const task = this.#limit(async () => {
       const page = ++this.#page;
       const discovery = new Map<string, { body: string; status: number }>();
-      for (const [index, route] of this.#options.routes.entries()) {
+      const routes = provider === "encar" ? this.#encarRoutes : this.#options.routes.entries();
+      for (const [index, route] of routes) {
         combined.throwIfAborted();
         this.#requireNotRateLimited(provider);
         const dispatcher =
@@ -195,6 +202,8 @@ export class VinTransport {
           provider === "encar"
             ? method === "GET" &&
               ((url.origin === origin && /^\/cars\/detail\/[1-9]\d{0,9}$/u.test(url.pathname)) ||
+                (url.origin === "https://api.encar.com" &&
+                  /^\/legacy\/usedcar\/(?:inspect|diagnosis)\/[1-9]\d{0,9}$/u.test(url.pathname)) ||
                 (url.origin === ENCAR_DISCOVERY_ORIGIN &&
                   /^\/auto\/[A-HJ-NPR-Z0-9]{17}$/u.test(url.pathname)))
             : url.origin === origin && REQUEST_PATHS[provider][url.pathname] === method;
@@ -294,7 +303,8 @@ export class VinTransport {
             response.status === 301 &&
             response.headers.get("location") ===
               `${ENCAR_DISCOVERY_ORIGIN}/vin/${url.pathname.slice("/auto/".length)}`) ||
-            (url.origin === origin && response.status === 404))
+            ((url.origin === origin || url.origin === "https://api.encar.com") &&
+              response.status === 404))
         ) {
           // A declared missing archive or removed official page; never follow the report redirect.
           await response.body?.cancel();
