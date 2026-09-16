@@ -234,7 +234,7 @@ export function isVinArchivePhotoUrl(
       url.origin === "https://mercury.bid.cars" &&
       !url.username &&
       !url.password &&
-      !url.search &&
+      (!url.search || /^\?ver=[0-9]{1,16}$/u.test(url.search)) &&
       !url.hash &&
       url.pathname.startsWith(`/${prefix}-${lotId}/`) &&
       /^\/[01]-[1-9]\d{0,11}\/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\.jpg$/u.test(url.pathname) &&

@@ -82,7 +82,7 @@ it("rejects a different VIN, foreign photo host, and a source link for a differe
 
 it("accepts Bid.Cars archive evidence but rejects photos belonging to a different VIN or auction", async () => {
   const vin = "1FTFW1ED9NFB06106";
-  const photo = `https://mercury.bid.cars/0-45397077/2022-Ford-F-150-${vin}-1.jpg`;
+  const photo = `https://mercury.bid.cars/0-45397077/2022-Ford-F-150-${vin}-1.jpg?ver=0337`;
   const lot = {
     auction: "iaai",
     lot_id: "45397077",
@@ -134,6 +134,11 @@ it("accepts Bid.Cars archive evidence but rejects photos belonging to a differen
       photo.replace("/0-45397077/", "/0-45397078/"),
       photo.replace(vin, "1FTFW1ED9NFB06107"),
       photo.replace("/0-45397077/", "/1-45397077/"),
+      `${photo}&redirect=https://attacker.invalid`,
+      `${photo}&ver=0338`,
+      photo.replace("ver=0337", "ver=latest"),
+      photo.replace("ver=0337", "ver=%30%33%33%37"),
+      photo.replace("ver=0337", "ver=12345678901234567"),
     ]) {
       body = { ...result, sources: [{ ...source, lots: [{ ...lot, photos: [wrong] }] }] };
       await expect(lookup(vin)).rejects.toThrow();
@@ -208,7 +213,8 @@ it("delivers bounded raster bytes and rejects unsafe requests, HTML, oversized b
     provider: "bidcars",
     auction: "iaai",
     lot_id: "45397077",
-    photo_url: "https://mercury.bid.cars/0-45397077/2022-Ford-F-150-1FTFW1ED9NFB06106-1.jpg",
+    photo_url:
+      "https://mercury.bid.cars/0-45397077/2022-Ford-F-150-1FTFW1ED9NFB06106-1.jpg?ver=0337",
   };
   const png = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=",
