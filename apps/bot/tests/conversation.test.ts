@@ -1195,16 +1195,11 @@ describe("grammY transport boundaries", () => {
     };
     await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${vin}` } });
     expect(archive).not.toHaveBeenCalled();
-    const archiveMessage = calls.at(-1)?.payload.rich_message;
-    if (
-      !archiveMessage ||
-      typeof archiveMessage !== "object" ||
-      !("html" in archiveMessage) ||
-      typeof archiveMessage.html !== "string"
-    )
-      throw new Error("Expected rich archive actions");
-    const archiveControls = load(archiveMessage.html);
-    expect(archiveControls(`tg-button[data="vinarchive:${vin}"]`)).toHaveLength(1);
+    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: expect.arrayContaining([
+        [expect.objectContaining({ callback_data: `vinarchive:${vin}` })],
+      ]),
+    });
     for (const [data, from] of [
       ["vinarchive:invalid", message.from],
       [`vinarchive:${vin}`, { ...message.from, id: 2 }],
@@ -1513,10 +1508,15 @@ describe("grammY transport boundaries", () => {
     expect(checkVin).toHaveBeenCalledExactlyOnceWith("KMHDU41DBAU123456");
     expect(await store.getProfile(1)).toBeNull();
     expect(await store.getDraft(1)).toEqual(draft);
-    const rich = calls.at(-1)?.payload.rich_message as { html: string };
-    expect(load(rich.html)('tg-button[type="url"]').attr("url")).toBe(
-      "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-    );
+    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: expect.arrayContaining([
+        [
+          expect.objectContaining({
+            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
+          }),
+        ],
+      ]),
+    });
     await bot.handleUpdate({ update_id: 5, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
     expect(checkVin).toHaveBeenCalledTimes(1);
@@ -1571,133 +1571,106 @@ describe("grammY transport boundaries", () => {
     await bot.handleUpdate({ update_id: 2, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
   });
-  it.each(["rich", "legacy"] as const)(
-    "delivers long VIN results in %s mode without losing ads, controls or literal data",
-    async (mode) => {
-      const literal = "<literal & data>".repeat(32);
-      const { bot, calls } = telegram(async (vin) => ({
-        vin,
+  it("delivers long plain VIN results without losing ads, controls or literal data", async () => {
+    const literal = "<literal & data>".repeat(32);
+    const { bot, calls } = telegram(async (vin) => ({
+      vin,
+      checked_at: 1_789_000_000,
+      carhistory: { status: "disabled", source_url: "", checked_at: null },
+      car365: { status: "disabled", source_url: "", checked_at: null, data: null },
+      encar: {
+        status: "available",
+        source_url: "https://fem.encar.com",
         checked_at: 1_789_000_000,
-        carhistory: { status: "disabled", source_url: "", checked_at: null },
-        car365: { status: "disabled", source_url: "", checked_at: null, data: null },
-        encar: {
-          status: "available",
-          source_url: "https://fem.encar.com",
-          checked_at: 1_789_000_000,
-          data: {
+        data: {
+          vin,
+          discovery_url: `https://carcheck.by/auto/${vin}`,
+          partial: true,
+          listings: Array.from({ length: 5 }, (_, index) => ({
+            id: String(39720103 + index),
             vin,
-            discovery_url: `https://carcheck.by/auto/${vin}`,
-            partial: true,
-            listings: Array.from({ length: 5 }, (_, index) => ({
-              id: String(39720103 + index),
-              vin,
-              source_url: `https://fem.encar.com/cars/detail/${39720103 + index}`,
-              model: `Ad ${index}: ${"<Encar & record>".repeat(20)}`,
-              mileage_km: 10000 + index,
-              advertisement_status: "SOLD" as const,
-              created_at: `2024-05-0${index + 1}T11:12:13`,
-              first_advertised_at: null,
-              modified_at: null,
-              re_registered: false,
-              photo_urls: [
-                `https://ci.encar.com/carpicture/carpicture07/pic3972/${39720103 + index}_001.jpg`,
-              ],
-            })),
-          },
+            source_url: `https://fem.encar.com/cars/detail/${39720103 + index}`,
+            model: `Ad ${index}: ${"<Encar & record>".repeat(20)}`,
+            mileage_km: 10000 + index,
+            advertisement_status: "SOLD" as const,
+            created_at: `2024-05-0${index + 1}T11:12:13`,
+            first_advertised_at: null,
+            modified_at: null,
+            re_registered: false,
+            photo_urls: [
+              `https://ci.encar.com/carpicture/carpicture07/pic3972/${39720103 + index}_001.jpg`,
+            ],
+          })),
         },
-        autodev: {
-          status: "available",
-          source_url: "https://docs.auto.dev/v2/products/vin-decode",
-          checked_at: 1_789_000_000,
-          data: {
-            vin,
-            make: literal,
-            model: literal,
-            model_year: 2010,
-            trim: literal,
-            body_class: literal,
-            engine: literal,
-            drive: literal,
-            transmission: literal,
-            origin_country: literal,
-            ambiguous: false,
-          },
+      },
+      autodev: {
+        status: "available",
+        source_url: "https://docs.auto.dev/v2/products/vin-decode",
+        checked_at: 1_789_000_000,
+        data: {
+          vin,
+          make: literal,
+          model: literal,
+          model_year: 2010,
+          trim: literal,
+          body_class: literal,
+          engine: literal,
+          drive: literal,
+          transmission: literal,
+          origin_country: literal,
+          ambiguous: false,
         },
-      }));
-      if (mode === "legacy") {
-        bot.api.config.use(async (previous, method, payload, signal) =>
-          method === "sendRichMessage"
-            ? { ok: false, error_code: 404, description: "Not Found" }
-            : previous(method, payload, signal),
-        );
-      }
-      await bot.init();
-      await bot.handleUpdate({
-        update_id: 1,
-        message: {
-          message_id: 1,
-          date: 1,
-          from: { id: 1, is_bot: false, first_name: "Buyer" },
-          chat: { id: 1, type: "private", first_name: "Buyer" },
-          text: "/vin KMHDU41DBAU123456",
-        },
-      });
-      const sent = calls.filter(
-        (call) => call.method === "sendMessage" || call.method === "sendRichMessage",
-      );
-      const html = sent
-        .map((call) => {
-          if (call.method === "sendRichMessage") {
-            const rich = call.payload.rich_message as { html: string };
-            expect(Buffer.byteLength(rich.html, "utf8")).toBeLessThanOrEqual(32768);
-            return rich.html;
-          }
-          expect(String(call.payload.text).length).toBeLessThanOrEqual(4096);
-          expect(call.payload.parse_mode).toBe("HTML");
-          return String(call.payload.text);
-        })
-        .join("");
-      const rendered = load(html);
-      expect(rendered("literal, encar")).toHaveLength(0);
-      expect(
-        rendered
-          .root()
-          .text()
-          .match(/<literal & data>/g),
-      ).toHaveLength(32 * 8);
-      expect(
-        rendered
-          .root()
-          .text()
-          .match(/<Encar & record>/g),
-      ).toHaveLength(5 * 20);
-      for (let index = 0; index < 5; index += 1) {
-        expect(html).toContain(String(39720103 + index));
-        expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
-      }
-      if (mode === "rich") {
-        expect(rendered('tg-button[type="url"], tg-button[type="web_app"]')).toHaveLength(0);
-        expect(rendered('tg-button[data="vin-report-example"]')).toHaveLength(1);
-        expect(sent.every((call) => call.payload.reply_markup === undefined)).toBe(true);
-      } else {
-        expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(
-          true,
-        );
-        expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
-          inline_keyboard: expect.arrayContaining([
-            expect.arrayContaining([
-              expect.objectContaining({
-                callback_data: "vin-report-example",
-              }),
-            ]),
-          ]),
-        });
-        expect(JSON.stringify(sent.at(-1)?.payload.reply_markup)).not.toMatch(
-          /vinarchive:|google\.com|web_app/,
-        );
-      }
-    },
-  );
+      },
+    }));
+    await bot.init();
+    await bot.handleUpdate({
+      update_id: 1,
+      message: {
+        message_id: 1,
+        date: 1,
+        from: { id: 1, is_bot: false, first_name: "Buyer" },
+        chat: { id: 1, type: "private", first_name: "Buyer" },
+        text: "/vin KMHDU41DBAU123456",
+      },
+    });
+    expect(calls.some((call) => call.method === "sendRichMessage")).toBe(false);
+    const sent = calls.filter((call) => call.method === "sendMessage");
+    const html = sent
+      .map((call) => {
+        expect(String(call.payload.text).length).toBeLessThanOrEqual(4096);
+        expect(call.payload.parse_mode).toBe("HTML");
+        return String(call.payload.text);
+      })
+      .join("");
+    const rendered = load(html);
+    expect(rendered("literal, encar")).toHaveLength(0);
+    expect(
+      rendered
+        .root()
+        .text()
+        .match(/<literal & data>/g),
+    ).toHaveLength(32 * 8);
+    expect(
+      rendered
+        .root()
+        .text()
+        .match(/<Encar & record>/g),
+    ).toHaveLength(5 * 20);
+    for (let index = 0; index < 5; index += 1) {
+      expect(html).toContain(String(39720103 + index));
+      expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
+    }
+    expect(sent.slice(0, -1).every((call) => call.payload.reply_markup === undefined)).toBe(true);
+    expect(sent.at(-1)?.payload.reply_markup).toMatchObject({
+      inline_keyboard: expect.arrayContaining([
+        [expect.objectContaining({ callback_data: "vinphotos:KMHDU41DBAU123456" })],
+        [expect.objectContaining({ callback_data: "/vin" })],
+      ]),
+    });
+    expect(JSON.stringify(sent.at(-1)?.payload.reply_markup)).not.toMatch(
+      /vin-report-example|vinarchive:|google\.com|web_app/,
+    );
+  });
   it("keeps VIN photo albums bound to their verified advertisements across Telegram batch boundaries", async () => {
     const photo = (id: string, index: number) =>
       `https://ci.encar.com/carpicture/carpicture02/pic3972/${id}_${String(index).padStart(3, "0")}.jpg`;
