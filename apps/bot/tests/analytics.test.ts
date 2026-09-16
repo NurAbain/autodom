@@ -99,7 +99,8 @@ afterEach(async () => {
 });
 afterAll(async () => {
   await database?.end();
-  if (admin && databaseName) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+  // Let PostgreSQL finish disconnecting clients; FORCE races pg.Pool.end() and raises 57P01.
+  if (admin && databaseName) await admin.query(`DROP DATABASE "${databaseName}"`);
   await admin?.end();
   await container?.stop();
 });
