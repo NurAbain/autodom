@@ -576,6 +576,20 @@ export class BidCarsArchive {
     return undefined;
   }
 
+  async #discoverFast(vin: string, signal: AbortSignal): Promise<Candidate | undefined> {
+    const body = object(JSON.parse(await this.#text(`${ORIGIN}/app/search/fast/${vin}`, signal)));
+    if (body.status === "error") return undefined;
+    if (body.status !== "ok" || typeof body.url !== "string")
+      throw new SourceError("Bid.Cars fast discovery schema changed");
+    const match = /^https:\/\/bid\.cars\/(?:en\/)?lot\/([01])-([1-9][0-9]{0,11})\//u.exec(body.url);
+    if (!match) throw new SourceError("Bid.Cars fast discovery URL mismatch");
+    const auction = match[1] === "1" ? "copart" : "iaai";
+    const url = body.url.replace(`${ORIGIN}/lot/`, `${ORIGIN}/en/lot/`);
+    if (!isVinArchiveLotUrl(url, "bidcars", auction, match[2]!, vin) || new URL(url).href !== url)
+      throw new SourceError("Bid.Cars fast discovery identity mismatch");
+    return { auction, id: match[2]!, url, rows: [] };
+  }
+
   async #lookup(vin: string, signal: AbortSignal): Promise<VinArchiveObservation> {
     const lots: VinArchiveLot[] = [];
     let partial = false;
@@ -647,8 +661,10 @@ export class BidCarsArchive {
     }
     if (partial && !candidates.size) {
       try {
-        // Anonymous archive pagination can be empty while a current VIN page links old lots.
-        const current = await this.#discover(vin, signal, vin, false);
+        // Native fast search can resolve a lot when both VIN lookups only return a list.
+        const current =
+          (await this.#discover(vin, signal, vin, false).catch(() => undefined)) ??
+          (await this.#discoverFast(vin, signal));
         if (current) {
           current.detail = parseDetail(await this.#text(current.url, signal), current, vin);
           candidates.set(`${current.auction === "copart" ? "1" : "0"}-${current.id}`, current);
