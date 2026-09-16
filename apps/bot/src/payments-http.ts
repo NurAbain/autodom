@@ -8,11 +8,12 @@ import { PaymentRequestError, type PaymentService } from "./payments.js";
 const orderId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u);
 const checkoutBody = z.object({ orderId, acceptTerms: z.literal(true) }).strict();
 const cancellationBody = z.object({ orderId }).strict();
-const reportBody = z
+const vinBody = z
   .object({
     vin: z.string().regex(/^[A-HJ-NPR-Z0-9]{17}$/u),
   })
   .strict();
+const reportBody = vinBody.extend({ reportKind: z.enum(["korea", "carfax"]).optional() });
 const eventBody = z
   .object({
     provider: z.literal("finik"),
@@ -86,11 +87,20 @@ export async function handlePaymentRequest(
   }
   const raw = await readFlatJson(request, 512);
   if (report || photos) {
-    const parsed = reportBody.safeParse(raw);
-    if (!parsed.success) throw new RequestError(400, "Нужен только VIN.");
+    const parsed = (photos ? vinBody : reportBody).safeParse(raw);
+    if (!parsed.success)
+      throw new RequestError(400, photos ? "Нужен только VIN." : "Нужны VIN и вид отчёта.");
     const order = photos
       ? await payments.photoOffer(userId, parsed.data.vin)
-      : await payments.reportOffer(userId, parsed.data.vin);
+      : await payments.reportOffer(
+          userId,
+          parsed.data.vin,
+          "telegram",
+          "reportKind" in parsed.data &&
+            (parsed.data.reportKind === "korea" || parsed.data.reportKind === "carfax")
+            ? parsed.data.reportKind
+            : undefined,
+        );
     if (!response.destroyed) json(response, 200, { order });
     return;
   }

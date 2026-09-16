@@ -1,10 +1,5 @@
 import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
-import {
-  isEncarPhotoUrl,
-  normalizeVin,
-  type VinListingReport,
-  vinGoogleSearchUrl,
-} from "@autodom/core/vin";
+import { isEncarPhotoUrl, normalizeVin } from "@autodom/core/vin";
 import {
   groupVinArchiveLots,
   isVinArchivePhotoUrl,
@@ -34,23 +29,10 @@ import {
 import {
   confirmedEncarListings,
   confirmedVinReportKind,
-  encarHistorySummary,
-  encarListingFacts,
   hasKoreanVinRecord,
-  VIN_ARCHIVE_DISCLOSURE,
-  VIN_ARCHIVE_LABEL,
   VIN_CAUTION,
   VIN_DISCLOSURE,
-  VIN_GOOGLE_SEARCH_LABEL,
-  VIN_GOOGLE_SEARCH_NOTICE,
-  VIN_LISTING_REPORT_NOTICE,
-  VIN_SOURCE_NAMES,
-  vinArchiveLotText,
-  vinArchiveTime,
-  vinListingReportText,
-  vinResultNotice,
-  vinSourceText,
-  vinVisibleProviders,
+  vinSummary,
 } from "../src/vin-text.js";
 
 type TelegramApp = {
@@ -86,7 +68,6 @@ const pending = new Set<AbortController>();
 const reportUrls = new Set<string>();
 let config: { mode: BotMode; reportBotUrl?: string; analyticsEnabled: boolean } | undefined;
 type CheckoutProduct = "vin_report" | "vin_photos";
-let checkoutEligibility: MiniAppVinResult | undefined;
 let launchConsumed = false;
 
 function appPath(path: string): string {
@@ -160,6 +141,15 @@ function navigate(view: View, targetId?: string): void {
   void load();
 }
 
+class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 async function request<T>(
   path: string,
   body?: unknown,
@@ -209,7 +199,7 @@ async function request<T>(
       } catch {
         // A proxy may return an HTML error.
       }
-      throw new Error(message);
+      throw new HttpError(response.status, message);
     }
     const result = readResponse ? await readResponse(response) : ((await response.json()) as T);
     if (started !== generation || controller.signal.aborted) throw new Error("Request interrupted");
@@ -598,7 +588,6 @@ function purchaseAction(
   const buy = button(label, () => {
     if (buy.disabled) return;
     buy.disabled = true;
-    checkoutEligibility = result;
     navigateCheckout(
       result.vin,
       product,
@@ -1230,26 +1219,6 @@ function gallery(
   return section;
 }
 
-function appendVinListingReports(host: HTMLElement, reports?: readonly VinListingReport[]): void {
-  if (!reports?.length) return;
-  if (reports.some((report) => report.status === "unavailable" || report.partial))
-    host.append(element("p", "notice", "Часть документов не удалось получить полностью."));
-  const availableReports = reports.filter((report) => report.status === "available");
-  if (!availableReports.length) return;
-  const documents = element("details", "disclosure");
-  documents.append(
-    element("summary", "", "Осмотры и документы"),
-    element("p", "footnote", VIN_LISTING_REPORT_NOTICE),
-  );
-  for (const report of availableReports) {
-    const document = element("section", "vin-source");
-    document.dataset.status = report.status;
-    document.append(element("p", "vin-observation", vinListingReportText(report)));
-    documents.append(document);
-  }
-  host.append(documents);
-}
-
 function vinPanel(car?: MiniAppCar): HTMLElement {
   const started = generation;
   const panel = element("section", "panel vin-panel");
@@ -1309,20 +1278,11 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   input.placeholder = "Введите VIN автомобиля";
   const submit = element("button", "button", "Проверить VIN");
   submit.type = "submit";
-  const search = sourceLink(null, VIN_GOOGLE_SEARCH_LABEL);
-  search.className = "button button-quiet";
-  const followUp = element("section", "vin-follow-up");
-  followUp.hidden = true;
   let lookupRevision = 0;
   let lookupController: AbortController | undefined;
   const results = element("div", "vin-results");
   results.setAttribute("role", "status");
   results.setAttribute("aria-live", "polite");
-  function resetFollowUp(): void {
-    followUp.hidden = true;
-    disclosure.hidden = false;
-    search.removeAttribute("href");
-  }
   input.addEventListener("input", () => {
     lookupRevision += 1;
     lookupController?.abort();
@@ -1332,7 +1292,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     input.removeAttribute("aria-invalid");
     results.setAttribute("aria-busy", "false");
     results.replaceChildren();
-    resetFollowUp();
+    disclosure.hidden = false;
   });
   form.append(label, input, submit);
   form.addEventListener("submit", (event) => {
@@ -1344,20 +1304,13 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     vin: string,
     controller: AbortController,
     revision: number,
-    photoAccessGranted: boolean,
   ): HTMLElement {
     const archiveResults = element("section", "vin-results");
-    archiveResults.append(
-      element("h2", "", VIN_ARCHIVE_LABEL),
-      element("p", "footnote", VIN_ARCHIVE_DISCLOSURE),
-    );
+    archiveResults.append(element("h2", "", "Фотографии из архивов"));
     try {
       if (result.vin !== vin)
         throw new Error("Источник вернул результат для другого VIN. Этот результат не показан.");
-      const sections: HTMLElement[] = [
-        element("p", "vin", `VIN ${result.vin}`),
-        element("p", "footnote", `Ответ получен: ${vinArchiveTime(result.checked_at)}`),
-      ];
+      const sections: HTMLElement[] = [];
       for (const group of groupVinArchiveLots({
         ...result,
         sources: result.sources.filter((source) => source.status !== "disabled"),
@@ -1365,32 +1318,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
         const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
         const lotSection = element("section", "vin-source");
         lotSection.append(element("h3", "", title));
-        for (const [index, { provider, lot }] of group.sources.entries()) {
-          if (group.sources.length > 1)
-            lotSection.append(
-              element("h4", "", `Версия архивной записи ${index + 1}`),
-              element(
-                "p",
-                "footnote",
-                "Отдельная запись источника; сведения разных версий могут противоречить друг другу.",
-              ),
-            );
-          lotSection.append(
-            element(
-              "p",
-              "vin-observation",
-              vinArchiveLotText(lot, provider, false, photoAccessGranted),
-            ),
-          );
-          appendVinListingReports(lotSection, lot.reports);
-          if (
-            lot.photos.some(
-              (photo) => !isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
-            )
-          )
-            lotSection.append(element("p", "notice", "Часть ссылок на фотографии недоступна."));
-        }
-        const galleries = (photoAccessGranted ? group.sources : [])
+        const galleries = group.sources
           .map(({ provider, lot }) => ({
             provider,
             photoUrls: [
@@ -1413,7 +1341,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
                     candidate.photoUrls.every((photo) => previous.photoUrls.includes(photo)),
                 ),
           );
-        if (photoAccessGranted && galleries.length) {
+        if (galleries.length) {
           const galleryHost = element("div");
           const controls = element("div", "button-row");
           controls.setAttribute("aria-label", "Источник фотографий");
@@ -1476,7 +1404,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
             ),
           );
         }
-        sections.push(lotSection);
+        if (galleries.length) sections.push(lotSection);
       }
       archiveResults.append(...sections);
     } catch (error) {
@@ -1491,7 +1419,7 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     if (started !== generation || submit.disabled) return;
     lookupController?.abort();
     lookupController = undefined;
-    resetFollowUp();
+    disclosure.hidden = false;
     const vin = normalizeVin(input.value);
     if (!vin) {
       input.setAttribute("aria-invalid", "true");
@@ -1536,144 +1464,39 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       results.replaceChildren(element("p", "vin", `VIN ${result.vin}`));
       const korean = hasKoreanVinRecord(result);
       disclosure.hidden = korean;
-      const notice = vinResultNotice(result);
-      if (notice) results.append(element("p", "notice", notice));
-      for (const provider of vinVisibleProviders(result)) {
-        if (provider === "carhistory") continue;
-        const observation = result[provider];
-        if (!observation) continue;
-        const section = element("section", "vin-source");
-        section.dataset.status = observation.status;
-        section.append(
-          element("h3", "", VIN_SOURCE_NAMES[provider]),
-          element(
-            "p",
-            "badge",
-            provider === "encar"
-              ? result.encar?.data?.partial
-                ? "Объявления найдены · частичный результат"
-                : "Подтверждённые объявления найдены"
-              : provider === "vagvin_carfax"
-                ? "Полный отчёт доступен"
-                : "Запись найдена",
-          ),
-        );
-        if (provider === "car365" && observation.status === "available") {
-          const record = result.car365.data;
-          const facts = element("dl", "facts export-facts");
-          for (const [label, value] of [
-            ["Дата декларации об экспорте", record?.export_date ?? "Неизвестна"],
-            [
-              "Записанный пробег",
-              record?.last_mileage_km == null
-                ? "Неизвестен"
-                : `${record.last_mileage_km.toLocaleString("ru-RU")} км`,
-            ],
-            ["Модель в записи", record?.model ?? "Неизвестна"],
-            ["Первая регистрация", record?.first_registration_date ?? "Неизвестна"],
-          ]) {
-            const fact = element("div", "fact");
-            fact.append(element("dt", "", label), element("dd", "", value));
-            facts.append(fact);
-          }
-          section.append(
-            facts,
-            element(
-              "p",
-              "footnote",
-              "Дата декларации — не дата отправки автомобиля и не дата замера пробега. Записанный пробег не равен текущему.",
-            ),
-            element(
-              "p",
-              "notice",
-              record?.total_loss == null
-                ? "Полная гибель: сведений нет. Состояние автомобиля неизвестно."
-                : record.total_loss
-                  ? "Внимание: в записи указана полная гибель автомобиля."
-                  : "Полная гибель в записи не указана. Это не подтверждает отсутствие ДТП или повреждений.",
-            ),
-            element(
-              "p",
-              "footnote",
-              observation.checked_at === null
-                ? "Время проверки неизвестно."
-                : `Проверено: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(observation.checked_at * 1000))} · Бишкек`,
-            ),
-          );
-        } else if (provider === "encar" && observation.status === "available") {
-          section.append(element("p", "vin-observation", encarHistorySummary(result)));
-          for (const listing of confirmedEncarListings(result)) {
-            const advertisement = element("article", "encar-listing");
-            advertisement.append(
-              element("h4", "", `Архивное объявление №${listing.id}`),
-              element("p", "footnote", `Подтверждённый VIN: ${listing.vin}`),
-            );
-            const facts = element("dl", "facts");
-            for (const [label, value] of encarListingFacts(
-              listing,
-              result.photoAccess?.granted === true,
-            )) {
-              const fact = element("div", "fact");
-              fact.append(element("dt", "", label), element("dd", "", value));
-              facts.append(fact);
-            }
-            advertisement.append(facts);
-            appendVinListingReports(advertisement, listing.reports);
-            const photoUrls = result.photoAccess?.granted
-              ? [...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id)))]
-              : [];
-            if (result.photoAccess?.granted && photoUrls.length) {
-              advertisement.append(
-                element("p", "footnote", `Найдены фотографии: ${photoUrls.length}.`),
-                gallery(
-                  `Объявление №${listing.id} · ${listing.model ?? listing.vin}`,
-                  photoUrls,
-                  undefined,
-                  controller.signal,
-                ),
-              );
-            }
-            section.append(advertisement);
-          }
-          section.append(
-            element(
-              "p",
-              "footnote",
-              observation.checked_at === null
-                ? "Время проверки неизвестно."
-                : `Проверено: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(observation.checked_at * 1000))} · Бишкек`,
-            ),
-          );
-        } else {
-          section.append(element("p", "vin-observation", vinSourceText(provider, result)));
-        }
-        results.append(section);
+      const summary = vinSummary(result);
+      const section = element("section", "vin-source");
+      if (summary.facts.length) section.append(element("h2", "", "Об автомобиле"));
+      const facts = element("dl", "facts vin-summary-facts");
+      for (const [label, value] of summary.facts) {
+        const fact = element("div", "fact");
+        const detail = element("dd");
+        detail.append(element("strong", "", value));
+        fact.append(element("dt", "", label), detail);
+        facts.append(fact);
       }
-      if (result.carhistory.status === "available")
-        results.append(element("p", "vin-observation", vinSourceText("carhistory", result)));
+      section.append(facts, ...summary.notes.map((note) => element("p", "footnote", note)));
+      results.append(section);
+      for (const listing of confirmedEncarListings(result)) {
+        if (!result.photoAccess?.granted) continue;
+        const photoUrls = [
+          ...new Set(listing.photo_urls.filter((url) => isEncarPhotoUrl(url, listing.id))),
+        ];
+        if (photoUrls.length)
+          results.append(
+            gallery(`Объявление №${listing.id}`, photoUrls, undefined, controller.signal),
+          );
+      }
       if (
+        result.photoAccess?.granted &&
         result.archives?.vin === vin &&
         result.archives.sources.some((source) => source.status !== "disabled" && source.lots.length)
       )
-        results.append(
-          renderArchive(
-            result.archives,
-            vin,
-            controller,
-            revision,
-            result.photoAccess?.granted === true,
-          ),
-        );
+        results.append(renderArchive(result.archives, vin, controller, revision));
       const photos = photoAccessPanel(result);
       if (photos) results.append(photos);
       const report = premiumPanel(result);
       if (report) results.append(report);
-      if (!korean) {
-        const url = vinGoogleSearchUrl(vin);
-        if (url) search.href = url;
-        search.hidden = !url;
-        followUp.hidden = false;
-      }
     } catch (error) {
       if (started !== generation || revision !== lookupRevision || controller.signal.aborted)
         return;
@@ -1692,20 +1515,12 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
       }
     }
   }
-  followUp.append(search, element("p", "footnote", VIN_GOOGLE_SEARCH_NOTICE));
   const photoHelp = element(
     "p",
     "footnote vin-photo-help",
     "VIN на фото? Отправьте фото в чат и подтвердите распознанный номер перед проверкой.",
   );
-  panel.append(
-    form,
-    photoHelp,
-    results,
-    element("p", "footnote", VIN_CAUTION),
-    disclosure,
-    followUp,
-  );
+  panel.append(form, photoHelp, results, element("p", "footnote", VIN_CAUTION), disclosure);
   if (!car && normalizeVin(new URLSearchParams(window.location.search).get("vin") ?? ""))
     queueMicrotask(() => {
       if (started === generation && panel.isConnected) void lookup();
@@ -1897,22 +1712,12 @@ async function showCheckout(params: URLSearchParams): Promise<void> {
       return;
     }
     const savedId = params.get("order_id");
-    const eligibility = checkoutEligibility?.vin === vin ? checkoutEligibility : undefined;
-    checkoutEligibility = undefined;
     const requestedKind = params.get("report_kind");
     if (requestedKind !== null && requestedKind !== "korea" && requestedKind !== "carfax")
       throw new Error("Неизвестный вид отчёта. Вернитесь к проверке VIN.");
-    let reportKind = requestedKind ?? eligibility?.reportKind;
-    let result = eligibility;
+    let reportKind = requestedKind;
     const { orders } = await request<{ orders: PaymentOrder[] }>("/miniapp/api/orders");
     if (started !== generation) return;
-    // Known invoices need no live source; ambiguous report links must first resolve the report kind.
-    if (!savedId && product === "vin_report" && !reportKind) {
-      result ??= await request<MiniAppVinResult>("/miniapp/api/vin", { vin });
-      if (started !== generation) return;
-      if (result.vin !== vin) throw new Error("Получены данные для другого VIN.");
-      reportKind = result.reportKind;
-    }
     const canPay = (value: PaymentOrder) =>
       value.paymentStatus === "unpaid" &&
       !value.needsReview &&
@@ -1926,7 +1731,7 @@ async function showCheckout(params: URLSearchParams): Promise<void> {
         order.product === product &&
         (savedId ||
           (order.provider === "finik" &&
-            (product === "vin_photos" || order.reportKind === reportKind))),
+            (product === "vin_photos" || reportKind === null || order.reportKind === reportKind))),
     );
     let order = savedId
       ? candidates.find((candidate) => candidate.id === savedId)
@@ -1936,31 +1741,45 @@ async function showCheckout(params: URLSearchParams): Promise<void> {
         ));
     if (savedId && !order) throw new Error("Заказ не найден. Откройте раздел «Заказы».");
     if (!order) {
-      result ??= await request<MiniAppVinResult>("/miniapp/api/vin", { vin });
-      if (started !== generation) return;
-      if (result.vin !== vin) throw new Error("Получены данные для другого VIN.");
-      if (product === "vin_report" && reportKind && result.reportKind !== reportKind)
-        throw new Error(
-          "Этот отчёт сейчас недоступен. Вернитесь к проверке VIN и обновите результат.",
-        );
-      const eligible =
-        product === "vin_photos"
-          ? result?.photoAccess?.available && result.photoAccess.salesEnabled
-          : result?.reportSalesEnabled &&
-            result.reportKind &&
-            confirmedVinReportKind(result) === result.reportKind;
-      if (!eligible)
-        throw new Error(
-          "Покупка сейчас недоступна. Вернитесь к проверке VIN и обновите результат.",
-        );
-      ({ order } = await request<{ order: PaymentOrder }>(
-        product === "vin_photos" ? "/miniapp/api/orders/photos" : "/miniapp/api/orders/report",
-        { vin },
-      ));
+      const offerPath =
+        product === "vin_photos" ? "/miniapp/api/orders/photos" : "/miniapp/api/orders/report";
+      try {
+        // The authenticated server already remembers the recent bot/Mini App lookup.
+        // Browser state and URL parameters are never proof that a product exists.
+        ({ order } = await request<{ order: PaymentOrder }>(offerPath, {
+          vin,
+          ...(product === "vin_report" && reportKind ? { reportKind } : {}),
+        }));
+      } catch (error) {
+        if (started !== generation) return;
+        if (!(error instanceof HttpError) || error.status !== 409) throw error;
+        const result = await request<MiniAppVinResult>("/miniapp/api/vin", { vin });
+        if (started !== generation) return;
+        if (result.vin !== vin) throw new Error("Получены данные для другого VIN.");
+        if (product === "vin_report") {
+          if (reportKind && result.reportKind !== reportKind)
+            throw new Error(
+              "Этот отчёт сейчас недоступен. Вернитесь к проверке VIN и обновите результат.",
+            );
+          reportKind = result.reportKind;
+          if (
+            !result.reportSalesEnabled ||
+            !reportKind ||
+            confirmedVinReportKind(result) !== reportKind
+          )
+            throw new Error("Покупка отчёта сейчас недоступна. Вернитесь к проверке VIN.");
+        } else if (!result.photoAccess?.available || !result.photoAccess.salesEnabled) {
+          throw new Error("Покупка фотографий сейчас недоступна. Вернитесь к проверке VIN.");
+        }
+        ({ order } = await request<{ order: PaymentOrder }>(offerPath, {
+          vin,
+          ...(product === "vin_report" && reportKind ? { reportKind } : {}),
+        }));
+      }
     }
     if (started !== generation) return;
     if (product === "vin_report" && canPay(order))
-      await track({ event: "report_checkout_started", orderId: order.id });
+      void track({ event: "report_checkout_started", orderId: order.id });
     if (started !== generation) return;
     const url = new URL(window.location.href);
     url.searchParams.set("order_id", order.id);

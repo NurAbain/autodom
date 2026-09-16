@@ -63,6 +63,7 @@ p { line-height: 1.6; }
 .fact { min-width: 0; padding: 15px 0; border-bottom: 1px solid var(--line); }
 .fact dt { color: var(--muted); font-size: 12px; line-height: 1.4; margin-bottom: 5px; }
 .fact dd { font-size: 15px; line-height: 1.5; font-weight: 600; margin: 0; overflow-wrap: anywhere; }
+.vin-summary-facts .fact:nth-child(-n+2) { grid-column: 1 / -1; }
 .panel { padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); margin-bottom: 20px; }
 .vin-panel { border-top: 4px solid var(--accent); }
 .vin { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 19px; font-weight: 650; letter-spacing: 0.05em; overflow-wrap: anywhere; user-select: all; }

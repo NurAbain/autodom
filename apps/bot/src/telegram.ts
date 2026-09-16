@@ -55,13 +55,9 @@ import {
   confirmedEncarListings,
   confirmedVinArchiveResult,
   confirmedVinReportKind,
-  VIN_ARCHIVE_LABEL,
   VIN_DISCLOSURE,
   VIN_HELP,
   VIN_NOT_ENABLED,
-  vinArchiveLotText,
-  vinArchiveTime,
-  vinResultActions,
   vinResultPresentation,
 } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
@@ -580,7 +576,6 @@ export function createTelegramBot(
           : statuses.includes("unavailable") || !statuses.length
             ? "unavailable"
             : "not_found";
-        const actions = vinResultActions(checked);
         result = checked;
         if (revision !== undefined) options.payments?.rememberVinResult(chatId, checked, revision);
         reportKind = confirmedVinReportKind(checked);
@@ -606,7 +601,7 @@ export function createTelegramBot(
             );
         }
         presentation = vinResultPresentation(checked);
-        keyboard = actions.keyboard;
+        keyboard = new InlineKeyboard().text("Новая проверка", "/vin");
       } catch {
         outcome = "error";
         await record(chatId, {
@@ -642,7 +637,6 @@ export function createTelegramBot(
         ...(keyboard ? { fallbackReplyMarkup: keyboard } : {}),
       },
     );
-    if (result?.archives) await sendArchiveMetadata(chatId, result.archives);
     if (purchase && reportKind) {
       const feedback = options.analytics ? reportContext(chatId, vin, reportKind) : undefined;
       const sent = await bot.api.sendMessage(
@@ -758,49 +752,6 @@ export function createTelegramBot(
           },
         ]);
       }
-    }
-  }
-  async function sendArchiveMetadata(chatId: number, result: VinArchiveResult): Promise<void> {
-    const vin = result.vin;
-    result = confirmedVinArchiveResult(result);
-    if (!result.sources.length) return;
-    await sendReplies(
-      bot,
-      chatId,
-      packReplies(
-        escapeHtml(
-          `VIN ${vin}\n${VIN_ARCHIVE_LABEL}\nПроверено: ${vinArchiveTime(result.checked_at)}\n\nАрхивы неполные. Фото относятся к прошлому состоянию автомобиля; отсутствие записей не означает отсутствие ДТП.`,
-        ),
-        [],
-      ),
-      options,
-    );
-    for (const group of groupVinArchiveLots(result)) {
-      const title = `${VIN_ARCHIVE_AUCTION_NAMES[group.auction]} · лот ${group.lot_id}`;
-      const { provider, lot } = group.photo_source;
-      const photos = [
-        ...new Set(
-          lot.photos.filter((photo) =>
-            isVinArchivePhotoUrl(photo, provider, lot.auction, lot.lot_id, vin),
-          ),
-        ),
-      ];
-      await sendReplies(
-        bot,
-        chatId,
-        packReplies(
-          escapeHtml(
-            [
-              title,
-              ...group.sources.map((source) => vinArchiveLotText(source.lot, source.provider)),
-              `Фотографий в записи: ${photos.length}.`,
-              ...(photos.length < lot.photos.length ? ["Часть ссылок на фото недоступна."] : []),
-            ].join("\n\n"),
-          ),
-          [],
-        ),
-        options,
-      );
     }
   }
   async function sendArchivePhotos(chatId: number, result: VinArchiveResult): Promise<void> {

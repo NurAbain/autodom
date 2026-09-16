@@ -10,7 +10,7 @@ import type { Store } from "@autodom/storage";
 import { PaymentStore } from "@autodom/storage/payments";
 import { AbortController as TelegramAbortController } from "abort-controller";
 import { type Api, GrammyError } from "grammy";
-import type { PreCheckoutQuery, Update } from "grammy/types";
+import type { PreCheckoutQuery, Update, UserFromGetMe } from "grammy/types";
 import type { AnalyticsRecorder } from "./analytics-contract.js";
 import {
   CARFAX_REPORT_FINIK_MINOR,
@@ -166,6 +166,7 @@ export class PaymentService {
   readonly ledger: PaymentStore;
   analytics?: AnalyticsRecorder;
   private telegramApi?: Api;
+  private botIdentity: Promise<UserFromGetMe> | undefined;
   private starsEnabled = false;
   private telegramToken?: string;
   private readonly koreanResults = new Map<
@@ -176,6 +177,7 @@ export class PaymentService {
 
   configureStars(api: Api, enabled: boolean, token: string): void {
     if (!token) throw new Error("Payment fulfillment requires the server Telegram token");
+    if (this.telegramApi !== api || this.telegramToken !== token) this.botIdentity = undefined;
     this.telegramApi = api;
     this.starsEnabled = enabled === true;
     this.telegramToken = token;
@@ -253,12 +255,18 @@ export class PaymentService {
     userId: number,
     value: string,
     channel: "telegram" | "web" = "telegram",
+    expectedReportKind?: VinReportKind,
   ): Promise<PaymentOrder> {
     const vin = normalizeVin(value);
     if (!vin) throw new PaymentRequestError(400, "Нужен корректный VIN из 17 символов.");
     const key = `${channel}:${userId}:${vin}`;
     const eligibility = this.koreanResults.get(key);
     const reportKind = eligibility?.reportKind;
+    if (expectedReportKind !== undefined && expectedReportKind !== reportKind)
+      throw new PaymentRequestError(
+        409,
+        "Доступный отчёт изменился. Повторите проверку VIN перед покупкой.",
+      );
     const carfax = reportKind === "carfax";
     const web = channel === "web";
     const finik = web || this.nativeFinikEnabled;
@@ -285,8 +293,17 @@ export class PaymentService {
           channel,
           reportKind,
         );
+        if (
+          this.koreanResults.get(key) !== eligibility ||
+          eligibility.reportKind !== reportKind ||
+          eligibility.expiresAt <= Date.now()
+        )
+          throw new PaymentRequestError(
+            409,
+            "Проверка VIN обновилась. Повторите проверку перед покупкой.",
+          );
         if (existing) return existing;
-        const me = await this.requireTelegramApi().getMe();
+        const me = await this.telegramBotIdentity();
         if (
           this.koreanResults.get(key) !== eligibility ||
           eligibility.reportKind !== reportKind ||
@@ -343,7 +360,7 @@ export class PaymentService {
           409,
           "Сначала проверьте VIN. Для покупки нужны найденные фотографии.",
         );
-      const me = await this.requireTelegramApi().getMe();
+      const me = await this.telegramBotIdentity();
       if (
         this.koreanResults.get(key) !== eligibility ||
         eligibility.photoCount <= 0 ||
@@ -373,6 +390,17 @@ export class PaymentService {
   private requireTelegramApi(): Api {
     if (!this.telegramApi) throw new PaymentRequestError(503, "Telegram API недоступен.");
     return this.telegramApi;
+  }
+
+  private telegramBotIdentity(): Promise<UserFromGetMe> {
+    if (!this.botIdentity) {
+      const identity = this.requireTelegramApi().getMe();
+      this.botIdentity = identity;
+      void identity.catch(() => {
+        if (this.botIdentity === identity) this.botIdentity = undefined;
+      });
+    }
+    return this.botIdentity;
   }
 
   private requireOwner(actorId: number): void {

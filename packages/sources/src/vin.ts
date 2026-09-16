@@ -201,57 +201,15 @@ export class VinCheckService {
     // A failed Korean lookup is not absence and must not trigger fallback egress.
     if (
       this.#signal.aborted ||
+      deadline.aborted ||
       (this.#enabled.carhistory && result.carhistory.status !== "not_found") ||
       (this.#enabled.car365 && result.car365.status !== "not_found") ||
       (this.#enabled.encar && result.encar?.status !== "not_found")
     ) {
       return result;
     }
+    // Reports and archive photos are independent products; finish both free checks.
     await Promise.all([
-      (async () => {
-        if (!this.#enabled.nhtsa_vpic) return;
-        const observation: NonNullable<VinCheckResult["nhtsa_vpic"]> = {
-          status: "unavailable",
-          source_url: VIN_SOURCE_URLS.nhtsa_vpic,
-          checked_at: Date.now() / 1000,
-          data: null,
-        };
-        result.nhtsa_vpic = observation;
-        if (workflowSignal.aborted) return;
-        const task = checkNhtsaVpic(vin, workflowSignal, this.#timeoutMs);
-        this.#active.add(task);
-        try {
-          observation.data = await task;
-          observation.status = observation.data ? "available" : "not_found";
-        } catch {
-          signal?.throwIfAborted();
-          observation.status = "unavailable";
-        } finally {
-          this.#active.delete(task);
-        }
-      })(),
-      (async () => {
-        if (!this.#autoDevApiKey) return;
-        const observation: NonNullable<VinCheckResult["autodev"]> = {
-          status: "unavailable",
-          source_url: VIN_SOURCE_URLS.autodev,
-          checked_at: Date.now() / 1000,
-          data: null,
-        };
-        result.autodev = observation;
-        if (workflowSignal.aborted) return;
-        const task = checkAutoDev(vin, this.#autoDevApiKey, workflowSignal, this.#timeoutMs);
-        this.#active.add(task);
-        try {
-          observation.data = await task;
-          observation.status = observation.data ? "available" : "not_found";
-        } catch {
-          signal?.throwIfAborted();
-          observation.status = "unavailable";
-        } finally {
-          this.#active.delete(task);
-        }
-      })(),
       (async () => {
         if (!this.#archives) return;
         result.archives = await this.#archives.check(vin, cancellation, deadline);
@@ -274,6 +232,59 @@ export class VinCheckService {
         }
       })(),
     ]);
+    signal?.throwIfAborted();
+    // Only completed, definitive misses justify decoding. No-photo lots and partial
+    // archive evidence are still matches; failures are never proof of absence.
+    if (
+      workflowSignal.aborted ||
+      (this.#vagvinCarfax && result.vagvin_carfax?.status !== "not_found") ||
+      result.archives?.sources.some((source) => source.status !== "not_found" || source.partial)
+    ) {
+      return result;
+    }
+    if (this.#enabled.nhtsa_vpic) {
+      const observation: NonNullable<VinCheckResult["nhtsa_vpic"]> = {
+        status: "unavailable",
+        source_url: VIN_SOURCE_URLS.nhtsa_vpic,
+        checked_at: Date.now() / 1000,
+        data: null,
+      };
+      result.nhtsa_vpic = observation;
+      const task = checkNhtsaVpic(vin, workflowSignal, this.#timeoutMs);
+      this.#active.add(task);
+      try {
+        observation.data = await task;
+        observation.status = observation.data ? "available" : "not_found";
+      } catch {
+        signal?.throwIfAborted();
+        observation.status = "unavailable";
+      } finally {
+        this.#active.delete(task);
+      }
+      // A useful NHTSA identity is enough; errors must not spend Auto.dev quota.
+      if (observation.status !== "not_found") return result;
+    }
+    signal?.throwIfAborted();
+    if (this.#autoDevApiKey && !workflowSignal.aborted) {
+      const observation: NonNullable<VinCheckResult["autodev"]> = {
+        status: "unavailable",
+        source_url: VIN_SOURCE_URLS.autodev,
+        checked_at: Date.now() / 1000,
+        data: null,
+      };
+      result.autodev = observation;
+      const task = checkAutoDev(vin, this.#autoDevApiKey, workflowSignal, this.#timeoutMs);
+      this.#active.add(task);
+      try {
+        observation.data = await task;
+        observation.status = observation.data ? "available" : "not_found";
+      } catch {
+        signal?.throwIfAborted();
+        observation.status = "unavailable";
+      } finally {
+        this.#active.delete(task);
+      }
+    }
     return result;
   };
 

@@ -151,24 +151,6 @@ describe("Auto.dev independent global decoding", () => {
     expect((await lookup.check(VIN)).autodev?.status).toBe("unavailable");
   });
 
-  it("retains NHTSA evidence when the global decoder exhausts its quota", async () => {
-    reply(429, "{}");
-    agent
-      .get("https://vpic.nhtsa.dot.gov")
-      .intercept({ path: `/api/vehicles/DecodeVinValues/${VIN}?format=json` })
-      .reply(
-        200,
-        JSON.stringify({
-          Count: 1,
-          Results: [{ VIN, ErrorCode: "0", Make: "VOLKSWAGEN", Model: "Golf", ModelYear: "1999" }],
-        }),
-        { headers: { "content-type": "application/json" } },
-      );
-    const result = await service({ providers: ["nhtsa_vpic", "autodev"] }).check(VIN);
-    expect(result.autodev).toMatchObject({ status: "unavailable", data: null });
-    expect(result.nhtsa_vpic).toMatchObject({ status: "available", data: { model: "Golf" } });
-  });
-
   it("bounds stalled requests without pretending the VIN is absent", async () => {
     reply(200, payload()).delay(100);
     expect((await service({ timeoutMs: 10 }).check(VIN)).autodev?.status).toBe("unavailable");

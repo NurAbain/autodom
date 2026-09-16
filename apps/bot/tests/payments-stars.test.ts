@@ -153,6 +153,133 @@ it("never grants another buyer the first buyer's Korean eligibility", async () =
   await expect(service.reportOffer(43, vin)).rejects.toMatchObject({ status: 409 });
 });
 
+it("rejects a requested report kind that differs from server evidence before creating or reusing an order", async () => {
+  const { service } = fixture();
+  const revision = service.forgetVinResult(42, vin);
+  service.rememberVinResult(42, result, revision);
+  const existing = vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(paidOrder());
+  const create = vi.spyOn(service.ledger, "createOffer").mockResolvedValue(paidOrder());
+  await expect(service.reportOffer(42, vin, "telegram", "carfax")).rejects.toMatchObject({
+    status: 409,
+  });
+  expect(existing).not.toHaveBeenCalled();
+  expect(create).not.toHaveBeenCalled();
+});
+
+it("reuses an existing invoice from recent evidence without another identity lookup", async () => {
+  const { service, api } = fixture();
+  const revision = service.forgetVinResult(42, vin);
+  service.rememberVinResult(42, result, revision);
+  vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(paidOrder());
+  const identity = vi.spyOn(api, "getMe");
+  expect(await service.reportOffer(42, vin, "telegram", "korea")).toMatchObject({
+    id,
+    invoiceUrl: "https://t.me/$fixture",
+  });
+  expect(identity).not.toHaveBeenCalled();
+});
+
+it("does not reuse an offer after its actor evidence is revised while finding the order", async () => {
+  const { service } = fixture();
+  const revision = service.forgetVinResult(42, vin);
+  service.rememberVinResult(42, result, revision);
+  vi.spyOn(service.ledger, "findOpenVinReport").mockImplementation(async () => {
+    service.forgetVinResult(42, vin);
+    return paidOrder();
+  });
+  await expect(service.reportOffer(42, vin)).rejects.toMatchObject({ status: 409 });
+});
+
+it("requires refreshed evidence once the actor's cached lookup expires", async () => {
+  const { service } = fixture();
+  const now = vi.spyOn(Date, "now").mockReturnValue(1_789_000_000_000);
+  try {
+    const revision = service.forgetVinResult(42, vin);
+    service.rememberVinResult(42, result, revision);
+    const existing = vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(paidOrder());
+    now.mockReturnValue(1_789_000_000_000 + 15 * 60 * 1000);
+    await expect(service.reportOffer(42, vin)).rejects.toMatchObject({ status: 409 });
+    expect(existing).not.toHaveBeenCalled();
+  } finally {
+    now.mockRestore();
+  }
+});
+
+it("does not use web report evidence for a Telegram checkout", async () => {
+  const { service } = fixture();
+  const revision = service.forgetVinResult(42, vin, "web");
+  service.rememberVinResult(42, result, revision, "web");
+  await expect(service.reportOffer(42, vin)).rejects.toMatchObject({ status: 409 });
+});
+
+it("shares successful bot identity across concurrent and later fresh offers", async () => {
+  const { service, api } = fixture();
+  for (const userId of [42, 43, 44]) {
+    const revision = service.forgetVinResult(userId, vin);
+    service.rememberVinResult(userId, result, revision);
+  }
+  vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(null);
+  const create = vi.spyOn(service.ledger, "createOffer").mockResolvedValue(paidOrder());
+  const identityReply = Promise.withResolvers<void>();
+  api.config.use(async () => {
+    await identityReply.promise;
+    return {
+      ok: true,
+      result: { id: 100, is_bot: true, first_name: "Autodom", username: "autodom_test_bot" },
+    } as never;
+  });
+  const identity = vi.spyOn(api, "getMe");
+  const offers = [service.reportOffer(42, vin), service.reportOffer(43, vin)];
+  identityReply.resolve();
+  await Promise.all(offers);
+  await service.reportOffer(44, vin);
+  expect(identity).toHaveBeenCalledTimes(1);
+  expect(create).toHaveBeenCalledTimes(3);
+  expect(
+    create.mock.calls.every(
+      ([offer]) => offer.supportUrl === "https://t.me/autodom_test_bot?start=paysupport",
+    ),
+  ).toBe(true);
+});
+
+it("retries identity after a transient Telegram failure without requiring a new VIN lookup", async () => {
+  const { service, api } = fixture();
+  const revision = service.forgetVinResult(42, vin);
+  service.rememberVinResult(42, result, revision);
+  vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(null);
+  const create = vi.spyOn(service.ledger, "createOffer").mockResolvedValue(paidOrder());
+  let attempts = 0;
+  api.config.use(async () => {
+    if (++attempts === 1) throw new Error("Temporary Telegram outage");
+    return {
+      ok: true,
+      result: { id: 100, is_bot: true, first_name: "Autodom", username: "autodom_test_bot" },
+    } as never;
+  });
+  await expect(service.reportOffer(42, vin)).rejects.toThrow();
+  expect(create).not.toHaveBeenCalled();
+  await service.reportOffer(42, vin);
+  expect(attempts).toBe(2);
+  expect(create).toHaveBeenCalledTimes(1);
+});
+
+it("does not create a report after its evidence changes during bot identity lookup", async () => {
+  const { service, api } = fixture();
+  const revision = service.forgetVinResult(42, vin);
+  service.rememberVinResult(42, result, revision);
+  vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(null);
+  const create = vi.spyOn(service.ledger, "createOffer").mockResolvedValue(paidOrder());
+  api.config.use(async () => {
+    service.forgetVinResult(42, vin);
+    return {
+      ok: true,
+      result: { id: 100, is_bot: true, first_name: "Autodom", username: "autodom_test_bot" },
+    } as never;
+  });
+  await expect(service.reportOffer(42, vin)).rejects.toMatchObject({ status: 409 });
+  expect(create).not.toHaveBeenCalled();
+});
+
 it("does not sell a full report from an export record without confirmed report availability", async () => {
   const { service } = fixture();
   vi.spyOn(service.ledger, "findOpenVinReport").mockResolvedValue(paidOrder());

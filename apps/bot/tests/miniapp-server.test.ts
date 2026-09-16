@@ -518,6 +518,104 @@ it("gates CARFAX sales independently of Korean sales and revokes offers after mi
   }
 });
 
+it("creates the requested report from recent actor evidence without another VIN lookup", async () => {
+  const store = {
+    getProfile: async () => null,
+    getListing: async () => null,
+    withLock: async <T>(_key: string, action: () => Promise<T>) => action(),
+  };
+  const payments = new PaymentService(store as unknown as Store);
+  const api = new Api(TOKEN);
+  api.config.use(
+    async () =>
+      ({
+        ok: true,
+        result: { id: 100, is_bot: true, first_name: "Autodom", username: "autodom_fixture" },
+      }) as never,
+  );
+  payments.configureStars(api, true, TOKEN);
+  const order: PaymentOrder = {
+    id: randomUUID(),
+    userId: 94,
+    vin: vinResult.vin,
+    product: "vin_report",
+    reportKind: "korea",
+    provider: "telegram_stars",
+    channel: "telegram",
+    currency: "XTR",
+    amount: 500,
+    title: "PDF",
+    description: "PDF",
+    seller: "Autodom",
+    executor: "Autodom",
+    supportUrl: "https://t.me/autodom_fixture?start=paysupport",
+    terms: "PDF",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    createdAt: "2026-09-16T00:00:00.000Z",
+    acceptedAt: null,
+    paidAt: null,
+    invoiceUrl: null,
+    invoiceStatus: "offered",
+    paymentStatus: "unpaid",
+    fulfillmentStatus: "ready",
+    chargeId: null,
+    needsReview: false,
+    preCheckoutId: null,
+    reportFileId: null,
+    reportMessageId: null,
+    deliveredAt: null,
+    adminNotifiedAt: null,
+    refundPending: false,
+  };
+  const lookup = vi.fn<VinLookup>(async () => vinResult);
+  const existing = vi.spyOn(payments.ledger, "findOpenVinReport").mockResolvedValue(null);
+  const create = vi.spyOn(payments.ledger, "createOffer").mockResolvedValue(order);
+  const salesServer = await startMiniAppServer({
+    token: TOKEN,
+    publicUrl: PUBLIC_URL,
+    host: "127.0.0.1",
+    port: 0,
+    assetsDirectory: directory,
+    store,
+    payments,
+    checkVin: lookup,
+    ready: async () => true,
+  });
+  try {
+    const address = salesServer.address();
+    if (!address || typeof address === "string") throw new Error("Server did not bind");
+    const post = (path: string, body: unknown, userId = order.userId) =>
+      fetch(`http://127.0.0.1:${address.port}/miniapp/api/${path}`, {
+        method: "POST",
+        headers: {
+          Authorization: authorization(userId),
+          Origin: PUBLIC_ORIGIN,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+    const request = { vin: vinResult.vin, reportKind: "korea" };
+    expect((await post("orders/report", request)).status).toBe(409);
+    expect((await post("vin", { vin: vinResult.vin })).status).toBe(200);
+    expect((await post("orders/report", { ...request, reportKind: "carfax" })).status).toBe(409);
+    expect((await post("orders/report", request, 95)).status).toBe(409);
+    expect((await post("orders/report", { ...request, reportKind: "unknown" })).status).toBe(400);
+    expect(create).not.toHaveBeenCalled();
+    const offered = await post("orders/report", request);
+    expect(offered.status).toBe(200);
+    expect(await offered.json()).toMatchObject({ order: { id: order.id, reportKind: "korea" } });
+    existing.mockResolvedValue(order);
+    expect((await post("orders/report", request)).status).toBe(200);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledTimes(1);
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      salesServer.close((error) => (error ? reject(error) : resolve()));
+      salesServer.closeAllConnections();
+    });
+  }
+});
+
 it("returns automatic archive evidence without a buyer profile or a paid-report offer", async () => {
   const before = analyticsEvents.length;
   checkVin.mockResolvedValueOnce({

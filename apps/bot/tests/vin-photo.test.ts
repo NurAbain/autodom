@@ -225,6 +225,46 @@ it("offers CARFAX in Telegram only when CARFAX sales are enabled, using its exis
               ? { vin: checkedVin, record_count: 47, vehicle: "BMW 530i" }
               : null,
         },
+        archives:
+          status === "available"
+            ? {
+                vin: checkedVin,
+                checked_at: 1789490220,
+                coverage: "indexed_lots_only",
+                sources: [
+                  {
+                    provider: "copart",
+                    status: "no_photos",
+                    source_url: "https://www.copart.com/",
+                    checked_at: 1789490220,
+                    partial: false,
+                    lots: [
+                      {
+                        auction: "copart",
+                        lot_id: "51234567",
+                        source_url: "https://www.copart.com/lot/51234567",
+                        events: [
+                          {
+                            status: "sold",
+                            auction_at: null,
+                            auction_date: "2025-01-02",
+                            final_bid_usd_minor: 123456789,
+                          },
+                        ],
+                        photos: [],
+                        photos_complete: false,
+                        details: {
+                          make: "BMW",
+                          model: "530i",
+                          odometer: { value: 100, unit: "mi" },
+                          primary_damage: "FRONT END",
+                        },
+                      },
+                    ],
+                  },
+                ],
+              }
+            : undefined,
       }),
     });
     const messages: Record<string, unknown>[] = [];
@@ -249,6 +289,16 @@ it("offers CARFAX in Telegram only when CARFAX sales are enabled, using its exis
       ),
     );
     expect(offers).toHaveLength(enabled ? 1 : 0);
+    expect(
+      messages.filter((entry) =>
+        String(entry.text).includes("Для вашего авто есть полный отчёт CARFAX"),
+      ),
+    ).toHaveLength(enabled ? 1 : 0);
+    expect(messages.filter((entry) => String(entry.text).includes("BMW 530i"))).toHaveLength(1);
+    expect(JSON.stringify(messages)).not.toContain("google.com");
+    expect(messages).toHaveLength(enabled ? 3 : 2);
+    expect(messages.filter((entry) => String(entry.text).includes("FRONT END"))).toHaveLength(1);
+    expect(JSON.stringify(messages)).not.toMatch(/2025-01-02|Финальная ставка|Дата аукциона/u);
     if (enabled) {
       const keyboard = JSON.stringify(offers[0]!.reply_markup);
       expect(keyboard).toContain("carfax-report-example");

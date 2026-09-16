@@ -1565,7 +1565,6 @@ describe("grammY transport boundaries", () => {
         ).toBe(true);
         const text = calls.map((call) => String(call.payload.text ?? "")).join("\n");
         expect(text).toContain("12345678");
-        expect(text).toContain("23456789");
         expect(text).toContain("Elantra");
         expect(text).toContain("2011");
         expect(text.replaceAll(/\s/gu, "")).toContain("81234миль");
@@ -1580,8 +1579,6 @@ describe("grammY transport boundaries", () => {
         .map((call) => String(call.payload.text ?? ""))
         .join("\n");
       expect(priorText).toContain("12345678");
-      expect(priorText).toContain("23456789");
-      expect(priorText).toContain("2026-08-01");
       expect(priorText).not.toMatch(/записи по VIN не найдены|пока не подключена/);
       expect(JSON.stringify(calls.map((call) => call.payload.reply_markup))).not.toMatch(
         /vinarchive|vinphotos/,
@@ -1608,11 +1605,6 @@ describe("grammY transport boundaries", () => {
             .map((call) => uploadedBytes(call.payload.photo)),
         ),
       ).toEqual([secondBytes]);
-      const archiveText = calls
-        .filter((call) => call.method === "sendMessage")
-        .map((call) => String(call.payload.text))
-        .join("\n");
-      expect(archiveText).toContain("2026-08-01");
       expect(await store.getProfile(1)).toBeNull();
       expect(downloaded).toEqual([...firstPhotos, secondPhoto]);
     },
@@ -1841,15 +1833,6 @@ describe("grammY transport boundaries", () => {
     expect(checkVin).toHaveBeenCalledExactlyOnceWith("KMHDU41DBAU123456");
     expect(await store.getProfile(1)).toBeNull();
     expect(await store.getDraft(1)).toEqual(draft);
-    expect(calls.at(-1)?.payload.reply_markup).toMatchObject({
-      inline_keyboard: expect.arrayContaining([
-        [
-          expect.objectContaining({
-            url: "https://www.google.com/search?q=%22KMHDU41DBAU123456%22",
-          }),
-        ],
-      ]),
-    });
     await bot.handleUpdate({ update_id: 5, message: { ...message, text: "/help" } });
     expect(String(calls.at(-1)?.payload.text)).toContain("/search");
     expect(checkVin).toHaveBeenCalledTimes(1);
@@ -1990,7 +1973,6 @@ describe("grammY transport boundaries", () => {
     ).toHaveLength(5 * 20);
     for (let index = 0; index < 5; index += 1) {
       expect(html).toContain(String(39720103 + index));
-      expect(html).toContain(`2024-05-0${index + 1}T11:12:13`);
     }
     const controls = sent.filter((call) => call.payload.reply_markup !== undefined);
     expect(controls).toHaveLength(1);

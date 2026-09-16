@@ -156,9 +156,9 @@ export interface VinCheckResult {
   car365: VinObservation & { data: Car365Record | null };
   /** Omitted when not configured or absent in an older API. */
   encar?: (VinObservation & { data: EncarHistory | null }) | undefined;
-  /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
+  /** Omitted when not configured, skipped after free-source evidence, or absent in an older API. */
   nhtsa_vpic?: (VinObservation & { data: NhtsaVpicRecord | null }) | undefined;
-  /** Omitted when not configured, skipped by Korean-first routing, or absent in an older API. */
+  /** Omitted unless earlier stages definitively miss, or absent in an older API. */
   autodev?: (VinObservation & { data: AutoDevRecord | null }) | undefined;
   /** Automatic non-Korean fallback; omitted when not configured, skipped, or absent in an older API. */
   archives?: VinArchiveResult | undefined;
@@ -171,12 +171,6 @@ export type VinLookup = (vin: string, signal?: AbortSignal) => Promise<VinCheckR
 export function normalizeVin(value: string): string | null {
   const vin = value.trim();
   return /^[A-HJ-NPR-Za-hj-npr-z0-9]{17}$/u.test(vin) ? vin.toUpperCase() : null;
-}
-
-/** User-initiated exact-phrase search, not a vehicle-history provider. */
-export function vinGoogleSearchUrl(value: string): string | null {
-  const vin = normalizeVin(value);
-  return vin ? `https://www.google.com/search?q=%22${vin}%22` : null;
 }
 
 export function encarHistoryDiscoveryUrl(value: string): string | null {

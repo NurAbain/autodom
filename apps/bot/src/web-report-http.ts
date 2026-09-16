@@ -5,7 +5,7 @@ import { z } from "zod";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { VIN_REPORT_FINIK_MINOR, VIN_REPORT_WEB_TERMS } from "./payment-text.js";
 import { type PaymentService, requirePaymentOrderId } from "./payments.js";
-import { confirmedVinReportKind, vinSourceText } from "./vin-text.js";
+import { confirmedVinReportKind } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
 
 const empty = z.object({}).strict();
@@ -145,7 +145,7 @@ export async function handleWebReportRequest(
           reportKind,
           summary:
             reportKind === "carfax"
-              ? `${vinSourceText("vagvin_carfax", result)}\nЗаказ CARFAX на этом сайте недоступен.`
+              ? "Для вашего авто есть полный отчёт CARFAX. Сам отчёт ещё не получен. Заказ CARFAX на этом сайте недоступен."
               : eligible
                 ? "Полный отчёт найден. Посмотрите образец PDF и условия доступа."
                 : "Наличие полного отчёта не подтверждено: покупка недоступна. Пустой результат или ошибка не доказывают отсутствие истории.",

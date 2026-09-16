@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { ProxyRoute } from "@autodom/core";
+import { ProxyRoute, type VinProvider } from "@autodom/core";
 import { fetch, getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VinCheckService } from "../src/vin.js";
@@ -381,6 +381,10 @@ describe("Korean-first VIN lookup", () => {
       archiveBody?: string;
       decoderUnavailable?: boolean;
       carfaxUnavailable?: boolean;
+      carfaxCount?: number;
+      nhtsaNotFound?: boolean;
+      providers?: readonly VinProvider[];
+      archiveEnabled?: boolean;
       timeoutMs?: number;
     } = {},
   ) {
@@ -459,7 +463,13 @@ describe("Korean-first VIN lookup", () => {
                 ? {
                     Count: 1,
                     Results: [
-                      { VIN, ErrorCode: "0", Make: "HYUNDAI", Model: "Porter", ModelYear: "1999" },
+                      {
+                        VIN,
+                        ErrorCode: options.nhtsaNotFound ? "7" : "0",
+                        Make: "HYUNDAI",
+                        Model: "Porter",
+                        ModelYear: "1999",
+                      },
                     ],
                   }
                 : {
@@ -494,7 +504,7 @@ describe("Korean-first VIN lookup", () => {
           statusCode: options.carfaxUnavailable ? 503 : 200,
           data: JSON.stringify({
             VIN,
-            "\u{1F4CD} Записи в базе CARFAX": 47,
+            "\u{1F4CD} Записи в базе CARFAX": options.carfaxCount ?? 47,
             "\u2705 VIN определен как": "Hyundai Porter",
           }),
           responseOptions: { headers: { "content-type": "application/json" } },
@@ -502,8 +512,14 @@ describe("Korean-first VIN lookup", () => {
       });
     if (options.directDelay) carfaxResponse.delay(options.directDelay);
     const lookup = new VinCheckService({
-      providers: ["carhistory", "car365", "nhtsa_vpic", "autodev", "vagvin_carfax"],
-      archiveProviders: ["carway"],
+      providers: options.providers ?? [
+        "carhistory",
+        "car365",
+        "nhtsa_vpic",
+        "autodev",
+        "vagvin_carfax",
+      ],
+      archiveProviders: options.archiveEnabled === false ? [] : ["carway"],
       routes: [
         new ProxyRoute("datacenter", "http://proxy.invalid:10000", "Basic dXNlcjpwYXNz"),
         new ProxyRoute("residential", "http://proxy.invalid:7000", "Basic dXNlcjpwYXNz"),
@@ -594,7 +610,7 @@ describe("Korean-first VIN lookup", () => {
     },
   );
 
-  it("waits for both Korean misses before contacting decoders, archives and CARFAX", async () => {
+  it("waits for both Korean misses, then checks CARFAX and archives without decoding a CARFAX match", async () => {
     const { lookup, events, directRequests, carfaxRequests } = fixture("not_found", "not_found", {
       koreanDelay: 300,
     });
@@ -605,9 +621,9 @@ describe("Korean-first VIN lookup", () => {
     const result = await pending;
     expect(result.carhistory.status).toBe("not_found");
     expect(result.car365.status).toBe("not_found");
-    expect(directRequests.toSorted()).toEqual(["autodev", "carway", "nhtsa_vpic"]);
-    expect(result.nhtsa_vpic).toMatchObject({ status: "available", data: { vin: VIN } });
-    expect(result.autodev).toMatchObject({ status: "available", data: { vin: VIN } });
+    expect(directRequests).toEqual(["carway"]);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
+    expect(result).not.toHaveProperty("autodev");
     expect(result.archives).toMatchObject({
       vin: VIN,
       sources: [{ provider: "carway", status: "not_found", partial: false }],
@@ -628,9 +644,9 @@ describe("Korean-first VIN lookup", () => {
     const result = await lookup.check(VIN);
     expect(result.carhistory.status).toBe("not_found");
     expect(result.car365.status).toBe("not_found");
-    expect(directRequests.toSorted()).toEqual(["autodev", "carway", "nhtsa_vpic"]);
-    expect(result.nhtsa_vpic).toMatchObject({ status: "unavailable", data: null });
-    expect(result.autodev).toMatchObject({ status: "unavailable", data: null });
+    expect(directRequests).toEqual(["carway"]);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
+    expect(result).not.toHaveProperty("autodev");
     expect(result.archives?.sources).toMatchObject([
       { provider: "carway", status: "unavailable", partial: true, lots: [] },
     ]);
@@ -669,15 +685,15 @@ describe("Korean-first VIN lookup", () => {
     expect(directRequests).toEqual([]);
   });
 
-  it("retains archive evidence when both decoders and CARFAX are unavailable", async () => {
-    const { lookup } = fixture("not_found", "not_found", {
-      decoderUnavailable: true,
+  it("retains archive evidence without decoding even when CARFAX is unavailable", async () => {
+    const { lookup, directRequests } = fixture("not_found", "not_found", {
       carfaxUnavailable: true,
       archiveBody: archiveRecord,
     });
     const result = await lookup.check(VIN);
-    expect(result.nhtsa_vpic?.status).toBe("unavailable");
-    expect(result.autodev?.status).toBe("unavailable");
+    expect(directRequests).toEqual(["carway"]);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
+    expect(result).not.toHaveProperty("autodev");
     expect(result.vagvin_carfax).toMatchObject({ status: "unavailable", data: null });
     expect(result.archives).toMatchObject({
       vin: VIN,
@@ -691,17 +707,115 @@ describe("Korean-first VIN lookup", () => {
     });
   });
 
-  it("retains decoder evidence when the archive returns a mismatched VIN", async () => {
-    const { lookup } = fixture("not_found", "not_found", {
+  it("skips both decoders for a confirmed archive lot without photos and still finishes CARFAX", async () => {
+    const { lookup, directRequests, carfaxRequests } = fixture("not_found", "not_found", {
+      archiveBody: archiveRecord.replace(
+        `<div class="slider owl-carousel"><img src="${archivePhoto}" alt="${VIN}" data-hash="1"></div>`,
+        "",
+      ),
+      carfaxCount: 0,
+      directDelay: 150,
+    });
+    const result = await lookup.check(VIN);
+    expect(result.archives?.sources).toMatchObject([
+      {
+        status: "no_photos",
+        partial: true,
+        lots: [{ auction: "copart_uae", lot_id: "52984784", photos: [] }],
+      },
+    ]);
+    expect(carfaxRequests).toEqual([VIN]);
+    expect(result.vagvin_carfax?.status).toBe("not_found");
+    expect(directRequests).toEqual(["carway"]);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
+    expect(result).not.toHaveProperty("autodev");
+  });
+
+  it("waits for all free misses, then keeps a useful NHTSA decode without spending Auto.dev quota", async () => {
+    const { lookup, directRequests, carfaxRequests } = fixture("not_found", "not_found", {
+      carfaxCount: 0,
+      directDelay: 150,
+      archiveDelay: 250,
+    });
+    const pending = lookup.check(VIN);
+    await expect.poll(() => carfaxRequests.length).toBe(1);
+    expect(directRequests).toEqual(["carway"]);
+    const result = await pending;
+    expect(result.vagvin_carfax?.status).toBe("not_found");
+    expect(result.archives?.sources[0]?.status).toBe("not_found");
+    expect(result.nhtsa_vpic).toMatchObject({
+      status: "available",
+      data: { vin: VIN, make: "HYUNDAI", model: "Porter" },
+    });
+    expect(directRequests).toEqual(["carway", "nhtsa_vpic"]);
+    expect(result).not.toHaveProperty("autodev");
+  });
+
+  it("uses Auto.dev only after free checks and NHTSA definitively miss", async () => {
+    const { lookup, directRequests } = fixture("not_found", "not_found", {
+      carfaxCount: 0,
+      nhtsaNotFound: true,
+    });
+    const result = await lookup.check(VIN);
+    expect(directRequests).toEqual(["carway", "nhtsa_vpic", "autodev"]);
+    expect(result.nhtsa_vpic).toMatchObject({ status: "not_found", data: null });
+    expect(result.autodev).toMatchObject({
+      status: "available",
+      data: { vin: VIN, make: "Hyundai", model: "Porter" },
+    });
+  });
+
+  it("does not decode after CARFAX fails even when every archive misses", async () => {
+    const { lookup, directRequests } = fixture("not_found", "not_found", {
+      carfaxUnavailable: true,
+    });
+    const result = await lookup.check(VIN);
+    expect(result.vagvin_carfax?.status).toBe("unavailable");
+    expect(result.archives?.sources[0]?.status).toBe("not_found");
+    expect(directRequests).toEqual(["carway"]);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
+    expect(result).not.toHaveProperty("autodev");
+  });
+
+  it("does not spend Auto.dev quota after an NHTSA failure", async () => {
+    const { lookup, directRequests } = fixture("not_found", "not_found", {
+      carfaxCount: 0,
+      decoderUnavailable: true,
+    });
+    const result = await lookup.check(VIN);
+    expect(result.nhtsa_vpic?.status).toBe("unavailable");
+    expect(directRequests).toEqual(["carway", "nhtsa_vpic"]);
+    expect(result).not.toHaveProperty("autodev");
+  });
+
+  it.each([{ providers: ["nhtsa_vpic", "autodev"] }, { providers: ["autodev"] }] as const)(
+    "uses enabled decoders when earlier stages are disabled: $providers",
+    async ({ providers }) => {
+      const { lookup, directRequests } = fixture("not_found", "not_found", {
+        providers,
+        archiveEnabled: false,
+      });
+      const result = await lookup.check(VIN);
+      const provider = providers[0];
+      expect(directRequests).toEqual([provider]);
+      expect(result[provider]).toMatchObject({ status: "available", data: { vin: VIN } });
+      expect(result).not.toHaveProperty("archives");
+      expect(result).not.toHaveProperty("vagvin_carfax");
+      if (provider === "nhtsa_vpic") expect(result).not.toHaveProperty("autodev");
+      else expect(result).not.toHaveProperty("nhtsa_vpic");
+    },
+  );
+
+  it("does not treat an archive VIN mismatch as absence", async () => {
+    const { lookup, directRequests } = fixture("not_found", "not_found", {
+      carfaxCount: 0,
       archiveBody: archiveRecord.replaceAll(VIN, "WP1ZZZ92ZDLA74194"),
     });
     const result = await lookup.check(VIN);
-    expect(result.nhtsa_vpic?.status).toBe("available");
-    expect(result.autodev?.status).toBe("available");
-    expect(result.vagvin_carfax).toMatchObject({
-      status: "available",
-      data: { vin: VIN, record_count: 47 },
-    });
+    expect(directRequests).toEqual(["carway"]);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
+    expect(result).not.toHaveProperty("autodev");
+    expect(result.vagvin_carfax).toMatchObject({ status: "not_found", data: null });
     expect(result.archives?.sources).toMatchObject([
       { provider: "carway", status: "unavailable", partial: true, lots: [] },
     ]);
@@ -773,19 +887,24 @@ describe("Korean-first VIN lookup", () => {
       .intercept({ path: "/public/data/lotdetails/solr/lotImages/52446376" })
       .reply(200, captured("images-sold"))
       .delay(500);
+    let decoderRequests = 0;
     direct
       .get("https://vpic.nhtsa.dot.gov")
       .intercept({ path: `/api/vehicles/DecodeVinValues/${vin}?format=json` })
-      .reply(
-        200,
-        {
-          Count: 1,
-          Results: [{ VIN: vin, ErrorCode: "0", Make: "MERCEDES-BENZ", ModelYear: "2020" }],
-        },
-        { headers: { "content-type": "application/json" } },
-      );
+      .reply(() => {
+        decoderRequests++;
+        return {
+          statusCode: 200,
+          data: {
+            Count: 1,
+            Results: [{ VIN: vin, ErrorCode: "0", Make: "MERCEDES-BENZ", ModelYear: "2020" }],
+          },
+          responseOptions: { headers: { "content-type": "application/json" } },
+        };
+      });
     const result = await lookup.check(vin);
-    expect(result.nhtsa_vpic?.status).toBe("available");
+    expect(decoderRequests).toBe(0);
+    expect(result).not.toHaveProperty("nhtsa_vpic");
     expect(result.archives).toMatchObject({
       vin,
       sources: [
