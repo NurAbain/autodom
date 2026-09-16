@@ -35,14 +35,7 @@ const result: VinCheckResult = {
 
 describe("VIN observations presented without buying or certifying a report", () => {
   it("distinguishes recorded mileage, missing damage data and report availability", () => {
-    const { text, richHtml } = vinResultPresentation(result);
-    const rendered = load(richHtml);
-    expect(
-      rendered("td b")
-        .map((_index, node) => rendered(node).text())
-        .get(),
-    ).toEqual(expect.arrayContaining(["Avante", "0 км", "2024-05-02", "2010-01-15"]));
-    expect(rendered("table, tg-button").first().is("table")).toBe(true);
+    const { text } = vinResultPresentation(result);
     expect(text).toContain(result.vin);
     expect(text).toContain("0 км");
     expect(text).toContain("2024-05-02");
@@ -53,14 +46,7 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(text).not.toContain("NHTSA");
     expect(text).not.toContain("vpic.nhtsa.dot.gov");
     expect(vinVisibleProviders(result)).toEqual(["car365", "carhistory"]);
-    expect(vinResultActions(result).keyboard.inline_keyboard.flat()).toEqual(
-      expect.arrayContaining([expect.objectContaining({ callback_data: "vin-report-example" })]),
-    );
-    expect(rendered('tg-button[data="vin-report-example"]')).toHaveLength(1);
-    expect(rendered('tg-button[data^="vin-report-buy:"]')).toHaveLength(0);
-    for (const html of [text, richHtml]) {
-      expect(html).not.toMatch(/vinarchive:|Google|США \/ ОАЭ|Фото и поиск в интернете|web_app/);
-    }
+    expect(text).not.toMatch(/vinarchive:|Google|США \/ ОАЭ|Фото и поиск в интернете|web_app/);
   });
 
   it("presents decoder specifications separately from vehicle history", () => {
@@ -120,25 +106,19 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinVisibleProviders(decoded)).toEqual(["nhtsa_vpic"]);
     expect(vinResultNotice(decoded)).toBeNull();
     const actions = vinResultActions(decoded);
-    expect(actions.report).toEqual([]);
     expect(actions.keyboard.inline_keyboard.flat()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ callback_data: `vinarchive:${result.vin}` }),
         expect.objectContaining({ url: expect.stringContaining("google.com/search") }),
       ]),
     );
-    const { text, richHtml } = vinResultPresentation(decoded);
-    expect(load(richHtml)("h3")).toHaveLength(1);
-    for (const html of [text, richHtml]) {
-      expect(html).toContain("HYUNDAI");
-      expect(html).toContain("SOUTH KOREA");
-      expect(html).not.toMatch(
-        /Экспорт и пробег|Полный отчёт|vin-report-example|Avante|0 км|Заказ/,
-      );
-    }
+    const { text } = vinResultPresentation(decoded);
+    expect(text).toContain("HYUNDAI");
+    expect(text).toContain("SOUTH KOREA");
+    expect(text).not.toMatch(/Экспорт и пробег|Полный отчёт|vin-report-example|Avante|0 км|Заказ/);
   });
 
-  it("keeps found facts and sample while disclosing failed checks without empty source sections", () => {
+  it("keeps found facts while disclosing failed checks without empty source sections", () => {
     const partial: VinCheckResult = {
       ...result,
       carhistory: { ...result.carhistory, status: "unavailable" },
@@ -146,12 +126,9 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinVisibleProviders(partial)).toEqual(["car365"]);
     expect(vinResultNotice(partial)).toMatch(/неполная.*не удалось/);
     const presentation = vinResultPresentation(partial);
-    expect(load(presentation.richHtml)('tg-button[data="vin-report-example"]')).toHaveLength(1);
-    for (const html of [presentation.text, presentation.richHtml]) {
-      expect(html).toContain("Avante");
-      expect(html).toMatch(/неполная/);
-      expect(html).not.toContain("Наличие отчёта подтверждено");
-    }
+    expect(presentation.text).toContain("Avante");
+    expect(presentation.text).toMatch(/неполная/);
+    expect(presentation.text).not.toContain("Наличие отчёта подтверждено");
   });
 
   it("treats unknown decoder fields as unknown rather than absent vehicle features", () => {
@@ -262,13 +239,9 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinResultActions(history).photos).toEqual([
       expect.objectContaining({ callback_data: `vinphotos:${result.vin}` }),
     ]);
-    const photoPresentation = load(vinResultPresentation(history).richHtml);
-    expect(photoPresentation('tg-button[data^="vinphotos:"]')).toHaveLength(1);
-    expect(photoPresentation("img, video, source")).toHaveLength(0);
     for (const status of ["disabled", "unavailable", "not_found"] as const) {
       const stale = { ...history, encar: { ...history.encar, status } };
       expect(hasKoreanVinRecord(stale)).toBe(false);
-      expect(vinResultActions(stale).report).toEqual([]);
       expect(vinResultActions(stale).photos).toEqual([]);
       expect(
         vinSourceText("encar", { ...history, encar: { ...history.encar, status } }),
@@ -282,23 +255,16 @@ describe("VIN observations presented without buying or certifying a report", () 
     expect(vinResultNotice(history)).toMatch(/неполная/);
   });
 
-  it("keeps provider markup as visible text rather than links or purchase buttons in either format", () => {
+  it("keeps provider markup as visible text rather than links or purchase buttons", () => {
     const model =
       '<tg-button type="url" url="https://attacker.invalid">Купить</tg-button> & <b>GT</b>';
     const presentation = vinResultPresentation({
       ...result,
       car365: { ...result.car365, data: { ...result.car365.data!, model } },
     });
-    for (const html of [presentation.text, presentation.richHtml]) {
-      const rendered = load(html);
-      expect(rendered('a, script, [url*="attacker.invalid"]')).toHaveLength(0);
-      expect(rendered.root().text()).toContain(model);
-      expect(
-        rendered("b")
-          .map((_index, node) => rendered(node).text())
-          .get(),
-      ).toContain(model);
-    }
+    const rendered = load(presentation.text);
+    expect(rendered('a, script, [url*="attacker.invalid"]')).toHaveLength(0);
+    expect(rendered.root().text()).toContain(model);
   });
 
   it("never presents unknown or stale export mileage as zero or as a successful check", () => {
@@ -309,12 +275,7 @@ describe("VIN observations presented without buying or certifying a report", () 
         data: { ...result.car365.data!, last_mileage_km: null },
       },
     });
-    const rendered = load(unknown.richHtml);
-    expect(
-      rendered("td b")
-        .map((_index, node) => rendered(node).text())
-        .get(),
-    ).toContain("неизвестен");
+    expect(unknown.text).toContain("неизвестен");
     expect(unknown.text).not.toContain("0 км");
     for (const status of ["not_found", "unavailable", "disabled"] as const) {
       const stale: VinCheckResult = {
@@ -325,7 +286,6 @@ describe("VIN observations presented without buying or certifying a report", () 
       const presentation = vinResultPresentation(stale);
       expect(hasKoreanVinRecord(stale)).toBe(false);
       expect(vinVisibleProviders(stale)).toEqual([]);
-      expect(vinResultActions(stale).report).toEqual([]);
       expect(vinResultNotice(stale)).toMatch(
         status === "not_found"
           ? /не найдены.*не подтверждает/
@@ -333,12 +293,9 @@ describe("VIN observations presented without buying or certifying a report", () 
             ? /неполная.*не удалось/
             : /не подключена.*не отправлен/,
       );
-      expect(load(presentation.richHtml)("h3")).toHaveLength(0);
-      for (const html of [presentation.text, presentation.richHtml]) {
-        expect(html).not.toMatch(/Avante|0 км|2024-05-02|Найдена экспортная декларация/);
-        expect(html).not.toContain("Наличие отчёта подтверждено");
-        expect(html).not.toMatch(/vin-report-example|Полный отчёт|Заказ/);
-      }
+      expect(presentation.text).not.toMatch(/Avante|0 км|2024-05-02|Найдена экспортная декларация/);
+      expect(presentation.text).not.toContain("Наличие отчёта подтверждено");
+      expect(presentation.text).not.toMatch(/vin-report-example|Полный отчёт|Заказ/);
     }
   });
 });

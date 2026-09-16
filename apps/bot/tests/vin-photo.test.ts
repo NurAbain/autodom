@@ -1,6 +1,7 @@
 import type { Store } from "@autodom/storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Conversation } from "../src/conversation.js";
+import { PaymentService } from "../src/payments.js";
 import { createTelegramBot } from "../src/telegram.js";
 import {
   createPhotoRecognizer,
@@ -96,6 +97,77 @@ async function fixture(enabled = true) {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+it("sends plain VIN facts and keeps the confirmed PDF offer in a separate message", async () => {
+  const checkedVin = "KMTG441BBKU056893";
+  const store = {
+    withLock: async (_key: string, run: () => Promise<unknown>) => run(),
+  } as unknown as Store;
+  const payments = new PaymentService(
+    store,
+    { url: "https://gateway.invalid", token: "diagnostic" },
+    fetch,
+    false,
+    true,
+  );
+  const bot = createTelegramBot(store, "100:test-token", {
+    mode: "vin",
+    payments,
+    conversation: { handle: async () => [] } as unknown as Conversation,
+    checkVin: async () => ({
+      vin: checkedVin,
+      checked_at: 1789490220,
+      carhistory: {
+        status: "available",
+        source_url: "https://www.carhistory.or.kr/",
+        checked_at: 1789490220,
+      },
+      car365: {
+        status: "available",
+        source_url: "https://www.car365.go.kr/",
+        checked_at: 1789490220,
+        data: {
+          vin: checkedVin,
+          model: "G70",
+          last_mileage_km: 268170,
+          export_date: "2025-09-20",
+          first_registration_date: "2019-09-30",
+          total_loss: null,
+        },
+      },
+    }),
+  });
+  const sent: { method: string; payload: Record<string, unknown> }[] = [];
+  bot.api.config.use(async (_previous, method, payload) => {
+    sent.push({ method, payload: payload as Record<string, unknown> });
+    return {
+      ok: true,
+      result:
+        method === "getMe"
+          ? { id: 100, is_bot: true, first_name: "Autodom", username: "autodom_test_bot" }
+          : { message_id: sent.length },
+    } as never;
+  });
+  await bot.init();
+  await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${checkedVin}` } });
+  expect(sent.some(({ method }) => method === "sendRichMessage")).toBe(false);
+  const messages = sent.filter(({ method }) => method === "sendMessage");
+  expect(messages).toHaveLength(2);
+  const facts = String(messages[0]!.payload.text);
+  expect(facts).toContain(checkedVin);
+  expect(facts).toContain("G70");
+  expect(facts.replaceAll(/\s/gu, "")).toContain("268170");
+  expect(facts).toContain("2025-09-20");
+  expect(facts).toContain("2019-09-30");
+  expect(facts).not.toMatch(/PDF|CarHistory|Результат получен|Как понимать результат/);
+  expect(JSON.stringify(messages[0]!.payload.reply_markup)).not.toContain("vin-report");
+  const offer = messages[1]!.payload;
+  expect(offer.text).toContain("Полный отчёт найден");
+  const keyboard = JSON.stringify(offer.reply_markup);
+  expect(keyboard).toContain("vin-report-example");
+  expect(keyboard).toContain(`vin-report-buy:${checkedVin}`);
+  expect(keyboard).toContain("499 сом");
+});
 
 describe("VIN photo safety", () => {
   it("joins OCR-separated characters without guessing ambiguous letters or slicing longer identifiers", () => {

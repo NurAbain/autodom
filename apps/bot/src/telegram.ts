@@ -412,7 +412,7 @@ export function createTelegramBot(
     let purchase: InlineKeyboardMarkup["inline_keyboard"][number][number] | undefined;
     let reportKind: VinReportKind | null = null;
     let photoOffer: VehiclePhotoOffer | undefined;
-    let presentation = { text: escapeHtml(VIN_NOT_ENABLED), richHtml: "" };
+    let presentation = { text: escapeHtml(VIN_NOT_ENABLED) };
     if (options.checkVin) {
       try {
         const checked = await options.checkVin(vin);
@@ -456,7 +456,6 @@ export function createTelegramBot(
       [
         {
           text: presentation.text,
-          ...(presentation.richHtml ? { richHtml: presentation.richHtml } : {}),
           buttons: [],
         },
       ],

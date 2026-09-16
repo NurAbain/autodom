@@ -18,7 +18,6 @@ import {
   type VinArchiveStatus,
 } from "@autodom/core/vin-archive";
 import { escapeHtml } from "./html.js";
-import { KOREAN_REPORT_PREVIEW } from "./korean-report-example.js";
 
 export const VIN_ARCHIVE_LABEL = "Архивные фото США / ОАЭ";
 export const VIN_PHOTOS_LABEL = "Получить фото авто";
@@ -340,14 +339,6 @@ type VinButton = { text: string; style?: "primary" } & (
 
 export function vinResultActions(result: VinCheckResult) {
   const koreanRecord = hasKoreanVinRecord(result);
-  const report: VinButton[] = koreanRecord
-    ? [
-        {
-          text: KOREAN_REPORT_PREVIEW.pdfLabel,
-          callback_data: "vin-report-example",
-        },
-      ]
-    : [];
   const photos: VinButton[] = confirmedEncarListings(result).some((listing) =>
     listing.photo_urls.some((url) => isEncarPhotoUrl(url, listing.id)),
   )
@@ -369,136 +360,48 @@ export function vinResultActions(result: VinCheckResult) {
   }
   const navigation: VinButton[] = [{ text: "Новая проверка", callback_data: "/vin" }];
   return {
-    report,
     photos,
     additional,
     navigation,
     keyboard: {
-      inline_keyboard: [
-        ...photos,
-        ...report,
-        ...additional.map(({ button }) => button),
-        ...navigation,
-      ].map((button) => [button]),
+      inline_keyboard: [...photos, ...additional.map(({ button }) => button), ...navigation].map(
+        (button) => [button],
+      ),
     },
   };
 }
 
-function richVinButtons(buttons: readonly VinButton[]): string {
-  return buttons
-    .map((button) => {
-      const action =
-        "callback_data" in button
-          ? `type="callback_data" data="${escapeHtml(button.callback_data)}"`
-          : `type="url" url="${escapeHtml(button.url)}"`;
-      return `<tg-button-row><tg-button ${action}${button.style ? ` style="${button.style}"` : ""}>${escapeHtml(button.text)}</tg-button></tg-button-row>`;
-    })
-    .join("");
-}
-
-/** Both Telegram formats share the same facts and order; neither offers an unavailable purchase. */
+/** Free VIN facts only; confirmed report access is sent separately. */
 export function vinResultPresentation(
   result: VinCheckResult,
   actions = vinResultActions(result),
-): { text: string; richHtml: string } {
-  const sections: {
-    title: string;
-    body: string;
-    checked?: string;
-    richBody?: string;
-    buttons?: readonly VinButton[];
-  }[] = [];
+): { text: string } {
+  const sections: string[] = [];
   for (const provider of vinVisibleProviders(result)) {
     const observation = result[provider];
-    if (!observation) continue;
-    if (provider === "car365") {
-      const facts = car365Facts(result.car365.data);
-      const notes = car365Notes(result.car365.data);
-      sections.push({
-        title: "Экспорт и пробег · бесплатно",
-        body: [
-          ...facts.map(([label, value]) => `${label}: <b>${escapeHtml(value)}</b>`),
-          "",
-          ...notes.map((note) => escapeHtml(note)),
-        ].join("\n"),
-        checked: vinCheckedText(observation.checked_at),
-        richBody:
-          "<table compact striped>" +
-          facts
-            .map(
-              ([label, value]) => `<tr><td>${label}</td><td><b>${escapeHtml(value)}</b></td></tr>`,
-            )
-            .join("") +
-          "</table>" +
-          `<p>${notes.map((note) => escapeHtml(note)).join("<br>")}</p>`,
-      });
-      continue;
-    }
-    if (provider === "carhistory") continue;
-    sections.push({
-      title: VIN_SOURCE_NAMES[provider],
-      body: escapeHtml(vinSourceDescription(provider, result)),
-      checked: vinCheckedText(observation.checked_at),
-    });
+    if (!observation || provider === "carhistory") continue;
+    const title =
+      provider === "car365" ? "Экспорт и пробег · бесплатно" : VIN_SOURCE_NAMES[provider];
+    const body =
+      provider === "car365"
+        ? [
+            ...car365Facts(result.car365.data).map(
+              ([label, value]) => `${label}: <b>${escapeHtml(value)}</b>`,
+            ),
+            "",
+            ...car365Notes(result.car365.data).map((note) => escapeHtml(note)),
+          ].join("\n")
+        : escapeHtml(vinSourceDescription(provider, result));
+    sections.push(`<b>${title}</b>\n${body}\n<i>${vinCheckedText(observation.checked_at)}</i>`);
   }
-  if (actions.photos.length) {
-    sections.push({
-      title: "Фото автомобиля",
-      body: "Найдены фотографии. Нажмите «Получить фото авто», чтобы посмотреть.",
-      buttons: actions.photos,
-    });
-  }
-  if (hasKoreanVinRecord(result)) {
-    const preview = KOREAN_REPORT_PREVIEW;
-    sections.push({
-      title: preview.title,
-      body: [
-        ...(result.carhistory.status === "available"
-          ? [`<b>${escapeHtml(vinSourceDescription("carhistory", result))}</b>`]
-          : []),
-        escapeHtml(preview.limitations),
-      ].join("\n\n"),
-      ...(result.carhistory.status === "available"
-        ? { checked: vinCheckedText(result.carhistory.checked_at) }
-        : {}),
-      buttons: actions.report,
-    });
-  }
+  if (actions.photos.length)
+    sections.push("Найдены фотографии. Нажмите «Получить фото авто», чтобы посмотреть.");
   const notice = vinResultNotice(result);
-  const vin = escapeHtml(result.vin);
-  const received = escapeHtml(`Результат получен: ${vinArchiveTime(result.checked_at)}`);
-  const caution = escapeHtml(VIN_CAUTION);
   return {
     text: [
-      `<b>Бесплатная проверка VIN</b>\n<code>${vin}</code>`,
+      `<b>Бесплатная проверка VIN</b>\n<code>${escapeHtml(result.vin)}</code>`,
       ...(notice ? [escapeHtml(notice)] : []),
-      ...sections.map(
-        ({ title, body, checked }) =>
-          `<b>${title}</b>\n${body}${checked ? `\n<i>${checked}</i>` : ""}`,
-      ),
-      `<b>Важно</b>\n${caution}`,
-      received,
+      ...sections,
     ].join("\n\n"),
-    richHtml:
-      `<h2>Бесплатная проверка VIN</h2><p><code>${vin}</code></p>` +
-      (notice ? `<p>${escapeHtml(notice)}</p>` : "") +
-      sections
-        .map(
-          ({ title, body, richBody, checked, buttons }, index) =>
-            `${index ? "<hr>" : ""}<h3>${title}</h3>` +
-            (richBody ?? `<p>${body.replaceAll("\n", "<br>")}</p>`) +
-            (buttons ? richVinButtons(buttons) : "") +
-            (checked ? `<footer>${checked}</footer>` : ""),
-        )
-        .join("") +
-      (actions.additional.length
-        ? "<details><summary>Фото и поиск в интернете</summary>" +
-          actions.additional
-            .map(({ button, notice }) => `<p>${escapeHtml(notice)}</p>${richVinButtons([button])}`)
-            .join("") +
-          "</details>"
-        : "") +
-      `<details><summary>Как понимать результат</summary><p>${caution}</p></details><footer>${received}</footer>` +
-      richVinButtons(actions.navigation),
   };
 }
