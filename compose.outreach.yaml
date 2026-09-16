@@ -30,7 +30,8 @@ services:
       AUTODOM_OUTREACH_LALAFO_SESSION_FILE: /run/outreach-sessions/lalafo.json
     volumes:
       - type: bind
-        source: ${AUTODOM_OUTREACH_SESSION_DIR:?Set a private session directory}
+        # Coolify accepts default interpolation here, but rejects required-variable syntax.
+        source: ${AUTODOM_OUTREACH_SESSION_DIR:-/data/autodom/outreach/sessions}
         target: /run/outreach-sessions
         read_only: true
         bind:
