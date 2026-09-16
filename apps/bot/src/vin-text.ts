@@ -5,7 +5,9 @@ import {
   encarListingUrl,
   isEncarPhotoUrl,
   normalizeVin,
+  type VagvinCarfaxRecord,
   VIN_PROVIDERS,
+  VIN_SOURCE_URLS,
   type VinCheckResult,
   type VinListingDetails,
   type VinListingReport,
@@ -212,6 +214,7 @@ export const VIN_SOURCE_NAMES: Record<VinProvider, string> = {
   encar: "Архив объявлений · Корея",
   nhtsa_vpic: "Характеристики · рынок США",
   autodev: "Характеристики · другие рынки",
+  vagvin_carfax: "Доступность CARFAX · VAGVIN",
 };
 
 export function confirmedEncarListings(result: VinCheckResult): EncarListing[] {
@@ -236,9 +239,30 @@ export function hasKoreanVinRecord(result: VinCheckResult): boolean {
   );
 }
 
-/** Free records, decoding and photos do not confirm that a full report exists. */
+function confirmedVagvinCarfaxRecord(result: VinCheckResult): VagvinCarfaxRecord | null {
+  const observation = result.vagvin_carfax;
+  const record = observation?.data;
+  if (
+    observation?.status !== "available" ||
+    observation.source_url !== VIN_SOURCE_URLS.vagvin_carfax ||
+    observation.checked_at === null ||
+    !Number.isFinite(observation.checked_at) ||
+    observation.checked_at < 0 ||
+    observation.checked_at > 8_640_000_000_000 ||
+    !record ||
+    normalizeVin(result.vin) !== result.vin ||
+    record.vin !== result.vin ||
+    !Number.isSafeInteger(record.record_count) ||
+    record.record_count <= 0
+  )
+    return null;
+  return record;
+}
+
+/** Decoding and photos are not report evidence; Korean reports retain precedence. */
 export function confirmedVinReportKind(result: VinCheckResult): VinReportKind | null {
-  return result.carhistory.status === "available" ? "korea" : null;
+  if (result.carhistory.status === "available") return "korea";
+  return confirmedVagvinCarfaxRecord(result) ? "carfax" : null;
 }
 
 export function vinVisibleProviders(result: VinCheckResult): VinProvider[] {
@@ -248,7 +272,8 @@ export function vinVisibleProviders(result: VinCheckResult): VinProvider[] {
       (provider) =>
         provider !== "car365" &&
         result[provider]?.status === "available" &&
-        (provider !== "encar" || confirmedEncarListings(result).length > 0),
+        (provider !== "encar" || confirmedEncarListings(result).length > 0) &&
+        (provider !== "vagvin_carfax" || confirmedVagvinCarfaxRecord(result) !== null),
     ),
   ];
 }
@@ -264,6 +289,7 @@ export function vinResultNotice(result: VinCheckResult): string | null {
   if (
     observations.some((observation) => observation.status === "unavailable") ||
     archives.some((source) => source.status === "unavailable" || source.partial) ||
+    (result.vagvin_carfax?.status === "available" && !confirmedVagvinCarfaxRecord(result)) ||
     (result.encar?.status === "available" &&
       (result.encar.data?.partial ||
         confirmedEncarListings(result).some((listing) =>
@@ -391,6 +417,17 @@ function vinSourceDescription(provider: VinProvider, result: VinCheckResult): st
         ].join("\n\n");
         break;
       }
+      if (provider === "vagvin_carfax") {
+        const record = confirmedVagvinCarfaxRecord(result);
+        if (!record) return "";
+        description = [
+          `По данным посредника VAGVIN, CARFAX доступен: записей в базе — ${record.record_count}.`,
+          ...(record.vehicle ? [`Автомобиль по данным VAGVIN: ${record.vehicle}`] : []),
+          "Это заявление стороннего сервиса о доступности, не официальный ответ CARFAX и не полученный отчёт. Сведения о ДТП, пробеге и владельцах здесь не проверены.",
+          VIN_CAUTION,
+        ].join("\n");
+        break;
+      }
       if (provider === "nhtsa_vpic") {
         const record = result.nhtsa_vpic?.data;
         const lines = ["Характеристики по данным производителя для рынка США."];
@@ -452,7 +489,8 @@ export function vinSourceText(provider: VinProvider, result: VinCheckResult): st
   const observation = result[provider];
   if (
     observation?.status !== "available" ||
-    (provider === "encar" && !confirmedEncarListings(result).length)
+    (provider === "encar" && !confirmedEncarListings(result).length) ||
+    (provider === "vagvin_carfax" && !confirmedVagvinCarfaxRecord(result))
   )
     return "";
   return `${vinSourceDescription(provider, result)}\n${vinCheckedText(observation.checked_at)}`;
@@ -506,6 +544,8 @@ export function vinResultPresentation(result: VinCheckResult): { text: string } 
           ].join("\n")
         : escapeHtml(vinSourceDescription(provider, result));
     sections.push(`<b>${title}</b>\n${body}\n<i>${vinCheckedText(observation.checked_at)}</i>`);
+    if (provider === "vagvin_carfax")
+      sections.push(`<a href="${VIN_SOURCE_URLS.vagvin_carfax}">Источник: VAGVIN</a>`);
   }
   const notice = vinResultNotice(result);
   return {

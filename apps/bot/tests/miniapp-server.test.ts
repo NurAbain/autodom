@@ -12,6 +12,7 @@ import type {
   VinArchiveResult,
 } from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
+import { Api } from "grammy";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import type { AnalyticsEvent } from "../src/analytics-contract.js";
 import { startMiniAppServer } from "../src/miniapp-server.js";
@@ -400,6 +401,113 @@ it("checks VIN without a buyer profile and preserves partial provider failures",
   });
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(getVinArchivePhoto).not.toHaveBeenCalled();
+});
+
+it("gates CARFAX sales independently of Korean sales and revokes offers after missing or failed checks", async () => {
+  for (const carfaxEnabled of [false, true]) {
+    const store = {} as Store;
+    const payments = new PaymentService(
+      store,
+      { url: "https://gateway.invalid", token: "fixture-gateway-token" },
+      async () => {
+        throw new Error("Unexpected gateway request");
+      },
+      false,
+      true,
+      carfaxEnabled,
+    );
+    const api = new Api(TOKEN);
+    api.config.use(async () => {
+      throw new Error("Unexpected Telegram request");
+    });
+    payments.configureStars(api, false, TOKEN);
+    let result = vinResult;
+    const salesServer = await startMiniAppServer({
+      token: TOKEN,
+      publicUrl: PUBLIC_URL,
+      host: "127.0.0.1",
+      port: 0,
+      assetsDirectory: directory,
+      store,
+      payments,
+      checkVin: async () => result,
+      ready: async () => true,
+      analytics: {
+        async record() {},
+        async forget() {
+          return true;
+        },
+      },
+    });
+    try {
+      const address = salesServer.address();
+      if (!address || typeof address === "string") throw new Error("Server did not bind");
+      const check = async () => {
+        const response = await fetch(`http://127.0.0.1:${address.port}/miniapp/api/vin`, {
+          method: "POST",
+          headers: {
+            Authorization: authorization(44),
+            Origin: PUBLIC_ORIGIN,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ vin: vinResult.vin }),
+        });
+        expect(response.status).toBe(200);
+        return response.json();
+      };
+      expect(await check()).toMatchObject({ reportKind: "korea", reportSalesEnabled: true });
+      for (const status of ["available", "not_found", "unavailable"] as const) {
+        result = {
+          ...vinResult,
+          carhistory: { ...vinResult.carhistory, status: "not_found" },
+          car365: { ...vinResult.car365, status: "not_found" },
+          archives: archiveResult,
+          vagvin_carfax: {
+            status,
+            source_url: "https://vagvin.ru/home",
+            checked_at: vinResult.checked_at + 0.125,
+            data:
+              status === "available"
+                ? { vin: vinResult.vin, record_count: 47, vehicle: "Hyundai" }
+                : null,
+          },
+        };
+        const response = await check();
+        expect(response).toMatchObject({
+          archives: archiveResult,
+          reportKind: status === "available" ? "carfax" : null,
+          reportSalesEnabled: status === "available" && carfaxEnabled,
+        });
+        const sample = await fetch(`http://127.0.0.1:${address.port}/miniapp/api/analytics`, {
+          method: "POST",
+          headers: {
+            Authorization: authorization(44),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            event: "report_sample_opened",
+            nonce: randomUUID(),
+            vin: vinResult.vin,
+          }),
+        });
+        expect(sample.status).toBe(status === "available" ? 200 : 409);
+        if (status !== "available") {
+          expect(response.reportPrice).toBeNull();
+          await expect(payments.reportOffer(44, vinResult.vin)).rejects.toMatchObject({
+            status: 409,
+          });
+        } else if (!carfaxEnabled) {
+          await expect(payments.reportOffer(44, vinResult.vin)).rejects.toMatchObject({
+            status: 503,
+          });
+        }
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        salesServer.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  }
 });
 
 it("returns automatic archive evidence without a buyer profile or a paid-report offer", async () => {

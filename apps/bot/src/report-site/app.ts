@@ -1,5 +1,5 @@
-import type { PaymentOrder } from "@autodom/core/payments";
-import { normalizeVin } from "@autodom/core/vin";
+import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
+import { normalizeVin, VIN_SOURCE_URLS } from "@autodom/core/vin";
 
 interface Session {
   authenticated: boolean;
@@ -12,6 +12,7 @@ interface Session {
 interface Eligibility {
   vin: string;
   eligible: boolean;
+  reportKind?: VinReportKind | null;
   summary: string;
 }
 
@@ -348,7 +349,7 @@ async function checkEligibility(): Promise<void> {
   const check = ++vinGeneration;
   checkingVin = true;
   checkVin.disabled = true;
-  vinStatus.textContent = "Запрашиваем свежую проверку корейских источников…";
+  vinStatus.textContent = "Запрашиваем свежую проверку источников…";
   try {
     const result = await request<Eligibility>("/vin", { vin });
     if (started !== generation || check !== vinGeneration || stopped) return;
@@ -356,6 +357,13 @@ async function checkEligibility(): Promise<void> {
       throw new Error("VIN в ответе не совпал. Повторите проверку; заказ не создан.");
     eligibility = result;
     vinStatus.textContent = `${result.summary}\n${result.eligible ? "Доступность подтверждена. Сам PDF ещё не получен и не куплен." : "Покупка по этому VIN недоступна. Это не подтверждает отсутствие истории."}`;
+    if (result.reportKind === "carfax") {
+      const source = node("a", "", "Источник: VAGVIN");
+      source.href = VIN_SOURCE_URLS.vagvin_carfax;
+      source.target = "_blank";
+      source.rel = "noopener noreferrer";
+      vinStatus.append(document.createTextNode("\n"), source);
+    }
     renderOffer();
   } catch (error) {
     if (started === generation && check === vinGeneration) vinStatus.textContent = errorText(error);

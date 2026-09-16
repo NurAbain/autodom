@@ -25,7 +25,8 @@ beforeAll(async () => {
   url = address.href;
 });
 afterAll(async () => {
-  await admin?.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+  // Let PostgreSQL finish disconnecting clients; FORCE races pg.Pool.end() and raises 57P01.
+  await admin?.query(`DROP DATABASE IF EXISTS "${database}"`);
   await admin?.end();
   await container?.stop();
 });

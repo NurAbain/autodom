@@ -158,6 +158,28 @@ describe("remote VIN API consumer", () => {
     await expect(unresolved(VIN)).rejects.toThrow();
   });
 
+  it("accepts VIN-bound CARFAX availability but rejects zero-count or mismatched offers", async () => {
+    const carfax = {
+      status: "available",
+      source_url: VIN_SOURCE_URLS.vagvin_carfax,
+      checked_at: result.checked_at,
+      data: { vin: VIN, record_count: 3, vehicle: null },
+    };
+    const valid = await upstream({ ...result, vagvin_carfax: carfax });
+    expect((await valid(VIN)).vagvin_carfax?.status).toBe("available");
+
+    for (const observation of [
+      { ...carfax, data: { ...carfax.data, record_count: 0 } },
+      { ...carfax, data: { ...carfax.data, record_count: "3" } },
+      { ...carfax, data: { ...carfax.data, vin: "KMFXKN7BPXU258801" } },
+      { ...carfax, source_url: "https://attacker.invalid/" },
+      { ...carfax, status: "not_found" },
+    ]) {
+      const invalid = await upstream({ ...result, vagvin_carfax: observation });
+      await expect(invalid(VIN)).rejects.toThrow();
+    }
+  });
+
   it("accepts a partial archive but rejects evidence belonging to another VIN or advertisement", async () => {
     const listing = {
       id: "39720103",

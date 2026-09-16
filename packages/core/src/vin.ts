@@ -1,6 +1,13 @@
 import type { VinArchiveResult } from "./vin-archive.js";
 
-export const VIN_PROVIDERS = ["carhistory", "car365", "encar", "nhtsa_vpic", "autodev"] as const;
+export const VIN_PROVIDERS = [
+  "carhistory",
+  "car365",
+  "encar",
+  "nhtsa_vpic",
+  "autodev",
+  "vagvin_carfax",
+] as const;
 export type VinProvider = (typeof VIN_PROVIDERS)[number];
 export type VinSourceStatus = "available" | "not_found" | "unavailable" | "disabled";
 
@@ -11,6 +18,7 @@ export const VIN_SOURCE_URLS: Readonly<Record<VinProvider, string>> = {
   encar: "https://fem.encar.com/",
   nhtsa_vpic: "https://vpic.nhtsa.dot.gov/api/",
   autodev: "https://docs.auto.dev/v2/products/vin-decode",
+  vagvin_carfax: "https://vagvin.ru/home",
 };
 
 export interface VinObservation {
@@ -53,6 +61,13 @@ export interface AutoDevRecord {
   transmission: string | null;
   origin_country: string | null;
   ambiguous: boolean;
+}
+
+/** VAGVIN's CARFAX record-count assertion, not the report or verified accident history. */
+export interface VagvinCarfaxRecord {
+  vin: string;
+  record_count: number;
+  vehicle: string | null;
 }
 
 export const ENCAR_HISTORY_MAX_LISTINGS = 5;
@@ -147,6 +162,8 @@ export interface VinCheckResult {
   autodev?: (VinObservation & { data: AutoDevRecord | null }) | undefined;
   /** Automatic non-Korean fallback; omitted when not configured, skipped, or absent in an older API. */
   archives?: VinArchiveResult | undefined;
+  /** Omitted when not configured or skipped by Korean-first routing. */
+  vagvin_carfax?: (VinObservation & { data: VagvinCarfaxRecord | null }) | undefined;
 }
 
 export type VinLookup = (vin: string, signal?: AbortSignal) => Promise<VinCheckResult>;

@@ -16,6 +16,7 @@ import { checkCarHistory } from "./carhistory.js";
 import { EncarHistoryLookup } from "./encar-cache.js";
 import { abortable } from "./http-response.js";
 import { checkNhtsaVpic } from "./nhtsa-vpic.js";
+import { VagvinCarfaxLookup } from "./vagvin-carfax.js";
 import { VinArchiveService } from "./vin-archive.js";
 import { VinTransport, type VinTransportOptions } from "./vin-session.js";
 
@@ -26,8 +27,10 @@ export class VinCheckService {
     encar: false,
     nhtsa_vpic: false,
     autodev: false,
+    vagvin_carfax: false,
   };
   readonly #transport: VinTransport | undefined;
+  readonly #vagvinCarfax: VagvinCarfaxLookup | undefined;
   readonly #abort = new AbortController();
   readonly #signal: AbortSignal;
   readonly #timeoutMs: number;
@@ -94,10 +97,13 @@ export class VinCheckService {
         signal: this.#signal,
       });
     if (
-      (this.#enabled.nhtsa_vpic || this.#enabled.autodev) &&
+      (this.#enabled.nhtsa_vpic || this.#enabled.autodev || this.#enabled.vagvin_carfax) &&
       (!Number.isSafeInteger(this.#timeoutMs) || this.#timeoutMs < 1)
     ) {
       throw new SourceError("Direct VIN request timeout must be a positive integer");
+    }
+    if (this.#enabled.vagvin_carfax) {
+      this.#vagvinCarfax = new VagvinCarfaxLookup({ ...options, signal: this.#signal });
     }
   }
 
@@ -126,7 +132,7 @@ export class VinCheckService {
     const vin = normalizeVin(value);
     if (!vin) throw new RangeError("VIN must contain 17 letters and digits, without I, O or Q");
     signal?.throwIfAborted();
-    // Korea, decoders and archives share one deadline, never a fresh fallback budget.
+    // Korea and all fallback providers share one deadline, never a fresh fallback budget.
     const deadline = AbortSignal.timeout(this.#timeoutMs);
     const cancellation = AbortSignal.any([this.#signal, ...(signal ? [signal] : [])]);
     const workflowSignal = AbortSignal.any([cancellation, deadline]);
@@ -250,6 +256,23 @@ export class VinCheckService {
         if (!this.#archives) return;
         result.archives = await this.#archives.check(vin, cancellation, deadline);
       })(),
+      (async () => {
+        if (!this.#vagvinCarfax) return;
+        const observation: NonNullable<VinCheckResult["vagvin_carfax"]> = {
+          status: "unavailable",
+          source_url: VIN_SOURCE_URLS.vagvin_carfax,
+          checked_at: Date.now() / 1000,
+          data: null,
+        };
+        result.vagvin_carfax = observation;
+        try {
+          observation.data = await this.#vagvinCarfax.check(vin, workflowSignal);
+          observation.status = observation.data ? "available" : "not_found";
+        } catch {
+          signal?.throwIfAborted();
+          observation.status = "unavailable";
+        }
+      })(),
     ]);
     return result;
   };
@@ -263,6 +286,7 @@ export class VinCheckService {
     this.#abort.abort();
     await Promise.all([
       this.#transport?.close(),
+      this.#vagvinCarfax?.close(),
       this.#carcheck?.close(),
       this.#archives?.close(),
       Promise.allSettled(this.#active),

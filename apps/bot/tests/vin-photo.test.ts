@@ -162,11 +162,96 @@ it("sends plain VIN facts and keeps the confirmed PDF offer in a separate messag
   expect(facts).not.toMatch(/PDF|CarHistory|Результат получен|Как понимать результат/);
   expect(JSON.stringify(messages[0]!.payload.reply_markup)).not.toContain("vin-report");
   const offer = messages[1]!.payload;
-  expect(offer.text).toContain("Полный отчёт найден");
   const keyboard = JSON.stringify(offer.reply_markup);
   expect(keyboard).toContain("vin-report-example");
   expect(keyboard).toContain(`vin-report-buy:${checkedVin}`);
   expect(keyboard).toContain("499 сом");
+});
+
+it("offers CARFAX in Telegram only when CARFAX sales are enabled, using its existing KGS flow", async () => {
+  const checkedVin = "WBAJA9C56KB389776";
+  for (const enabled of [false, true]) {
+    const store = {
+      withLock: async (_key: string, run: () => Promise<unknown>) => run(),
+    } as unknown as Store;
+    const payments = new PaymentService(
+      store,
+      { url: "https://gateway.invalid", token: "diagnostic" },
+      fetch,
+      false,
+      true,
+      enabled,
+    );
+    let status: "available" | "unavailable" = "available";
+    const outcomes: (string | undefined)[] = [];
+    const bot = createTelegramBot(store, "100:test-token", {
+      mode: "vin",
+      payments,
+      conversation: { handle: async () => [] } as unknown as Conversation,
+      analytics: {
+        async record(event) {
+          if (event.event === "vin_completed") outcomes.push(event.outcome);
+        },
+        async forget() {
+          return true;
+        },
+      },
+      checkVin: async () => ({
+        vin: checkedVin,
+        checked_at: 1789490220,
+        carhistory: {
+          status: "not_found",
+          source_url: "https://www.carhistory.or.kr/",
+          checked_at: 1789490220,
+        },
+        car365: {
+          status: "not_found",
+          source_url: "https://www.car365.go.kr/",
+          checked_at: 1789490220,
+          data: null,
+        },
+        vagvin_carfax: {
+          status,
+          source_url: "https://vagvin.ru/home",
+          checked_at: 1789490220,
+          data:
+            status === "available"
+              ? { vin: checkedVin, record_count: 47, vehicle: "BMW 530i" }
+              : null,
+        },
+      }),
+    });
+    const messages: Record<string, unknown>[] = [];
+    bot.api.config.use(async (_previous, method, payload) => {
+      if (method === "sendMessage") messages.push(payload as Record<string, unknown>);
+      return {
+        ok: true,
+        result:
+          method === "getMe"
+            ? { id: 100, is_bot: true, first_name: "Autodom", username: "autodom_test_bot" }
+            : { message_id: messages.length },
+      } as never;
+    });
+    await bot.init();
+    await bot.handleUpdate({ update_id: 1, message: { ...message, text: `/vin ${checkedVin}` } });
+    expect(outcomes).toEqual(["available"]);
+    expect(String(messages[0]!.text)).toMatch(/VAGVIN.*47/s);
+    const offers = messages.filter((entry) =>
+      JSON.stringify(entry.reply_markup).includes(`vin-report-buy:${checkedVin}`),
+    );
+    expect(offers).toHaveLength(enabled ? 1 : 0);
+    if (enabled) {
+      const keyboard = JSON.stringify(offers[0]!.reply_markup);
+      expect(keyboard).toContain("carfax-report-example");
+      expect(keyboard).toContain("499 сом");
+      expect(keyboard).not.toContain('"callback_data":"vin-report-example"');
+    }
+    status = "unavailable";
+    messages.length = 0;
+    await bot.handleUpdate({ update_id: 2, message: { ...message, text: `/vin ${checkedVin}` } });
+    expect(outcomes).toEqual(["available", "unavailable"]);
+    expect(JSON.stringify(messages)).not.toContain(`vin-report-buy:${checkedVin}`);
+  }
 });
 
 describe("VIN photo safety", () => {
