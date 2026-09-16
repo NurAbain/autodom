@@ -171,6 +171,57 @@ describe("Bid.Cars photo downloads", () => {
 });
 
 describe("Bid.Cars exact VIN archive", () => {
+  it("recovers versioned photos through native fast search when both VIN lookups are ambiguous", async () => {
+    let fastUrl = LOT.replace("/en/lot/", "/lot/");
+    const { service, requests } = setup({
+      fetch: async (url) => {
+        if (url.pathname.startsWith("/app/search/en/vin-lot/"))
+          return new Response(
+            JSON.stringify({
+              results: 2,
+              url: `https://bid.cars/en/search/archived/results?search-type=typing&query=${VIN}`,
+            }),
+          );
+        if (url.href === SEARCH)
+          return new Response(JSON.stringify({ ...rows(), data: [], per_page: 1 }));
+        if (url.pathname === `/app/search/fast/${VIN}`)
+          return new Response(JSON.stringify({ status: "ok", url: fastUrl }));
+        if (url.href === LOT)
+          return new Response(
+            html.replaceAll(/(https:\/\/mercury\.bid\.cars\/[^"]+\.jpg)"/gu, '$1?ver=0337"'),
+          );
+        if (url.origin === "https://mercury.bid.cars")
+          return new Response(Buffer.from([255, 216, 255, 224]), { status: 206 });
+        throw new Error(`Untrusted discovery must not be requested: ${url.href}`);
+      },
+    });
+    const result = await service.check(VIN, new AbortController().signal);
+    expect(result).toMatchObject({
+      status: "available",
+      partial: true,
+      lots: [{ auction: "iaai", lot_id: "45397077", photos_complete: true }],
+    });
+    expect(result.lots[0]?.photos).toEqual(
+      Array.from({ length: 16 }, (_, index) =>
+        PHOTO.replace("-1.jpg", `-${index + 1}.jpg?ver=0337`),
+      ),
+    );
+    for (const invalid of [
+      fastUrl.replace("https://bid.cars", "https://attacker.invalid"),
+      fastUrl.replace(VIN, "1FTFW1ED9NFB06107"),
+      `${fastUrl}?redirect=https://attacker.invalid`,
+    ]) {
+      fastUrl = invalid;
+      requests.length = 0;
+      expect(await service.check(VIN, new AbortController().signal)).toMatchObject({
+        status: "unavailable",
+        partial: true,
+        lots: [],
+      });
+      expect(requests.every((url) => new URL(url).pathname.startsWith("/app/search/"))).toBe(true);
+    }
+  });
+
   it("recovers related archives from verified current history without publishing the current lot", async () => {
     const currentLot = LOT.replace("0-45397077", "0-45397079");
     const copartLot = LOT.replace("0-45397077", "1-59622426");
