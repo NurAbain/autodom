@@ -224,8 +224,8 @@ export class OutreachService {
                 (project_id,platform,account_label,auth,enabled)
                VALUES ($1,$2,$3,'server_session',true)
                ON CONFLICT (project_id,platform) DO UPDATE SET
-                 account_label=EXCLUDED.account_label,auth='server_session',enabled=true,
-                 updated_at=clock_timestamp()`,
+                 account_label=EXCLUDED.account_label,login='',auth='server_session',
+                 credential=NULL,enabled=true,updated_at=clock_timestamp()`,
               [DEFAULT_PROJECT_ID, source, `${source} · серверная сессия`],
             );
         });
@@ -256,16 +256,30 @@ export class OutreachService {
   async createProject(input: ProjectInput): Promise<MarketingProject> {
     const parsed = parse(projectInputSchema, input);
     return this.safe(async () => {
-      const id = randomUUID();
-      const row = (
-        await this.pool.query<ProjectRow>(
-          `INSERT INTO autodom_outreach.projects(id,name,description)
-           VALUES ($1,$2,$3) RETURNING *`,
-          [id, parsed.name, parsed.description],
-        )
-      ).rows[0];
-      if (!row) throw new ServiceError(503, "Проект не был сохранён");
-      return this.project(row);
+      const client = await this.pool.connect();
+      try {
+        return await this.transaction(client, async () => {
+          const id = randomUUID();
+          const row = (
+            await client.query<ProjectRow>(
+              `INSERT INTO autodom_outreach.projects(id,name,description)
+               VALUES ($1,$2,$3) RETURNING *`,
+              [id, parsed.name, parsed.description],
+            )
+          ).rows[0];
+          if (!row) throw new ServiceError(503, "Проект не был сохранён");
+          for (const source of this.messengers.keys())
+            await client.query(
+              `INSERT INTO autodom_outreach.connections
+                (project_id,platform,account_label,auth,enabled)
+               VALUES ($1,$2,$3,'server_session',true)`,
+              [id, source, `${source} · серверная сессия`],
+            );
+          return this.project(row);
+        });
+      } finally {
+        client.release();
+      }
     });
   }
 
@@ -365,26 +379,39 @@ export class OutreachService {
           [projectId, parsed.platform],
         )
       ).rows[0];
-      if (!current && !parsed.secret)
-        throw new ServiceError(400, "Для нового подключения укажите секрет доступа");
+      const serverSessionPlatform =
+        parsed.platform === "mashina.kg" || parsed.platform === "lalafo.kg"
+          ? parsed.platform
+          : null;
       let credential = current?.credential ?? null;
       let auth = current?.auth;
-      if (parsed.secret) {
-        if (!this.vault.configured)
-          throw new ServiceError(409, "Серверное шифрование секретов не настроено");
-        if (parsed.platform === "instagram") {
-          if (!parsed.login) throw new ServiceError(400, "Для Instagram укажите логин аккаунта");
-          credential = this.vault.seal(
-            JSON.stringify({ version: 1, password: parsed.secret, session: null }),
-            `${projectId}:${parsed.platform}`,
+      if (serverSessionPlatform) {
+        if (parsed.login || parsed.secret)
+          throw new ServiceError(
+            400,
+            `${serverSessionPlatform === "mashina.kg" ? "Mashina.kg" : "Lalafo.kg"} использует общую серверную сессию; логин и пароль здесь не нужны`,
           );
-          auth = "credentials";
-        } else {
-          credential = this.vault.seal(parsed.secret, `${projectId}:${parsed.platform}`);
-          auth =
-            parsed.platform === "facebook" || parsed.platform === "threads"
-              ? "access_token"
-              : "credentials";
+        if (!this.messengers.has(serverSessionPlatform))
+          throw new ServiceError(409, "Серверная сессия площадки не настроена");
+        credential = null;
+        auth = "server_session";
+      } else {
+        if (!current && !parsed.secret)
+          throw new ServiceError(400, "Для нового подключения укажите секрет доступа");
+        if (parsed.secret) {
+          if (!this.vault.configured)
+            throw new ServiceError(409, "Серверное шифрование секретов не настроено");
+          if (parsed.platform === "instagram") {
+            if (!parsed.login) throw new ServiceError(400, "Для Instagram укажите логин аккаунта");
+            credential = this.vault.seal(
+              JSON.stringify({ version: 1, password: parsed.secret, session: null }),
+              `${projectId}:${parsed.platform}`,
+            );
+            auth = "credentials";
+          } else {
+            credential = this.vault.seal(parsed.secret, `${projectId}:${parsed.platform}`);
+            auth = "access_token";
+          }
         }
       }
       if (!auth) throw new ServiceError(400, "Способ авторизации не определён");

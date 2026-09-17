@@ -139,10 +139,11 @@ function renderConnections() {
     card.append(top);
     card.append(node("p", connection ? connection.accountLabel : "Аккаунт не подключён", "listing-meta"));
     card.append(node("p", connection?.message || "Добавьте отдельный аккаунт для этого проекта.", "hint"));
-    const button = node("button", connection ? "Настроить" : "Подключить", "secondary");
+    const serverSession = MARKETPLACES.includes(platform);
+    const button = node("button", serverSession ? "Обновить статус" : connection ? "Настроить" : "Подключить", "secondary");
     button.type = "button";
     button.dataset.platform = platform;
-    button.addEventListener("click", () => openConnection(platform));
+    button.addEventListener("click", serverSession ? refreshData : () => openConnection(platform));
     card.append(button);
     fragment.append(card);
   }
@@ -183,10 +184,11 @@ async function createProject(event) {
     event.target.reset();
     event.target.closest("details").open = false;
     await refreshData();
-    show("notice", `Проект «${data.project.name}» создан. Подключите его платформы.`);
+    show("notice", `Проект «${data.project.name}» создан. Серверные сессии площадок подключены автоматически; настройте соцсети.`);
   });
 }
 function openConnection(platform) {
+  if (MARKETPLACES.includes(platform)) return;
   const connection = currentConnection(platform);
   const instagram = platform === "instagram";
   const tokenPlatform = platform === "facebook" || platform === "threads";

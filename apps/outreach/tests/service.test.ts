@@ -405,6 +405,45 @@ describe("durable marketplace delivery boundary", () => {
     expect(result.candidates[0]?.price).toBe(20000);
     expect((await service.preview({ ...input.filter, query: "%" })).candidates).toEqual([]);
   });
+  it("keeps shared marketplace sessions when projects are created or edited", async () => {
+    const vault = new CredentialVault(Buffer.alloc(32, 5).toString("base64"));
+    const marketing = new OutreachService(pool, new Map([["mashina.kg", messenger]]), true, vault);
+    await marketing.init();
+    const project = await marketing.createProject({
+      name: "Second marketplace brand",
+      description: "Uses the operator-managed Mashina session",
+    });
+    expect(
+      (await marketing.projectDetail(project.id)).connections.find(
+        (connection) => connection.platform === "mashina.kg",
+      ),
+    ).toMatchObject({
+      auth: "server_session",
+      credentialConfigured: true,
+      ready: true,
+    });
+    await expect(
+      marketing.upsertConnection(project.id, {
+        platform: "mashina.kg",
+        accountLabel: "Do not replace the shared session",
+        login: "operator",
+        secret: "private-password",
+        enabled: true,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      message: "Mashina.kg использует общую серверную сессию; логин и пароль здесь не нужны",
+    });
+    expect(
+      (await marketing.projectDetail(project.id)).connections.find(
+        (connection) => connection.platform === "mashina.kg",
+      ),
+    ).toMatchObject({
+      auth: "server_session",
+      login: "",
+      ready: true,
+    });
+  });
   it("isolates project credentials and publishes explicit Instagram comments through private API", async () => {
     const vault = new CredentialVault(Buffer.alloc(32, 7).toString("base64"));
     const marketing = new OutreachService(pool, new Map([["mashina.kg", messenger]]), true, vault);
