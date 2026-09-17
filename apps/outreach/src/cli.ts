@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 import { z } from "zod";
 import type { Messenger, OutreachSource } from "./contracts.js";
+import { InstagramPrivateWorker } from "./instagram-private.js";
 import { LalafoMessenger } from "./lalafo.js";
 import { loginLalafoSession } from "./lalafo-session.js";
 import { MashinaMessenger } from "./mashina.js";
@@ -28,6 +29,9 @@ Optional:
   AUTODOM_OUTREACH_SEND_ENABLED        false by default; true permits explicitly started campaigns
   AUTODOM_OUTREACH_MASHINA_SESSION_FILE Private JSON {"accessToken":"..."}, mode 0600
   AUTODOM_OUTREACH_LALAFO_SESSION_FILE  Private Lalafo session JSON, mode 0600
+  AUTODOM_OUTREACH_CREDENTIAL_KEY       Base64 32-byte key for per-project platform secrets
+  AUTODOM_OUTREACH_META_GRAPH_VERSION   Optional Meta Graph version; defaults to v26.0
+  AUTODOM_OUTREACH_INSTAGRAM_PYTHON      Python 3.10+ executable; defaults to python3
 
 Required only for login-lalafo (never needed in the web admin):
   AUTODOM_OUTREACH_LALAFO_PHONE / AUTODOM_OUTREACH_LALAFO_PASSWORD
@@ -120,6 +124,10 @@ export async function main(
     pool.on("error", () => console.error("Outreach database connection interrupted."));
     const stopped = Promise.withResolvers<void>();
     const stop = () => stopped.resolve();
+    const instagramPrivate = new InstagramPrivateWorker(
+      env.AUTODOM_OUTREACH_INSTAGRAM_PYTHON ?? "python3",
+      fileURLToPath(new URL("../instagram_worker.py", import.meta.url)),
+    );
     const runtime = await startOutreachServer({
       host,
       port,
@@ -129,6 +137,13 @@ export async function main(
       pool,
       messengers,
       sendEnabled,
+      ...(env.AUTODOM_OUTREACH_CREDENTIAL_KEY
+        ? { credentialKey: env.AUTODOM_OUTREACH_CREDENTIAL_KEY }
+        : {}),
+      ...(env.AUTODOM_OUTREACH_META_GRAPH_VERSION
+        ? { graphVersion: env.AUTODOM_OUTREACH_META_GRAPH_VERSION }
+        : {}),
+      instagramPrivate,
     });
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);

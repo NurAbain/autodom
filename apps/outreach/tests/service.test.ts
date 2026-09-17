@@ -4,9 +4,19 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testconta
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Store } from "../../../packages/storage/src/store.js";
-import { type Candidate, campaignSchema, DeliveryError, type Messenger } from "../src/contracts.js";
+import {
+  type Candidate,
+  campaignSchema,
+  DEFAULT_PROJECT_ID,
+  DeliveryError,
+  type Messenger,
+} from "../src/contracts.js";
+import type { InstagramPrivateClient } from "../src/instagram-private.js";
+import { InstagramWatchService } from "../src/instagram-watch.js";
 import { type ServerOptions, startOutreachServer } from "../src/server.js";
 import { OutreachService } from "../src/service.js";
+import { SocialCampaignService } from "../src/social.js";
+import { CredentialVault } from "../src/vault.js";
 
 let admin: pg.Pool;
 let pool: pg.Pool;
@@ -14,6 +24,7 @@ let catalog: Store;
 let container: StartedPostgreSqlContainer | undefined;
 const database = `outreach_${randomUUID().replaceAll("-", "")}`;
 const input = campaignSchema.parse({
+  projectId: DEFAULT_PROJECT_ID,
   name: "VIN",
   text: "Предложение проверки VIN",
   filter: { source: "mashina.kg", query: "Toyota", limit: 10 },
@@ -53,11 +64,12 @@ beforeAll(async () => {
   catalog = await Store.open(address.href);
   service = new OutreachService(pool, new Map([["mashina.kg", messenger]]), true);
   await service.init();
+  await new InstagramWatchService(pool).init();
 }, 120_000);
 beforeEach(async () => {
   delivered.length = 0;
   await pool.query(
-    "TRUNCATE autodom_outreach.contacts,autodom_outreach.deliveries,autodom_outreach.campaigns,autodom_outreach.images,public.events,public.listings CASCADE",
+    "TRUNCATE autodom_outreach.instagram_watch_pacing,autodom_outreach.instagram_observations,autodom_outreach.instagram_watches,autodom_outreach.contacts,autodom_outreach.deliveries,autodom_outreach.campaigns,autodom_outreach.images,public.events,public.listings CASCADE",
   );
   await pool.query(
     "UPDATE autodom_outreach.source_pacing SET last_attempt=NULL,next_allowed=NULL,attempt_day=NULL,attempts=0,blocked=false",
@@ -142,7 +154,11 @@ describe("durable marketplace delivery boundary", () => {
         GRANT USAGE ON SCHEMA public TO "${role}";
         GRANT SELECT ON public.listings TO "${role}";
       `);
-      const restricted = new OutreachService(restrictedPool, new Map(), false);
+      const restricted = new OutreachService(
+        restrictedPool,
+        new Map([["mashina.kg", messenger]]),
+        false,
+      );
       await restricted.init();
       await seed(["restricted-role"]);
       const campaign = await restricted.create(input);
@@ -163,6 +179,7 @@ describe("durable marketplace delivery boundary", () => {
         DROP ROLE "${role}";
       `);
       await service.init();
+      await new InstagramWatchService(pool).init();
     }
   });
 
@@ -387,5 +404,322 @@ describe("durable marketplace delivery boundary", () => {
     expect(result.candidates.map((candidate: Candidate) => candidate.listingId)).toEqual(["match"]);
     expect(result.candidates[0]?.price).toBe(20000);
     expect((await service.preview({ ...input.filter, query: "%" })).candidates).toEqual([]);
+  });
+  it("isolates project credentials and publishes explicit Instagram comments through private API", async () => {
+    const vault = new CredentialVault(Buffer.alloc(32, 7).toString("base64"));
+    const marketing = new OutreachService(pool, new Map([["mashina.kg", messenger]]), true, vault);
+    await marketing.init();
+    const project = await marketing.createProject({
+      name: "Second brand",
+      description: "Independent acquisition account",
+    });
+    await marketing.upsertConnection(project.id, {
+      platform: "instagram",
+      accountLabel: "Second brand Instagram",
+      login: "second.brand",
+      secret: "private-password",
+      enabled: true,
+    });
+    const calls: Array<{ url: string; method: string; body: string }> = [];
+    const graph = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({
+        url: String(input),
+        method: init?.method ?? "GET",
+        body: init?.body instanceof URLSearchParams ? init.body.toString() : "",
+      });
+      return new Response(JSON.stringify({ id: `remote-${calls.length}` }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    const privateComments: string[] = [];
+    const instagram: InstagramPrivateClient = {
+      async check() {
+        return { session: { device_id: "explicit-device" } };
+      },
+      async discover() {
+        return { session: { device_id: "explicit-device" }, media: [] };
+      },
+      async comment(_credentials, mediaId) {
+        privateComments.push(mediaId);
+        return { session: { device_id: "explicit-device" }, remoteId: `private-${mediaId}` };
+      },
+    };
+    const social = new SocialCampaignService(
+      pool,
+      (projectId, platform) => marketing.accessToken(projectId, platform),
+      true,
+      "v26.0",
+      graph,
+      instagram,
+      (projectId) => marketing.instagramCredentials(projectId),
+      (projectId, session) => marketing.saveInstagramSession(projectId, session),
+    );
+    await social.init();
+    const campaign = await social.create({
+      projectId: project.id,
+      name: "Launch comments",
+      platform: "instagram",
+      text: "Узнайте больше в профиле.",
+      targets: [
+        {
+          externalId: "photo_1",
+          url: "https://www.instagram.com/p/photo-1/",
+          mediaType: "photo",
+        },
+        {
+          externalId: "video_1",
+          url: "https://www.instagram.com/reel/video-1/",
+          mediaType: "video",
+        },
+      ],
+      intervalSeconds: 60,
+      dailyLimit: 2,
+    });
+    await social.action(campaign.id, "start", true);
+    await social.tick();
+    await pool.query(
+      "UPDATE autodom_outreach.social_pacing SET next_allowed=clock_timestamp()-interval '1 second' WHERE project_id=$1 AND platform='instagram'",
+      [project.id],
+    );
+    await social.tick();
+    const detail = await social.detail(campaign.id);
+    expect(detail.campaign).toMatchObject({ status: "completed", counts: { sent: 2 } });
+    expect(detail.deliveries.map((delivery) => delivery.target.mediaType)).toEqual([
+      "photo",
+      "video",
+    ]);
+    expect(privateComments).toEqual(["photo_1", "video_1"]);
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+    const connection = (await marketing.projectDetail(project.id)).connections[0];
+    expect(connection).toBeDefined();
+    expect(connection).toMatchObject({
+      platform: "instagram",
+      login: "second.brand",
+      credentialConfigured: true,
+      ready: true,
+    });
+    expect(JSON.stringify(connection)).not.toContain("private-password");
+    const stored = (
+      await pool.query<{ credential: Buffer }>(
+        "SELECT credential FROM autodom_outreach.connections WHERE project_id=$1 AND platform='instagram'",
+        [project.id],
+      )
+    ).rows[0]?.credential;
+    expect(stored).toBeDefined();
+    expect(stored?.toString("utf8")).not.toContain("private-password");
+  });
+  it("keeps Instagram password and refreshed private session encrypted", async () => {
+    const vault = new CredentialVault(Buffer.alloc(32, 13).toString("base64"));
+    const marketing = new OutreachService(pool, new Map(), true, vault);
+    await marketing.init();
+    const connection = await marketing.upsertConnection(DEFAULT_PROJECT_ID, {
+      platform: "instagram",
+      accountLabel: "Autodom Instagram",
+      login: "autodom.brand",
+      secret: "private-password",
+      enabled: true,
+    });
+    expect(connection).toMatchObject({
+      platform: "instagram",
+      login: "autodom.brand",
+      auth: "credentials",
+      ready: true,
+    });
+    expect(await marketing.instagramCredentials(DEFAULT_PROJECT_ID)).toEqual({
+      username: "autodom.brand",
+      password: "private-password",
+      session: null,
+    });
+    await marketing.saveInstagramSession(DEFAULT_PROJECT_ID, { device_id: "stable-device" });
+    expect(await marketing.instagramCredentials(DEFAULT_PROJECT_ID)).toEqual({
+      username: "autodom.brand",
+      password: "private-password",
+      session: { device_id: "stable-device" },
+    });
+    const stored = (
+      await pool.query<{ credential: Buffer }>(
+        "SELECT credential FROM autodom_outreach.connections WHERE project_id=$1 AND platform='instagram'",
+        [DEFAULT_PROJECT_ID],
+      )
+    ).rows[0]?.credential;
+    expect(stored?.toString("utf8")).not.toContain("private-password");
+    expect(stored?.toString("utf8")).not.toContain("stable-device");
+  });
+  it("comments on selected photo and video posts without an age cutoff", async () => {
+    const now = new Date("2026-09-17T12:00:00.000Z");
+    const vault = new CredentialVault(Buffer.alloc(32, 15).toString("base64"));
+    const marketing = new OutreachService(pool, new Map(), true, vault);
+    await marketing.init();
+    await marketing.upsertConnection(DEFAULT_PROJECT_ID, {
+      platform: "instagram",
+      accountLabel: "Autodom Instagram",
+      login: "autodom.brand",
+      secret: "private-password",
+      enabled: true,
+    });
+    const comments: string[] = [];
+    const privateClient: InstagramPrivateClient = {
+      async check() {
+        return { session: { device_id: "stable-device" } };
+      },
+      async discover(_credentials, targetUsername) {
+        return {
+          session: { device_id: "stable-device" },
+          media:
+            targetUsername === "dealer_one"
+              ? [
+                  {
+                    id: "photo-current",
+                    code: "photo-current",
+                    url: "https://www.instagram.com/p/photo-current/",
+                    mediaType: "photo",
+                    takenAt: "2026-09-17T11:30:00.000Z",
+                  },
+                  {
+                    id: "photo-stale",
+                    code: "photo-stale",
+                    url: "https://www.instagram.com/p/photo-stale/",
+                    mediaType: "photo",
+                    takenAt: "2026-09-17T09:59:00.000Z",
+                  },
+                ]
+              : [
+                  {
+                    id: "video-current",
+                    code: "video-current",
+                    url: "https://www.instagram.com/reel/video-current/",
+                    mediaType: "video",
+                    takenAt: "2026-09-17T10:01:00.000Z",
+                  },
+                ],
+        };
+      },
+      async comment(_credentials, mediaId) {
+        comments.push(mediaId);
+        return { session: { device_id: "stable-device" }, remoteId: `comment-${mediaId}` };
+      },
+    };
+    const watches = new InstagramWatchService(
+      pool,
+      privateClient,
+      (projectId) => marketing.instagramCredentials(projectId),
+      (projectId, session) => marketing.saveInstagramSession(projectId, session),
+      true,
+      () => now,
+    );
+    await watches.init();
+    await pool.query(
+      "TRUNCATE autodom_outreach.instagram_observations,autodom_outreach.instagram_watches CASCADE",
+    );
+    const watch = await watches.create({
+      projectId: DEFAULT_PROJECT_ID,
+      name: "Fresh dealer posts",
+      commentText: "Посмотрите доступные варианты в профиле.",
+      accounts: ["dealer_one", "dealer_two"],
+      mediaTypes: ["photo", "video"],
+      intervalSeconds: 300,
+      dailyLimit: 10,
+    });
+    await watches.action(watch.id, "start", true);
+    await watches.tick();
+    await pool.query(
+      "UPDATE autodom_outreach.instagram_watch_pacing SET next_allowed='2026-09-17T11:59:59.000Z' WHERE watch_id=$1",
+      [watch.id],
+    );
+    await watches.tick();
+    await pool.query(
+      "UPDATE autodom_outreach.instagram_watch_pacing SET next_allowed='2026-09-17T11:59:59.000Z' WHERE watch_id=$1",
+      [watch.id],
+    );
+    await watches.tick();
+    expect(comments).toEqual(["photo-stale", "video-current", "photo-current"]);
+    expect((await watches.list())[0]).toMatchObject({
+      status: "running",
+      counts: { sent: 3, skipped: 0, pending: 0 },
+    });
+  });
+  it("creates and edits an Instagram watch list", async () => {
+    const runtime = await startOutreachServer({
+      host: "127.0.0.1",
+      port: 0,
+      origin: "http://127.0.0.1",
+      username: "admin",
+      password: "testpass",
+      pool,
+      messengers: new Map(),
+      sendEnabled: false,
+      credentialKey: Buffer.alloc(32, 11).toString("base64"),
+    });
+    try {
+      const address = runtime.server.address();
+      if (!address || typeof address === "string") throw new Error("Expected a TCP listener");
+      const base = `http://127.0.0.1:${address.port}`;
+      const headers = {
+        Authorization: `Basic ${Buffer.from("admin:testpass").toString("base64")}`,
+        "Content-Type": "application/json",
+        Origin: "http://127.0.0.1",
+      };
+      const created = await fetch(`${base}/api/instagram-watches`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          projectId: DEFAULT_PROJECT_ID,
+          name: "Dealer posts",
+          commentText: "Подробности есть в нашем профиле.",
+          accounts: ["dealer_one", "dealer_two"],
+          mediaTypes: ["photo", "video"],
+          intervalSeconds: 300,
+          dailyLimit: 10,
+        }),
+      });
+      expect(created.status).toBe(200);
+      const createdBody = (await created.json()) as { watch: { id: string } };
+      const updated = await fetch(
+        `${base}/api/instagram-watches/${encodeURIComponent(createdBody.watch.id)}`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            name: "Dealer posts",
+            commentText: "Новая формулировка.",
+            accounts: ["dealer_two", "dealer_three"],
+            mediaTypes: ["video"],
+            intervalSeconds: 600,
+            dailyLimit: 5,
+          }),
+        },
+      );
+      expect(updated.status).toBe(200);
+      const list = await fetch(`${base}/api/instagram-watches`, { headers });
+      expect(list.status).toBe(200);
+      expect(await list.json()).toMatchObject({
+        watches: [
+          {
+            projectId: DEFAULT_PROJECT_ID,
+            name: "Dealer posts",
+            commentText: "Новая формулировка.",
+            accounts: ["dealer_two", "dealer_three"],
+            mediaTypes: ["video"],
+            status: "draft",
+          },
+        ],
+      });
+      await pool.query(
+        "UPDATE autodom_outreach.instagram_watches SET status='paused',last_error='Instagram unavailable' WHERE id=$1",
+        [createdBody.watch.id],
+      );
+      const metrics = await fetch(`${base}/metrics`);
+      expect(metrics.status).toBe(200);
+      const metricsBody = await metrics.text();
+      expect(metricsBody).toMatch(
+        /autodom_outreach_entities\{(?=[^}]*kind="instagram_watch")(?=[^}]*status="paused")(?=[^}]*error="true")[^}]*\} 1/,
+      );
+      expect(metricsBody).toMatch(
+        /autodom_outreach_queue_tick_success\{(?=[^}]*component="instagram_watch")[^}]*\} 1/,
+      );
+    } finally {
+      await runtime.close();
+    }
   });
 });

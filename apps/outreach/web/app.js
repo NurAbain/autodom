@@ -1,22 +1,46 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-const sources = ["mashina.kg", "lalafo.kg"];
-const deliveryLabels = { pending: "В очереди", sending: "Отправляется", sent: "Отправлено", failed: "Ошибка", unknown: "Неизвестно · ручная проверка", skipped: "Пропущено" };
-const campaignLabels = { draft: "Черновик", running: "Запущена", paused: "На паузе", completed: "Завершена", cancelled: "Отменена" };
-const state = { status: null, campaigns: [], detail: null, selectedId: null, busy: false, refreshing: null, imageBusy: false, imageId: null, imageUrl: null, imageVersion: 0, previewVersion: 0, previewKey: null, previewCount: 0, previewBusy: false, listKey: null, detailKey: null };
-const integer = (value) => Number.isInteger(value) && value >= 0;
+const MARKETPLACES = ["mashina.kg", "lalafo.kg"];
+const SOCIAL = ["instagram", "facebook", "threads"];
+const PLATFORMS = [...MARKETPLACES, ...SOCIAL];
+const PLATFORM_LABELS = {
+  "mashina.kg": "Mashina.kg",
+  "lalafo.kg": "Lalafo.kg",
+  instagram: "Instagram",
+  facebook: "Facebook",
+  threads: "Threads",
+};
+const DELIVERY_LABELS = { pending: "В очереди", sending: "Отправляется", sent: "Отправлено", failed: "Ошибка", unknown: "Неизвестно", skipped: "Пропущено" };
+const CAMPAIGN_LABELS = { draft: "Черновик", running: "Запущена", paused: "На паузе", completed: "Завершена", cancelled: "Отменена" };
+const state = {
+  status: null,
+  projects: [],
+  projectDetail: null,
+  projectId: null,
+  campaigns: [],
+  socialCampaigns: [],
+  instagramWatches: [],
+  selectedId: null,
+  selectedSocialId: null,
+  selectedInstagramWatchId: null,
+  editingInstagramWatchId: null,
+  detail: null,
+  socialDetail: null,
+  busy: false,
+  refreshing: null,
+  imageBusy: false,
+  imageId: null,
+  imageUrl: null,
+  imageVersion: 0,
+  previewVersion: 0,
+  previewKey: null,
+  previewCount: 0,
+  previewBusy: false,
+};
 const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const string = (value) => typeof value === "string";
-const nullableString = (value) => value === null || string(value);
 const uuid = (value) => string(value) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-const numberOrNull = (value) => value === null || (typeof value === "number" && Number.isFinite(value));
-const isFilter = (value) => record(value) && sources.includes(value.source) && string(value.query) && string(value.city) && numberOrNull(value.yearMin) && numberOrNull(value.yearMax) && numberOrNull(value.priceMin) && numberOrNull(value.priceMax) && ["USD", "KGS"].includes(value.currency) && integer(value.limit);
-const isCandidate = (value) => record(value) && string(value.listingId) && sources.includes(value.source) && string(value.title) && string(value.url) && string(value.city) && numberOrNull(value.year) && numberOrNull(value.price) && ["USD", "KGS"].includes(value.currency);
-const isCampaign = (value) => record(value) && string(value.id) && value.id.length > 0 && string(value.name) && string(value.text) && (value.imageId === null || uuid(value.imageId)) && isFilter(value.filter) && integer(value.intervalSeconds) && integer(value.dailyLimit) && Object.hasOwn(campaignLabels, value.status) && string(value.createdAt) && nullableString(value.lastError) && record(value.counts) && Object.keys(deliveryLabels).every((key) => integer(value.counts[key]));
-const isDelivery = (value) => record(value) && string(value.id) && value.id.length > 0 && string(value.campaignId) && isCandidate(value.candidate) && nullableString(value.recipientId) && Object.hasOwn(deliveryLabels, value.status) && nullableString(value.error) && nullableString(value.remoteId) && string(value.updatedAt);
-const isDetail = (value) => record(value) && isCampaign(value.campaign) && Array.isArray(value.deliveries) && value.deliveries.every((delivery) => isDelivery(delivery) && delivery.campaignId === value.campaign.id);
-const isStatus = (value) => record(value) && typeof value.sendEnabled === "boolean" && Array.isArray(value.sources) && value.sources.every((source) => record(source) && sources.includes(source.source) && typeof source.ready === "boolean" && string(source.message));
 
 function node(tag, text, className) {
   const element = document.createElement(tag);
@@ -29,7 +53,7 @@ function show(id, text) {
   $(id).hidden = !text;
 }
 function errorText(error) {
-  return error instanceof Error ? error.message : "Неизвестная ошибка. Обновите состояние перед повторным действием.";
+  return error instanceof Error ? error.message : "Неизвестная ошибка. Обновите состояние.";
 }
 function report(error) {
   show("notice", "");
@@ -37,93 +61,224 @@ function report(error) {
 }
 async function api(path, { method = "GET", body, validate } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 60000);
+  const timer = setTimeout(() => controller.abort(), 60_000);
   try {
     let response;
     try {
-      response = await fetch(path, { method, credentials: "same-origin", cache: "no-store", headers: { Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal });
+      response = await fetch(path, {
+        method,
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal,
+      });
     } catch (error) {
-      throw new Error(error instanceof Error && error.name === "AbortError" ? "Сервис не ответил за 60 секунд. Результат действия не подтверждён; обновите список перед повтором." : "Не удалось связаться с сервисом. Результат действия не подтверждён; проверьте соединение и обновите список перед повтором.");
+      throw new Error(error instanceof Error && error.name === "AbortError" ? "Сервис не ответил за 60 секунд. Результат не подтверждён." : "Нет связи с сервисом. Результат не подтверждён.");
     }
     let data;
-    try { data = await response.json(); } catch {
-      throw new Error(`Сервис вернул ответ не в формате JSON (HTTP ${response.status}). Результат действия не подтверждён. Обновите страницу; при повторе обратитесь к администратору.`);
-    }
-    if (!response.ok || (record(data) && Object.hasOwn(data, "error"))) {
-      const message = record(data) && string(data.error) && data.error.trim() ? data.error : `Ошибка сервиса (HTTP ${response.status}).`;
-      throw new Error(response.status === 401 ? `Нет доступа. Обновите страницу и войдите через окно авторизации браузера. ${message}` : message);
-    }
-    if (!validate || !validate(data)) throw new Error("Сервис вернул неполный или некорректный ответ. Результат действия не подтверждён; обновите состояние перед повтором.");
+    try { data = await response.json(); } catch { throw new Error(`Некорректный ответ сервиса (HTTP ${response.status}).`); }
+    if (!response.ok || (record(data) && string(data.error))) throw new Error(record(data) && string(data.error) ? data.error : `Ошибка сервиса (HTTP ${response.status}).`);
+    if (validate && !validate(data)) throw new Error("Сервис вернул неполные данные. Обновите страницу.");
     return data;
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+  }
 }
+function currentProject() {
+  return state.projects.find((project) => project.id === state.projectId) || null;
+}
+function currentConnection(platform) {
+  return state.projectDetail?.connections.find((connection) => connection.platform === platform) || null;
+}
+function dateLabel(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Дата не указана" : date.toLocaleString("ru-RU");
+}
+function total(campaign) {
+  return Object.keys(DELIVERY_LABELS).reduce((sum, key) => sum + Number(campaign.counts?.[key] || 0), 0);
+}
+function badge(status, labels = CAMPAIGN_LABELS) {
+  return node("span", labels[status] || status, `badge ${status}`);
+}
+function connectionReady(platform) {
+  const connection = currentConnection(platform);
+  return Boolean(connection?.enabled && connection.ready);
+}
+function updateControls() {
+  const hasProject = Boolean(state.projectId);
+  $("preview-audience").disabled = state.busy || state.previewBusy || !hasProject || !currentConnection($("source").value)?.enabled;
+  $("preview-audience").textContent = state.previewBusy ? "Получаем выборку…" : "Показать выборку";
+  $("create-campaign").disabled = state.busy || state.imageBusy || state.previewBusy || state.previewCount === 0 || state.previewKey !== JSON.stringify(readFilter()) || !hasProject;
+  $("refresh").disabled = state.busy || Boolean(state.refreshing);
+  $("project-select").disabled = state.busy;
+  $("save-instagram-watch").disabled = state.busy || !hasProject;
+  for (const button of document.querySelectorAll("[data-action]")) button.disabled = state.busy || button.dataset.blocked === "true";
+}
+
+function renderProjects() {
+  const select = $("project-select");
+  const previous = state.projectId;
+  select.replaceChildren(...state.projects.map((project) => {
+    const option = node("option", project.name);
+    option.value = project.id;
+    option.selected = project.id === previous;
+    return option;
+  }));
+  const project = currentProject();
+  show("project-description", project?.description || "Описание проекта не указано.");
+  if (!state.projects.length) show("project-description", "Создайте первый проект.");
+}
+function renderConnections() {
+  const fragment = document.createDocumentFragment();
+  for (const platform of PLATFORMS) {
+    const connection = currentConnection(platform);
+    const card = node("article", undefined, `connection-card ${connection?.ready ? "ready" : ""}`);
+    const top = node("div", undefined, "campaign-topline");
+    top.append(node("strong", PLATFORM_LABELS[platform]), badge(connection?.ready ? "sent" : connection?.enabled ? "paused" : "skipped", { sent: "Готово", paused: "Настроить", skipped: "Выключено" }));
+    card.append(top);
+    card.append(node("p", connection ? connection.accountLabel : "Аккаунт не подключён", "listing-meta"));
+    card.append(node("p", connection?.message || "Добавьте отдельный аккаунт для этого проекта.", "hint"));
+    const button = node("button", connection ? "Настроить" : "Подключить", "secondary");
+    button.type = "button";
+    button.dataset.platform = platform;
+    button.addEventListener("click", () => openConnection(platform));
+    card.append(button);
+    fragment.append(card);
+  }
+  $("connection-grid").replaceChildren(fragment);
+  show("vault-status", state.status?.credentialVaultConfigured ? "Секреты проекта шифруются AES-256-GCM. Сохранённые значения не показываются." : "Хранилище секретов не настроено: новые логины, пароли и access token сохранить нельзя.");
+  for (const option of $("source").options) option.disabled = !currentConnection(option.value)?.enabled;
+  for (const option of $("social-platform").options) option.disabled = !currentConnection(option.value)?.enabled;
+}
+function renderStatus() {
+  if (!state.status) {
+    show("global-status", "Состояние сервиса неизвестно · запуск заблокирован");
+    $("source-status").replaceChildren();
+    return;
+  }
+  show("global-status", state.status.sendEnabled ? "Отправка разрешена глобально · каждый запуск подтверждается отдельно" : "Отправка глобально отключена · SEND_ENABLED=false");
+  const fragment = document.createDocumentFragment();
+  for (const source of MARKETPLACES) {
+    const status = state.status.sources?.find((item) => item.source === source);
+    const item = node("li", undefined, status?.ready ? "ready" : "not-ready");
+    item.append(node("strong", `${PLATFORM_LABELS[source]} · ${status?.ready ? "серверная сессия готова" : "недоступна"}`), node("span", status?.message || "Статус не получен."));
+    fragment.append(item);
+  }
+  $("source-status").replaceChildren(fragment);
+}
+
+async function createProject(event) {
+  event.preventDefault();
+  const name = $("project-name").value.trim();
+  const description = $("project-description-input").value.trim();
+  if (!name) return;
+  await operation(async () => {
+    const data = await api("/api/projects", { method: "POST", body: { name, description }, validate: (value) => uuid(value?.project?.id) });
+    state.projectId = data.project.id;
+    state.selectedId = null;
+    state.selectedSocialId = null;
+    state.selectedInstagramWatchId = null;
+    state.editingInstagramWatchId = null;
+    event.target.reset();
+    event.target.closest("details").open = false;
+    await refreshData();
+    show("notice", `Проект «${data.project.name}» создан. Подключите его платформы.`);
+  });
+}
+function openConnection(platform) {
+  const connection = currentConnection(platform);
+  const instagram = platform === "instagram";
+  const tokenPlatform = platform === "facebook" || platform === "threads";
+  $("connection-platform").value = platform;
+  $("connection-title").textContent = `${PLATFORM_LABELS[platform]} · ${currentProject()?.name || "проект"}`;
+  $("connection-label").value = connection?.accountLabel || `${PLATFORM_LABELS[platform]} · ${currentProject()?.name || ""}`;
+  $("connection-login-label").textContent = instagram ? "Логин Instagram" : tokenPlatform ? "ID аккаунта (необязательно)" : "Логин аккаунта";
+  $("connection-login").value = connection?.login || "";
+  $("connection-login").required = instagram;
+  $("connection-secret-label").textContent = instagram ? "Пароль Instagram" : tokenPlatform ? "Официальный access token Meta" : "Пароль / секрет сессии";
+  $("connection-secret").value = "";
+  $("connection-secret").required = !connection?.credentialConfigured;
+  $("connection-enabled").checked = connection?.enabled ?? true;
+  $("connection-secret-help").textContent = instagram
+    ? "Неофициальный Private API: пароль и сессия шифруются AES-256-GCM и не возвращаются в браузер. Пустое поле сохраняет текущий пароль."
+    : tokenPlatform
+      ? "Вставьте официальный access token Meta. Пустое поле сохраняет текущий token."
+      : "Для нового проекта данные сохраняются зашифрованно. Реальная отправка станет доступна после создания изолированной серверной сессии этой площадки.";
+  $("connection-dialog").showModal();
+}
+async function saveConnection(event) {
+  event.preventDefault();
+  if (!state.projectId) return;
+  const secret = $("connection-secret").value;
+  const body = {
+    platform: $("connection-platform").value,
+    accountLabel: $("connection-label").value.trim(),
+    login: $("connection-login").value.trim(),
+    ...(secret ? { secret } : {}),
+    enabled: $("connection-enabled").checked,
+  };
+  await operation(async () => {
+    await api(`/api/projects/${encodeURIComponent(state.projectId)}/connections`, { method: "POST", body, validate: (value) => record(value?.connection) });
+    $("connection-secret").value = "";
+    $("connection-dialog").close();
+    await refreshData();
+    show("notice", `${PLATFORM_LABELS[body.platform]} сохранён для проекта «${currentProject()?.name}».`);
+  });
+}
+
 function readFilter() {
   const numeric = (id) => $(id).value === "" ? null : Number($(id).value);
   return { source: $("source").value, query: $("query").value.trim(), city: $("city").value.trim(), yearMin: numeric("year-min"), yearMax: numeric("year-max"), currency: $("currency").value, priceMin: numeric("price-min"), priceMax: numeric("price-max"), limit: Number($("limit").value) };
-}
-function validAudience() {
-  const filter = readFilter();
-  $("year-max").setCustomValidity(filter.yearMin !== null && filter.yearMax !== null && filter.yearMin > filter.yearMax ? "Год до должен быть не меньше года от." : "");
-  $("price-max").setCustomValidity(filter.priceMin !== null && filter.priceMax !== null && filter.priceMin > filter.priceMax ? "Цена до должна быть не меньше цены от." : "");
-  return [...$("audience-fields").querySelectorAll("input, select")].every((input) => input.reportValidity());
-}
-function updateControls() {
-  $("preview-audience").disabled = state.busy || state.previewBusy;
-  $("preview-audience").textContent = state.previewBusy ? "Получаем выборку…" : "Показать выборку";
-  $("create-campaign").disabled = state.busy || state.imageBusy || state.previewBusy || state.previewCount === 0 || state.previewKey !== JSON.stringify(readFilter());
-  $("refresh").disabled = state.busy || Boolean(state.refreshing);
-  for (const button of $("campaign-detail").querySelectorAll("button")) button.disabled = state.busy || button.dataset.blocked === "true";
 }
 function invalidatePreview() {
   state.previewVersion++;
   state.previewKey = null;
   state.previewCount = 0;
-  $("year-max").setCustomValidity("");
-  $("price-max").setCustomValidity("");
   $("audience-results").replaceChildren();
-  show("audience-summary", "Фильтры изменились. Снова проверьте выборку перед созданием.");
+  show("audience-summary", "Фильтры изменились. Снова проверьте выборку.");
   updateControls();
 }
 function safeListingUrl(candidate) {
   try {
     const url = new URL(candidate.url);
-    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password && (url.hostname === candidate.source || url.hostname.endsWith(`.${candidate.source}`)) ? url.href : null;
+    return url.protocol === "https:" && !url.username && !url.password && (url.hostname === candidate.source || url.hostname.endsWith(`.${candidate.source}`)) ? url.href : null;
   } catch { return null; }
 }
 function listing(candidate) {
   const card = node("div", undefined, "listing-card");
   const href = safeListingUrl(candidate);
   const title = node(href ? "a" : "p", candidate.title || "Объявление без названия", "listing-title");
-  if (href) { title.href = href; title.target = "_blank"; title.rel = "noopener noreferrer"; title.setAttribute("aria-label", `${candidate.title || "Объявление"} — открыть на ${candidate.source} в новой вкладке`); }
+  if (href) { title.href = href; title.target = "_blank"; title.rel = "noopener noreferrer"; }
   const price = candidate.price === null ? "Цена не указана" : `${candidate.price.toLocaleString("ru-RU")} ${candidate.currency}`;
   card.append(title, node("p", `${candidate.source} · ${candidate.year ?? "Год не указан"} · ${candidate.city || "Город не указан"} · ${price}`, "listing-meta"));
-  if (!href) card.append(node("p", "Ссылка отсутствует или не относится к выбранной площадке.", "hint"));
   return card;
 }
 async function previewAudience() {
-  if (state.previewBusy || state.busy || !validAudience()) return;
+  if (state.previewBusy || state.busy || !$("campaign-form").reportValidity()) return;
+  if (!currentConnection($("source").value)?.enabled) { report(new Error("Сначала подключите площадку к проекту.")); return; }
   const filter = readFilter();
+  if (filter.yearMin !== null && filter.yearMax !== null && filter.yearMin > filter.yearMax) { report(new Error("Неверный диапазон годов.")); return; }
+  if (filter.priceMin !== null && filter.priceMax !== null && filter.priceMin > filter.priceMax) { report(new Error("Неверный диапазон цен.")); return; }
   const version = ++state.previewVersion;
   state.previewBusy = true;
-  state.previewKey = null;
-  state.previewCount = 0;
-  $("audience-results").replaceChildren();
   show("operation-error", "");
-  show("audience-summary", "Получаем ограниченную выборку из каталога…");
+  show("audience-summary", "Получаем выборку…");
   updateControls();
   try {
-    const data = await api("/api/preview", { method: "POST", body: filter, validate: (value) => record(value) && value.freshHours === 48 && Array.isArray(value.candidates) && value.candidates.length <= filter.limit && value.candidates.every(isCandidate) });
+    const data = await api("/api/preview", { method: "POST", body: filter, validate: (value) => Array.isArray(value?.candidates) });
     if (version !== state.previewVersion) return;
     state.previewKey = JSON.stringify(filter);
     state.previewCount = data.candidates.length;
-    const fragment = document.createDocumentFragment();
-    for (const candidate of data.candidates) fragment.append(listing(candidate));
-    $("audience-results").replaceChildren(fragment);
-    show("audience-summary", data.candidates.length ? `В этой выборке: ${data.candidates.length} объявлений при лимите ${filter.limit}. Только записи каталога за последние ${data.freshHours} часов. Это не общее число объявлений или уникальных продавцов на площадке. При создании состав будет зафиксирован заново.` : "По этим фильтрам в ограниченной выборке нет объявлений. Измените фильтры; создание недоступно.");
+    $("audience-results").replaceChildren(...data.candidates.map(listing));
+    show("audience-summary", data.candidates.length ? `В выборке ${data.candidates.length} объявлений за последние ${data.freshHours} часов.` : "Подходящих объявлений нет.");
   } catch (error) {
     report(error);
-    if (version === state.previewVersion) show("audience-summary", "Выборка не получена. Создание недоступно; исправьте ошибку и повторите проверку.");
-  } finally { state.previewBusy = false; updateControls(); }
+    show("audience-summary", "Выборка не получена.");
+  } finally {
+    state.previewBusy = false;
+    updateControls();
+  }
 }
 function updateMessage() {
   const text = $("message").value;
@@ -141,15 +296,14 @@ function removeImage() {
   $("message-image").removeAttribute("src");
   $("message-image").hidden = true;
   $("remove-image").hidden = true;
-  show("image-status", "Фото не выбрано. Можно отправить только текст.");
+  show("image-status", "Фото не выбрано.");
   updateControls();
 }
 function fileBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => typeof reader.result === "string" && reader.result.includes(",") ? resolve(reader.result.slice(reader.result.indexOf(",") + 1)) : reject(new Error("Не удалось прочитать фото."));
-    reader.onerror = () => reject(new Error("Не удалось прочитать файл. Выберите фото заново."));
-    reader.onabort = () => reject(new Error("Чтение фото отменено."));
+    reader.onerror = () => reject(new Error("Не удалось прочитать файл."));
     reader.readAsDataURL(file);
   });
 }
@@ -157,209 +311,380 @@ async function uploadImage() {
   const file = $("image").files[0];
   if (!file) return;
   removeImage();
-  if (!["image/jpeg", "image/png"].includes(file.type) || file.size === 0 || file.size > 5 * 1024 * 1024) {
-    report(new Error("Выберите непустой JPEG или PNG размером не более 5 МБ."));
-    return;
-  }
+  if (!["image/jpeg", "image/png"].includes(file.type) || file.size === 0 || file.size > 5 * 1024 * 1024) { report(new Error("Выберите JPEG или PNG до 5 МБ.")); return; }
   const version = ++state.imageVersion;
   state.imageBusy = true;
   state.imageUrl = URL.createObjectURL(file);
   $("message-image").src = state.imageUrl;
   $("message-image").hidden = false;
   $("remove-image").hidden = false;
-  show("image-status", `${file.name} · загрузка на сервер…`);
-  show("operation-error", "");
+  show("image-status", `${file.name} · загрузка…`);
   updateControls();
   try {
     const data = await fileBase64(file);
-    if (version !== state.imageVersion) return;
-    const result = await api("/api/images", { method: "POST", body: { mime: file.type, data }, validate: (value) => record(value) && uuid(value.id) });
+    const result = await api("/api/images", { method: "POST", body: { mime: file.type, data }, validate: (value) => uuid(value?.id) });
     if (version !== state.imageVersion) return;
     state.imageId = result.id;
-    show("image-status", `${file.name} · фото сохранено (${(file.size / 1024 / 1024).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} МБ)`);
+    show("image-status", `${file.name} · сохранено`);
   } catch (error) {
-    if (version === state.imageVersion) {
-      removeImage();
-      show("image-status", "Фото не загружено и не будет приложено. Выберите его заново.");
-    }
+    if (version === state.imageVersion) removeImage();
     report(error);
   } finally {
     if (version === state.imageVersion) state.imageBusy = false;
     updateControls();
   }
 }
-function dateLabel(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Дата не указана" : date.toLocaleString("ru-RU");
+async function createCampaign(event) {
+  event.preventDefault();
+  if (!state.projectId || !state.previewCount || state.previewKey !== JSON.stringify(readFilter())) { report(new Error("Сначала получите непустую выборку.")); return; }
+  const body = { projectId: state.projectId, name: $("name").value.trim(), text: $("message").value.trim(), imageId: state.imageId, filter: readFilter(), intervalSeconds: Number($("interval").value), dailyLimit: Number($("daily-limit").value) };
+  await operation(async () => {
+    const result = await api("/api/campaigns", { method: "POST", body, validate: (value) => uuid(value?.campaign?.id) });
+    state.selectedId = result.campaign.id;
+    invalidatePreview();
+    await refreshData();
+    show("notice", `Черновик «${result.campaign.name}» создан. Ничего не отправлено.`);
+  });
 }
-function total(campaign) { return Object.keys(deliveryLabels).reduce((sum, status) => sum + campaign.counts[status], 0); }
-function badge(status, labels) { return node("span", labels[status], `badge ${status}`); }
-function renderStatus() {
-  if (!state.status) {
-    show("global-status", "Состояние отправки неизвестно · запуск заблокирован");
-    $("source-status").replaceChildren();
-    return;
-  }
-  show("global-status", state.status.sendEnabled ? "Отправка разрешена глобально · проверьте готовность площадки" : "Отправка глобально отключена · SEND_ENABLED=false");
-  const fragment = document.createDocumentFragment();
-  for (const source of sources) {
-    const status = state.status.sources.find((item) => item.source === source);
-    const item = node("li", undefined, status?.ready ? "ready" : "not-ready");
-    item.append(node("strong", `${source} · ${status?.ready ? "интеграция готова" : "недоступна"}`), node("span", status?.message || "Статус интеграции не получен."));
-    fragment.append(item);
-  }
-  $("source-status").replaceChildren(fragment);
-}
-function renderCampaigns() {
-  const key = JSON.stringify([state.campaigns, state.selectedId]);
-  if (key === state.listKey) return;
-  state.listKey = key;
-  const focused = document.activeElement?.dataset.campaignId;
-  const fragment = document.createDocumentFragment();
-  for (const campaign of state.campaigns) {
-    const button = node("button", undefined, "campaign-select");
-    button.type = "button";
-    button.dataset.campaignId = campaign.id;
-    button.setAttribute("aria-pressed", String(campaign.id === state.selectedId));
-    const heading = node("span", undefined, "campaign-topline");
-    heading.append(node("span", campaign.name, "listing-title"), badge(campaign.status, campaignLabels));
-    button.append(heading, node("span", `${campaign.filter.source} · ${dateLabel(campaign.createdAt)} · Зафиксировано: ${total(campaign)}`, "listing-meta"), node("span", Object.entries(deliveryLabels).map(([status, label]) => `${label}: ${campaign.counts[status]}`).join(" · "), "listing-meta"));
-    button.addEventListener("click", () => { void selectCampaign(campaign.id); });
-    fragment.append(button);
-  }
-  if (!state.campaigns.length) fragment.append(node("p", "Кампаний пока нет. Подготовьте выборку и создайте первый черновик.", "empty-state"));
-  $("campaign-list").replaceChildren(fragment);
-  if (focused) [...$("campaign-list").querySelectorAll("button")].find((button) => button.dataset.campaignId === focused)?.focus({ preventScroll: true });
-}
-function startBlock(campaign) {
-  if (!state.status) return "Состояние сервиса неизвестно. Обновите данные перед запуском.";
-  if (!state.status.sendEnabled) return "Запуск недоступен: отправка глобально отключена (SEND_ENABLED=false).";
-  const source = state.status.sources.find((item) => item.source === campaign.filter.source);
-  if (!source?.ready) return `Запуск недоступен: ${campaign.filter.source} не готова. ${source?.message || "Статус интеграции не получен."}`;
-  if (campaign.counts.pending === 0) return "Нет ожидающих отправки записей. Неизвестные результаты и ошибки автоматически не повторяются.";
+
+function marketplaceBlock(campaign) {
+  if (!state.status?.sendEnabled) return "Глобальная отправка отключена.";
+  const connection = currentConnection(campaign.filter.source);
+  if (!connection?.ready) return connection?.message || "Подключение проекта не готово.";
+  if (!campaign.counts.pending) return "Нет ожидающих отправок.";
   return "";
 }
-function actionButton(text, action, blocked = false, className = "") {
+function actionButton(text, kind, action, blocked = false, className = "") {
   const button = node("button", text, className);
   button.type = "button";
   button.dataset.action = action;
   button.dataset.blocked = String(blocked);
-  button.disabled = state.busy || blocked;
-  button.addEventListener("click", () => { void transition(action); });
+  button.addEventListener("click", () => void transition(kind, action));
   return button;
 }
-function renderDetail() {
-  const key = JSON.stringify([state.detail, state.status, state.selectedId]);
-  if (key === state.detailKey) { updateControls(); return; }
-  state.detailKey = key;
-  const root = $("campaign-detail");
-  const previousScroll = root.querySelector(".delivery-list")?.scrollTop ?? 0;
-  const messageOpen = root.querySelector("details")?.open ?? false;
-  const focused = root.contains(document.activeElement) ? { action: document.activeElement.dataset.action, delivery: document.activeElement.dataset.deliveryId } : null;
-  if (!state.detail) {
-    root.replaceChildren(node("p", state.selectedId ? "Детали ещё не получены. При ошибке нажмите «Обновить»." : "Выберите кампанию, чтобы проверить состав, запустить или приостановить отправку.", "muted"));
-    return;
+function renderCampaigns() {
+  const campaigns = state.campaigns.filter((campaign) => campaign.projectId === state.projectId);
+  const fragment = document.createDocumentFragment();
+  for (const campaign of campaigns) {
+    const button = node("button", undefined, "campaign-select");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(campaign.id === state.selectedId));
+    const top = node("span", undefined, "campaign-topline");
+    top.append(node("span", campaign.name, "listing-title"), badge(campaign.status));
+    button.append(top, node("span", `${PLATFORM_LABELS[campaign.filter.source]} · ${dateLabel(campaign.createdAt)} · ${total(campaign)} целей`, "listing-meta"));
+    button.addEventListener("click", () => { state.selectedId = campaign.id; state.detail = null; void refreshData(); });
+    fragment.append(button);
   }
+  if (!campaigns.length) fragment.append(node("p", "У проекта пока нет рассылок.", "empty-state"));
+  $("campaign-list").replaceChildren(fragment);
+}
+function renderDetail() {
+  const root = $("campaign-detail");
+  if (!state.detail || state.detail.campaign.projectId !== state.projectId) { root.replaceChildren(node("p", "Выберите кампанию.", "muted")); return; }
   const { campaign, deliveries } = state.detail;
   const fragment = document.createDocumentFragment();
-  const heading = node("div", undefined, "campaign-topline");
-  heading.append(node("h3", campaign.name), badge(campaign.status, campaignLabels));
-  fragment.append(heading, node("p", `${campaign.filter.source} · создана ${dateLabel(campaign.createdAt)}`, "detail-meta"), node("p", `Зафиксировано записей: ${total(campaign)}. Интервал: ${campaign.intervalSeconds} сек. Суточный лимит: ${campaign.dailyLimit}.`, "detail-meta"));
-  if (campaign.filter.source === "lalafo.kg" && campaign.imageId) fragment.append(node("p", "Lalafo: текст и фото — два сообщения на продавца. Частичная доставка требует ручной проверки и не повторяется.", "warning"));
-  const filter = campaign.filter;
-  fragment.append(node("p", `Фильтры: ${filter.query || "любая марка / модель"} · ${filter.city || "любой город"} · годы ${filter.yearMin ?? "—"}–${filter.yearMax ?? "—"} · цена ${filter.priceMin ?? "—"}–${filter.priceMax ?? "—"} ${filter.currency} · лимит ${filter.limit}`, "detail-meta"));
-  const counts = node("div", undefined, "counts");
-  for (const [status, label] of Object.entries(deliveryLabels)) counts.append(node("span", `${label}: ${campaign.counts[status]}`, "count"));
-  fragment.append(counts);
+  const top = node("div", undefined, "campaign-topline");
+  top.append(node("h3", campaign.name), badge(campaign.status));
+  fragment.append(top, node("p", `${PLATFORM_LABELS[campaign.filter.source]} · ${dateLabel(campaign.createdAt)} · интервал ${campaign.intervalSeconds} сек.`, "detail-meta"));
   if (campaign.lastError) fragment.append(node("p", campaign.lastError, "error"));
-  if (campaign.counts.unknown > 0) fragment.append(node("p", "Требуется ручная проверка: у части сообщений неизвестен результат. Проверьте переписку на площадке. Эти записи не будут отправлены повторно, в том числе после возобновления кампании.", "warning"));
-  const message = node("details");
-  message.append(node("summary", "Сохранённое сообщение и фото"));
-  const preview = node("div", undefined, "message-preview");
-  if (campaign.imageId) {
-    const image = node("img");
-    image.src = `/api/images/${encodeURIComponent(campaign.imageId)}`;
-    image.alt = "Сохранённое фото кампании";
-    image.loading = "lazy";
-    image.addEventListener("error", () => { image.replaceWith(node("p", "Не удалось загрузить сохранённое фото. Обновите данные перед запуском.", "error")); });
-    preview.append(image);
-  }
-  preview.append(node("p", campaign.text, "message-text"));
-  message.append(preview);
-  fragment.append(message);
   const actions = node("div", undefined, "action-row");
   if (["draft", "paused"].includes(campaign.status)) {
-    const block = startBlock(campaign);
-    actions.append(actionButton(campaign.status === "paused" ? "Возобновить…" : "Запустить…", "start", Boolean(block)));
+    const block = marketplaceBlock(campaign);
+    actions.append(actionButton(campaign.status === "paused" ? "Возобновить…" : "Запустить…", "marketplace", "start", Boolean(block)));
     if (block) fragment.append(node("p", block, "warning"));
   }
-  if (campaign.status === "running") actions.append(actionButton("Приостановить", "pause", false, "secondary"));
-  if (["draft", "running", "paused"].includes(campaign.status)) actions.append(actionButton("Отменить кампанию…", "cancel", false, "danger"));
-  fragment.append(actions, node("p", "Пауза и отмена останавливают последующие отправки. Сообщение, уже переданное площадке, может завершить отправку после паузы или отмены.", "hint"));
-  fragment.append(node("h3", `Доставки · ${deliveries.length}`, "detail-section-title"));
+  if (campaign.status === "running") actions.append(actionButton("Приостановить", "marketplace", "pause", false, "secondary"));
+  if (["draft", "running", "paused"].includes(campaign.status)) actions.append(actionButton("Отменить…", "marketplace", "cancel", false, "danger"));
+  fragment.append(actions);
   const list = node("div", undefined, "delivery-list");
   for (const delivery of deliveries) {
     const card = node("article", undefined, "delivery-card");
-    card.append(badge(delivery.status, deliveryLabels), listing(delivery.candidate));
-    card.append(node("p", `Обновлено: ${dateLabel(delivery.updatedAt)}`, "detail-meta"));
+    card.append(badge(delivery.status, DELIVERY_LABELS), listing(delivery.candidate));
+    if (delivery.error) card.append(node("p", delivery.error, "error"));
     if (delivery.recipientId) {
-      card.append(node("p", `Продавец: ${delivery.recipientId}`, "detail-meta"));
       const suppress = node("button", "Исключить продавца…", "text-button");
       suppress.type = "button";
-      suppress.dataset.deliveryId = delivery.id;
-      suppress.disabled = state.busy;
-      suppress.addEventListener("click", () => { void suppressSeller(delivery); });
+      suppress.addEventListener("click", () => void suppressSeller(delivery));
       card.append(suppress);
-    } else card.append(node("p", "ID продавца пока неизвестен — исключение недоступно.", "hint"));
-    if (delivery.error) card.append(node("p", delivery.error, "error"));
-    if (delivery.status === "unknown") card.append(node("p", "Не повторяется автоматически. Проверьте фактическую доставку вручную на площадке.", "warning"));
+    }
     list.append(card);
   }
-  if (!deliveries.length) list.append(node("p", "В сохранённой кампании нет записей доставки.", "empty-state"));
-  fragment.append(list);
+  fragment.append(node("h3", `Доставки · ${deliveries.length}`), list);
   root.replaceChildren(fragment);
-  list.scrollTop = previousScroll;
-  message.open = messageOpen;
-  if (focused) [...root.querySelectorAll("button")].find((button) => (focused.action && button.dataset.action === focused.action) || (focused.delivery && button.dataset.deliveryId === focused.delivery))?.focus({ preventScroll: true });
 }
-async function refreshData() {
-  if (state.refreshing) return state.refreshing;
-  state.refreshing = (async () => {
-    const selected = state.selectedId;
-    const results = await Promise.allSettled([
-      api("/api/status", { validate: isStatus }),
-      api("/api/campaigns", { validate: (value) => record(value) && Array.isArray(value.campaigns) && value.campaigns.every(isCampaign) }),
-      ...(selected ? [api(`/api/campaigns/${encodeURIComponent(selected)}`, { validate: isDetail })] : []),
-    ]);
-    const errors = [];
-    if (results[0].status === "fulfilled") state.status = results[0].value;
-    else { state.status = null; errors.push(`Готовность: ${errorText(results[0].reason)}`); }
-    if (results[1].status === "fulfilled") state.campaigns = results[1].value.campaigns;
-    else errors.push(`Список кампаний: ${errorText(results[1].reason)}`);
-    if (selected && state.selectedId === selected) {
-      if (results[2].status === "fulfilled" && results[2].value.campaign.id === selected) state.detail = results[2].value;
-      else { state.detail = null; errors.push(`Детали кампании: ${results[2].status === "rejected" ? errorText(results[2].reason) : "Сервис вернул другую кампанию."}`); }
-    }
-    renderStatus();
-    renderCampaigns();
-    renderDetail();
-    show("sync-error", errors.join("\n"));
-    $("refresh-time").textContent = errors.length ? "Не все данные обновлены. Отображаемые ранее сведения могут быть устаревшими. Следующая попытка — через 5 секунд." : `Обновлено: ${new Date().toLocaleTimeString("ru-RU")} · проверка каждые 5 секунд.`;
-    return errors.length === 0;
-  })();
-  updateControls();
-  try { return await state.refreshing; } finally { state.refreshing = null; updateControls(); }
+
+function parseSocialTargets() {
+  const targets = [];
+  for (const [index, line] of $("social-targets").value.split("\n").entries()) {
+    if (!line.trim()) continue;
+    const parts = line.split("|").map((part) => part.trim());
+    if (parts.length !== 3 || !/^[A-Za-z0-9_:-]+$/.test(parts[0]) || !["photo", "video", "text"].includes(parts[2])) throw new Error(`Строка ${index + 1}: ожидается ID | HTTPS-ссылка | photo, video или text.`);
+    let url;
+    try { url = new URL(parts[1]); } catch { throw new Error(`Строка ${index + 1}: некорректная ссылка.`); }
+    if (url.protocol !== "https:") throw new Error(`Строка ${index + 1}: требуется HTTPS-ссылка.`);
+    targets.push({ externalId: parts[0], url: url.href, mediaType: parts[2] });
+  }
+  if (!targets.length) throw new Error("Укажите хотя бы одну публикацию.");
+  return targets;
 }
-async function selectCampaign(id) {
-  if (state.busy || state.selectedId === id) return;
-  state.selectedId = id;
-  state.detail = null;
-  renderCampaigns();
-  renderDetail();
-  try {
-    if (state.refreshing) await state.refreshing;
+async function createSocialCampaign(event) {
+  event.preventDefault();
+  if (!state.projectId) return;
+  let targets;
+  try { targets = parseSocialTargets(); } catch (error) { report(error); return; }
+  const body = { projectId: state.projectId, name: $("social-name").value.trim(), platform: $("social-platform").value, text: $("social-message").value.trim(), targets, intervalSeconds: Number($("social-interval").value), dailyLimit: Number($("social-daily-limit").value) };
+  await operation(async () => {
+    const result = await api("/api/social-campaigns", { method: "POST", body, validate: (value) => uuid(value?.campaign?.id) });
+    state.selectedSocialId = result.campaign.id;
     await refreshData();
-  } catch (error) { report(error); }
+    show("notice", `Черновик «${result.campaign.name}» создан для ${targets.length} публикаций. Комментарии не отправлены.`);
+  });
+}
+function socialBlock(campaign) {
+  if (!state.status?.sendEnabled) return "Глобальная отправка отключена.";
+  if (!state.status?.credentialVaultConfigured) return "Хранилище секретов проекта не настроено.";
+  const connection = currentConnection(campaign.platform);
+  if (!connection?.ready) return connection?.message || "Подключение проекта не готово.";
+  if (!campaign.counts.pending) return "Нет ожидающих комментариев.";
+  return "";
+}
+function safeSocialUrl(target, platform) {
+  try {
+    const url = new URL(target.url);
+    const hosts = platform === "instagram" ? ["instagram.com", "www.instagram.com"] : platform === "facebook" ? ["facebook.com", "www.facebook.com", "m.facebook.com"] : ["threads.net", "www.threads.net"];
+    return url.protocol === "https:" && hosts.includes(url.hostname) && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}
+function renderSocialCampaigns() {
+  const campaigns = state.socialCampaigns.filter((campaign) => campaign.projectId === state.projectId);
+  const fragment = document.createDocumentFragment();
+  for (const campaign of campaigns) {
+    const button = node("button", undefined, "campaign-select");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(campaign.id === state.selectedSocialId));
+    const top = node("span", undefined, "campaign-topline");
+    top.append(node("span", campaign.name, "listing-title"), badge(campaign.status));
+    button.append(top, node("span", `${PLATFORM_LABELS[campaign.platform]} · ${dateLabel(campaign.createdAt)} · ${total(campaign)} публикаций`, "listing-meta"));
+    button.addEventListener("click", () => { state.selectedSocialId = campaign.id; state.socialDetail = null; void refreshData(); });
+    fragment.append(button);
+  }
+  if (!campaigns.length) fragment.append(node("p", "У проекта пока нет кампаний комментариев.", "empty-state"));
+  $("social-list").replaceChildren(fragment);
+}
+function renderSocialDetail() {
+  const root = $("social-detail");
+  if (!state.socialDetail || state.socialDetail.campaign.projectId !== state.projectId) { root.replaceChildren(node("p", "Выберите кампанию.", "muted")); return; }
+  const { campaign, deliveries } = state.socialDetail;
+  const fragment = document.createDocumentFragment();
+  const top = node("div", undefined, "campaign-topline");
+  top.append(node("h3", campaign.name), badge(campaign.status));
+  fragment.append(top, node("p", `${PLATFORM_LABELS[campaign.platform]} · ${dateLabel(campaign.createdAt)} · ${campaign.intervalSeconds} сек.`, "detail-meta"), node("p", campaign.text, "message-text"));
+  if (campaign.lastError) fragment.append(node("p", campaign.lastError, "error"));
+  const actions = node("div", undefined, "action-row");
+  if (["draft", "paused"].includes(campaign.status)) {
+    const block = socialBlock(campaign);
+    actions.append(actionButton(campaign.status === "paused" ? "Возобновить…" : "Запустить…", "social", "start", Boolean(block)));
+    if (block) fragment.append(node("p", block, "warning"));
+  }
+  if (campaign.status === "running") actions.append(actionButton("Приостановить", "social", "pause", false, "secondary"));
+  if (["draft", "running", "paused"].includes(campaign.status)) actions.append(actionButton("Отменить…", "social", "cancel", false, "danger"));
+  fragment.append(actions);
+  const list = node("div", undefined, "delivery-list");
+  for (const delivery of deliveries) {
+    const card = node("article", undefined, "delivery-card");
+    card.append(badge(delivery.status, DELIVERY_LABELS));
+    const href = safeSocialUrl(delivery.target, campaign.platform);
+    const title = node(href ? "a" : "p", `${delivery.target.mediaType} · ${delivery.target.externalId}`, "listing-title");
+    if (href) { title.href = href; title.target = "_blank"; title.rel = "noopener noreferrer"; }
+    card.append(title);
+    if (delivery.remoteId) card.append(node("p", `ID комментария: ${delivery.remoteId}`, "detail-meta"));
+    if (delivery.error) card.append(node("p", delivery.error, "error"));
+    list.append(card);
+  }
+  fragment.append(node("h3", `Публикации · ${deliveries.length}`), list);
+  root.replaceChildren(fragment);
+}
+
+function readInstagramAccounts() {
+  const accounts = $("instagram-watch-accounts").value
+    .split("\n")
+    .map((value) => value.trim().replace(/^@/, "").toLowerCase())
+    .filter(Boolean);
+  if (!accounts.length) throw new Error("Укажите хотя бы один Instagram-аккаунт.");
+  if (accounts.some((value) => !/^[a-z0-9._]{1,30}$/.test(value)))
+    throw new Error("Username Instagram может содержать только латинские буквы, цифры, точку и подчёркивание.");
+  if (new Set(accounts).size !== accounts.length)
+    throw new Error("Один Instagram-аккаунт указан несколько раз.");
+  return accounts;
+}
+function readInstagramWatchForm() {
+  const mediaTypes = [
+    ...($("instagram-watch-photo").checked ? ["photo"] : []),
+    ...($("instagram-watch-video").checked ? ["video"] : []),
+  ];
+  if (!mediaTypes.length) throw new Error("Выберите фото или видео.");
+  return {
+    name: $("instagram-watch-name").value.trim(),
+    commentText: $("instagram-watch-message").value.trim(),
+    accounts: readInstagramAccounts(),
+    mediaTypes,
+    intervalSeconds: Number($("instagram-watch-interval").value),
+    dailyLimit: Number($("instagram-watch-daily-limit").value),
+  };
+}
+function resetInstagramWatchForm() {
+  state.editingInstagramWatchId = null;
+  $("instagram-watch-form").reset();
+  $("instagram-watch-photo").checked = true;
+  $("instagram-watch-video").checked = true;
+  $("instagram-watch-interval").value = "300";
+  $("instagram-watch-daily-limit").value = "10";
+  $("save-instagram-watch").textContent = "Создать мониторинг";
+  $("cancel-instagram-watch-edit").hidden = true;
+}
+async function saveInstagramWatch(event) {
+  event.preventDefault();
+  if (!state.projectId) return;
+  let settings;
+  try { settings = readInstagramWatchForm(); } catch (error) { report(error); return; }
+  await operation(async () => {
+    const editing = state.editingInstagramWatchId;
+    const path = editing ? `/api/instagram-watches/${encodeURIComponent(editing)}` : "/api/instagram-watches";
+    const body = editing ? settings : { projectId: state.projectId, ...settings };
+    const result = await api(path, { method: "POST", body, validate: (value) => uuid(value?.watch?.id) });
+    state.selectedInstagramWatchId = result.watch.id;
+    resetInstagramWatchForm();
+    await refreshData();
+    show("notice", editing ? `Мониторинг «${result.watch.name}» обновлён.` : `Черновик «${result.watch.name}» создан. Автокомментарии ещё не запущены.`);
+  });
+}
+function editInstagramWatch(watch) {
+  state.editingInstagramWatchId = watch.id;
+  $("instagram-watch-name").value = watch.name;
+  $("instagram-watch-accounts").value = watch.accounts.join("\n");
+  $("instagram-watch-photo").checked = watch.mediaTypes.includes("photo");
+  $("instagram-watch-video").checked = watch.mediaTypes.includes("video");
+  $("instagram-watch-message").value = watch.commentText;
+  $("instagram-watch-interval").value = String(watch.intervalSeconds);
+  $("instagram-watch-daily-limit").value = String(watch.dailyLimit);
+  $("save-instagram-watch").textContent = "Сохранить изменения";
+  $("cancel-instagram-watch-edit").hidden = false;
+  $("instagram-watch-name").focus();
+}
+function instagramWatchBlock(watch) {
+  if (!state.status?.sendEnabled) return "Глобальная отправка отключена.";
+  if (!state.status?.credentialVaultConfigured) return "Хранилище логина, пароля и сессии не настроено.";
+  const connection = currentConnection("instagram");
+  if (!connection?.ready) return connection?.message || "Instagram-аккаунт проекта не готов.";
+  if (!watch.accounts.length) return "Список аккаунтов пуст.";
+  return "";
+}
+function renderInstagramWatches() {
+  const watches = state.instagramWatches.filter((watch) => watch.projectId === state.projectId);
+  const fragment = document.createDocumentFragment();
+  for (const watch of watches) {
+    const button = node("button", undefined, "campaign-select");
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(watch.id === state.selectedInstagramWatchId));
+    const top = node("span", undefined, "campaign-topline");
+    top.append(node("span", watch.name, "listing-title"), badge(watch.status));
+    button.append(top, node("span", `${watch.accounts.length} аккаунтов · фото/видео · ${total(watch)} наблюдений`, "listing-meta"));
+    button.addEventListener("click", () => {
+      state.selectedInstagramWatchId = watch.id;
+      renderInstagramWatches();
+      renderInstagramWatchDetail();
+    });
+    fragment.append(button);
+  }
+  if (!watches.length) fragment.append(node("p", "У проекта пока нет мониторингов Instagram.", "empty-state"));
+  $("instagram-watch-list").replaceChildren(fragment);
+}
+function renderInstagramWatchDetail() {
+  const root = $("instagram-watch-detail");
+  const watch = state.instagramWatches.find(
+    (item) => item.id === state.selectedInstagramWatchId && item.projectId === state.projectId,
+  );
+  if (!watch) {
+    root.replaceChildren(node("p", "Выберите мониторинг.", "muted"));
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  const top = node("div", undefined, "campaign-topline");
+  top.append(node("h3", watch.name), badge(watch.status));
+  fragment.append(
+    top,
+    node("p", `${watch.accounts.length} аккаунтов · проверка каждые 5 минут · без ограничения по возрасту публикации`, "detail-meta"),
+    node("p", watch.commentText, "message-text"),
+  );
+  if (watch.lastPollAt) fragment.append(node("p", `Последняя проверка: ${dateLabel(watch.lastPollAt)}`, "detail-meta"));
+  if (watch.lastError) fragment.append(node("p", watch.lastError, "error"));
+  const actions = node("div", undefined, "action-row");
+  if (["draft", "paused"].includes(watch.status)) {
+    const block = instagramWatchBlock(watch);
+    actions.append(actionButton(watch.status === "paused" ? "Возобновить…" : "Запустить…", "instagram-watch", "start", Boolean(block)));
+    if (block) fragment.append(node("p", block, "warning"));
+  }
+  if (watch.status === "running")
+    actions.append(actionButton("Приостановить", "instagram-watch", "pause", false, "secondary"));
+  if (["draft", "running", "paused"].includes(watch.status)) {
+    const edit = node("button", "Редактировать список", "secondary");
+    edit.type = "button";
+    edit.addEventListener("click", () => editInstagramWatch(watch));
+    actions.append(edit, actionButton("Отменить…", "instagram-watch", "cancel", false, "danger"));
+  }
+  fragment.append(actions);
+  const counts = node("div", undefined, "delivery-list");
+  for (const status of Object.keys(DELIVERY_LABELS)) {
+    const row = node("article", undefined, "delivery-card");
+    row.append(badge(status, DELIVERY_LABELS), node("strong", String(watch.counts?.[status] || 0)));
+    counts.append(row);
+  }
+  fragment.append(node("h3", "Наблюдения"), counts);
+  root.replaceChildren(fragment);
+}
+async function transition(kind, action) {
+  const watchMode = kind === "instagram-watch";
+  const id = watchMode
+    ? state.selectedInstagramWatchId
+    : kind === "social"
+      ? state.selectedSocialId
+      : state.selectedId;
+  const detail = watchMode
+    ? state.instagramWatches.find((watch) => watch.id === id)
+    : kind === "social"
+      ? state.socialDetail
+      : state.detail;
+  if (!id || !detail) return;
+  const campaign = watchMode ? detail : detail.campaign;
+  const targetDescription = watchMode
+    ? `Аккаунтов: ${campaign.accounts.length}. Публикации проверяются каждые 5 минут без ограничения по возрасту.`
+    : `Целей: ${total(campaign)}. Интервал: ${campaign.intervalSeconds} сек. Суточный лимит: ${campaign.dailyLimit}.`;
+  if (action === "start" && !window.confirm(`Запустить «${campaign.name}»?\n\n${targetDescription}\n\nЭто внешнее маркетинговое действие. Жалобы и блокировки возможны. Неизвестный результат не повторяется.`)) return;
+  if (action === "cancel" && !window.confirm(`Отменить «${campaign.name}»? Возобновление будет невозможно.`)) return;
+  await operation(async () => {
+    const prefix = watchMode
+      ? "/api/instagram-watches"
+      : kind === "social"
+        ? "/api/social-campaigns"
+        : "/api/campaigns";
+    await api(`${prefix}/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+      body: { confirmed: true },
+      validate: (value) => uuid(watchMode ? value?.watch?.id : value?.campaign?.id),
+    });
+    await refreshData();
+    show("notice", `Состояние кампании «${campaign.name}» обновлено.`);
+  });
+}
+async function suppressSeller(delivery) {
+  const reason = window.prompt(`Исключить продавца ${delivery.recipientId}? Укажите причину:`);
+  if (reason === null) return;
+  if (!reason.trim()) { report(new Error("Укажите причину исключения.")); return; }
+  await operation(async () => {
+    await api("/api/suppress", { method: "POST", body: { source: delivery.candidate.source, recipientId: delivery.recipientId, reason: reason.trim() }, validate: (value) => value?.ok === true });
+    await refreshData();
+    show("notice", `Продавец ${delivery.recipientId} исключён.`);
+  });
 }
 async function operation(work) {
   if (state.busy) return;
@@ -367,84 +692,98 @@ async function operation(work) {
   show("operation-error", "");
   show("notice", "");
   updateControls();
-  try {
-    if (state.refreshing) await state.refreshing;
-    await work();
-  } catch (error) { report(error); }
-  finally { state.busy = false; updateControls(); }
+  try { await work(); } catch (error) { report(error); } finally { state.busy = false; updateControls(); }
 }
-async function createCampaign(event) {
-  event.preventDefault();
-  if (state.busy || state.imageBusy || !validAudience() || !$("campaign-form").reportValidity()) return;
-  const filter = readFilter();
-  if (!state.previewCount || state.previewKey !== JSON.stringify(filter)) { report(new Error("Сначала получите непустую выборку по текущим фильтрам.")); return; }
-  const body = { name: $("name").value.trim(), text: $("message").value.trim(), imageId: state.imageId, filter, intervalSeconds: Number($("interval").value), dailyLimit: Number($("daily-limit").value) };
-  if (!body.name || !body.text) { report(new Error("Название и текст сообщения не могут состоять только из пробелов.")); return; }
-  await operation(async () => {
-    const result = await api("/api/campaigns", { method: "POST", body, validate: (value) => record(value) && isCampaign(value.campaign) });
-    state.selectedId = result.campaign.id;
-    state.detail = null;
-    invalidatePreview();
-    await refreshData();
-    show("notice", `Черновик «${result.campaign.name}» создан. Ничего не отправлено. Зафиксировано записей: ${total(result.campaign)}. Проверьте состав и запустите отдельно.`);
-  });
+async function refreshData() {
+  if (state.refreshing) return state.refreshing;
+  state.refreshing = (async () => {
+    const base = await Promise.all([
+      api("/api/status"),
+      api("/api/projects"),
+      api("/api/campaigns"),
+      api("/api/social-campaigns"),
+      api("/api/instagram-watches"),
+    ]);
+    state.status = base[0];
+    state.projects = Array.isArray(base[1].projects) ? base[1].projects : [];
+    state.campaigns = Array.isArray(base[2].campaigns) ? base[2].campaigns : [];
+    state.socialCampaigns = Array.isArray(base[3].campaigns) ? base[3].campaigns : [];
+    state.instagramWatches = Array.isArray(base[4].watches) ? base[4].watches : [];
+    if (!state.projects.some((project) => project.id === state.projectId)) state.projectId = state.projects[0]?.id || null;
+    state.projectDetail = state.projectId ? await api(`/api/projects/${encodeURIComponent(state.projectId)}`) : null;
+    if (!state.campaigns.some((campaign) => campaign.id === state.selectedId && campaign.projectId === state.projectId)) { state.selectedId = null; state.detail = null; }
+    if (!state.socialCampaigns.some((campaign) => campaign.id === state.selectedSocialId && campaign.projectId === state.projectId)) { state.selectedSocialId = null; state.socialDetail = null; }
+    if (!state.instagramWatches.some((watch) => watch.id === state.selectedInstagramWatchId && watch.projectId === state.projectId)) {
+      state.selectedInstagramWatchId = null;
+      if (state.editingInstagramWatchId) resetInstagramWatchForm();
+    }
+    if (state.selectedId) state.detail = await api(`/api/campaigns/${encodeURIComponent(state.selectedId)}`);
+    if (state.selectedSocialId) state.socialDetail = await api(`/api/social-campaigns/${encodeURIComponent(state.selectedSocialId)}`);
+    renderProjects();
+    renderConnections();
+    renderStatus();
+    renderCampaigns();
+    renderDetail();
+    renderSocialCampaigns();
+    renderSocialDetail();
+    renderInstagramWatches();
+    renderInstagramWatchDetail();
+    show("sync-error", "");
+    $("refresh-time").textContent = `Обновлено: ${new Date().toLocaleTimeString("ru-RU")} · проверка каждые 5 секунд.`;
+  })();
+  updateControls();
+  try { await state.refreshing; return true; } catch (error) { show("sync-error", errorText(error)); return false; } finally { state.refreshing = null; updateControls(); }
 }
-async function transition(action) {
-  const id = state.selectedId;
-  if (!id) return;
-  await operation(async () => {
-    if (!await refreshData() || state.selectedId !== id || !state.detail) throw new Error("Не удалось подтвердить актуальное состояние кампании. Действие не выполнено.");
-    const campaign = state.detail.campaign;
-    if (action === "start") {
-      const block = startBlock(campaign);
-      if (block) throw new Error(block);
-      if (!["draft", "paused"].includes(campaign.status)) throw new Error("Статус кампании изменился. Запуск сейчас недоступен.");
-      if (!window.confirm(`Запустить холодную рекламную рассылку «${campaign.name}»?\n\nПлощадка: ${campaign.filter.source}. Зафиксировано записей: ${total(campaign)}; ожидают отправки: ${campaign.counts.pending}.\n\nПродавцы не запрашивали предложение. Возможны жалобы, нарушение правил площадки и блокировка аккаунта. Медленная отправка не устраняет риск.\n\nИнтервал: ${campaign.intervalSeconds} сек.; суточный лимит попыток: ${campaign.dailyLimit}. Неизвестные результаты не повторяются.${campaign.filter.source === "lalafo.kg" && campaign.imageId ? "\nLalafo: текст и фото будут двумя сообщениями. Частичная доставка останавливает кампанию." : ""}\n\nПодтверждаю запуск.`)) return;
-    } else if (action === "cancel") {
-      if (!["draft", "running", "paused"].includes(campaign.status)) throw new Error("Эта кампания уже завершена или отменена.");
-      if (!window.confirm(`Отменить кампанию «${campaign.name}»? Возобновить отменённую кампанию нельзя. Уже начатое сообщение может дойти; отправленные сообщения не удаляются.`)) return;
-    } else if (campaign.status !== "running") throw new Error("Кампания уже не запущена. Состояние обновлено.");
-    const result = await api(`/api/campaigns/${encodeURIComponent(id)}/${action}`, { method: "POST", body: { confirmed: true }, validate: (value) => record(value) && isCampaign(value.campaign) && value.campaign.id === id });
-    await refreshData();
-    show("notice", `Сервис подтвердил состояние «${campaignLabels[result.campaign.status]}» для «${result.campaign.name}».${action === "pause" || action === "cancel" ? " Уже начатое сообщение может завершить отправку." : ""}`);
-  });
-}
-async function suppressSeller(delivery) {
-  if (state.busy || !delivery.recipientId) return;
-  const reason = window.prompt(`Исключить продавца ${delivery.recipientId} на ${delivery.candidate.source}?\n\nИсключение останавливает только последующие отправки, в том числе в других кампаниях. Уже начатое сообщение может дойти.\n\nВведите причину исключения:`);
-  if (reason === null) return;
-  if (!reason.trim()) { report(new Error("Для исключения продавца укажите причину.")); return; }
-  await operation(async () => {
-    await api("/api/suppress", { method: "POST", body: { source: delivery.candidate.source, recipientId: delivery.recipientId, reason: reason.trim() }, validate: (value) => record(value) && value.ok === true });
-    await refreshData();
-    show("notice", `Продавец ${delivery.recipientId} исключён на ${delivery.candidate.source}. Это останавливает только последующие отправки; уже начатое сообщение может дойти.`);
-  });
+function selectMode(mode) {
+  const social = mode === "social";
+  const instagramWatch = mode === "instagram-watch";
+  const marketplace = !social && !instagramWatch;
+  $("social-workspace").hidden = !social;
+  $("instagram-watch-workspace").hidden = !instagramWatch;
+  $("marketplace-workspace").hidden = !marketplace;
+  $("social-tab").setAttribute("aria-pressed", String(social));
+  $("instagram-watch-tab").setAttribute("aria-pressed", String(instagramWatch));
+  $("marketplace-tab").setAttribute("aria-pressed", String(marketplace));
+  $("social-tab").classList.toggle("secondary", !social);
+  $("instagram-watch-tab").classList.toggle("secondary", !instagramWatch);
+  $("marketplace-tab").classList.toggle("secondary", !marketplace);
 }
 async function poll() {
-  try { if (!document.hidden && !state.busy) await refreshData(); }
-  catch (error) {
-    state.status = null;
-    renderStatus();
-    renderDetail();
-    show("sync-error", errorText(error));
-  } finally { setTimeout(() => { void poll(); }, 5000); }
+  try { if (!document.hidden && !state.busy) await refreshData(); } finally { setTimeout(() => void poll(), 5000); }
 }
 
+$("project-select").addEventListener("change", () => {
+  state.projectId = $("project-select").value || null;
+  state.projectDetail = null;
+  state.selectedId = null;
+  state.selectedSocialId = null;
+  state.selectedInstagramWatchId = null;
+  resetInstagramWatchForm();
+  invalidatePreview();
+  void refreshData();
+});
+$("project-form").addEventListener("submit", (event) => void createProject(event));
+$("connection-form").addEventListener("submit", (event) => void saveConnection(event));
+$("close-connection").addEventListener("click", () => $("connection-dialog").close());
+$("marketplace-tab").addEventListener("click", () => selectMode("marketplace"));
+$("social-tab").addEventListener("click", () => selectMode("social"));
+$("instagram-watch-tab").addEventListener("click", () => selectMode("instagram-watch"));
 $("audience-fields").addEventListener("input", invalidatePreview);
 $("audience-fields").addEventListener("change", invalidatePreview);
-$("preview-audience").addEventListener("click", () => { void previewAudience(); });
+$("preview-audience").addEventListener("click", () => void previewAudience());
 $("message").addEventListener("input", updateMessage);
-$("image").addEventListener("change", () => { void uploadImage(); });
+$("image").addEventListener("change", () => void uploadImage());
 $("remove-image").addEventListener("click", removeImage);
-$("message-image").addEventListener("error", () => { show("image-status", "Не удалось показать локальный предпросмотр фото. Проверьте файл перед созданием кампании."); });
 $("suggest-text").addEventListener("click", () => {
-  if ($("message").value.trim() && !window.confirm("Заменить текущий текст нейтральным примером?")) return;
-  $("message").value = "Здравствуйте! Это рекламное предложение от Autodom. Если вам нужна информация по VIN автомобиля, можно обратиться к нашему Telegram-боту: https://t.me/autokgbot. Покрытие VIN-источников различается; отсутствие записей не подтверждает отсутствие ДТП или других проблем. Если предложение неактуально, сообщите — мы исключим вас из дальнейших рассылок.";
+  if ($("message").value.trim() && !window.confirm("Заменить текущий текст?")) return;
+  $("message").value = "Здравствуйте! Это рекламное предложение от Autodom. Если вам нужна информация по VIN автомобиля, можно обратиться к нашему Telegram-боту: https://t.me/autokgbot. Покрытие VIN-источников различается; отсутствие записей не подтверждает отсутствие ДТП. Если предложение неактуально, сообщите — мы исключим вас из дальнейших рассылок.";
   updateMessage();
-  $("message").focus();
 });
-$("campaign-form").addEventListener("submit", (event) => { void createCampaign(event); });
-$("refresh").addEventListener("click", () => { void refreshData().catch(report); });
+$("campaign-form").addEventListener("submit", (event) => void createCampaign(event));
+$("social-form").addEventListener("submit", (event) => void createSocialCampaign(event));
+$("instagram-watch-form").addEventListener("submit", (event) => void saveInstagramWatch(event));
+$("cancel-instagram-watch-edit").addEventListener("click", resetInstagramWatchForm);
+$("refresh").addEventListener("click", () => void refreshData());
 updateMessage();
 updateControls();
 void poll();

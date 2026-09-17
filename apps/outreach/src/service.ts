@@ -14,17 +14,27 @@ import {
   type CampaignDetail,
   type CampaignInput,
   type Candidate,
+  type ConnectionInput,
   campaignSchema,
+  DEFAULT_PROJECT_ID,
   DeliveryError,
   type DeliveryStatus,
   filterSchema,
+  type MarketingPlatform,
+  type MarketingProject,
   type Messenger,
   type OutreachImage,
   type OutreachSource,
+  type ProjectConnection,
+  type ProjectInput,
+  platformSchema,
+  projectInputSchema,
   type Recipient,
   ServiceError,
   sourceSchema,
 } from "./contracts.js";
+import type { InstagramCredentials } from "./instagram-private.js";
+import { CredentialVault } from "./vault.js";
 
 const FRESH_HOURS = 48;
 const LEADER_KEY = [1096111183, 1869968498] as const;
@@ -53,6 +63,30 @@ type DeliveryRow = {
   updated_at: Date;
 };
 type PendingRow = DeliveryRow & { input: CampaignInput };
+type ProjectRow = {
+  id: string;
+  name: string;
+  description: string;
+  created_at: Date;
+  updated_at: Date;
+};
+type ConnectionRow = {
+  project_id: string;
+  platform: MarketingPlatform;
+  account_label: string;
+  login: string;
+  auth: ProjectConnection["auth"];
+  credential: Buffer | null;
+  enabled: boolean;
+  updated_at: Date;
+};
+const instagramCredentialSchema = z
+  .object({
+    version: z.literal(1),
+    password: z.string().min(8).max(16_384),
+    session: z.record(z.string(), z.unknown()).nullable(),
+  })
+  .strict();
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);
@@ -81,6 +115,7 @@ export class OutreachService {
     private readonly pool: pg.Pool,
     private readonly messengers: ReadonlyMap<OutreachSource, Messenger>,
     private readonly sendEnabled: boolean,
+    private readonly vault: CredentialVault = new CredentialVault(),
   ) {}
 
   private async safe<T>(operation: () => Promise<T>): Promise<T> {
@@ -119,7 +154,25 @@ export class OutreachService {
           );
           if (!schema.rows[0]?.exists) await client.query("CREATE SCHEMA autodom_outreach");
           await client.query(`
-            -- A pre-created schema needs no database-wide CREATE privilege.
+            CREATE TABLE IF NOT EXISTS autodom_outreach.projects (
+              id uuid PRIMARY KEY, name text NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+              description text NOT NULL DEFAULT '' CHECK (length(description) <= 500),
+              created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+              updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+            );
+            INSERT INTO autodom_outreach.projects(id,name,description)
+              VALUES ('${DEFAULT_PROJECT_ID}','Autodom','Основной проект привлечения клиентов')
+              ON CONFLICT (id) DO NOTHING;
+            CREATE TABLE IF NOT EXISTS autodom_outreach.connections (
+              project_id uuid NOT NULL REFERENCES autodom_outreach.projects(id) ON DELETE CASCADE,
+              platform text NOT NULL CHECK (platform IN ('mashina.kg','lalafo.kg','instagram','facebook','threads')),
+              account_label text NOT NULL CHECK (length(account_label) BETWEEN 1 AND 120),
+              login text NOT NULL DEFAULT '' CHECK (length(login) <= 200),
+              auth text NOT NULL CHECK (auth IN ('server_session','credentials','access_token')),
+              credential bytea, enabled boolean NOT NULL DEFAULT true,
+              updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+              PRIMARY KEY (project_id,platform)
+            );
             CREATE TABLE IF NOT EXISTS autodom_outreach.images (
               id uuid PRIMARY KEY, mime text NOT NULL CHECK (mime IN ('image/jpeg','image/png')),
               bytes bytea NOT NULL CHECK (octet_length(bytes) BETWEEN 1 AND 5242880),
@@ -127,11 +180,18 @@ export class OutreachService {
             );
             CREATE TABLE IF NOT EXISTS autodom_outreach.campaigns (
               id uuid PRIMARY KEY, input jsonb NOT NULL,
+              project_id uuid REFERENCES autodom_outreach.projects(id),
               source text NOT NULL CHECK (source IN ('mashina.kg','lalafo.kg')),
               image_id uuid REFERENCES autodom_outreach.images(id),
               status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','running','paused','completed','cancelled')),
               created_at timestamptz NOT NULL DEFAULT clock_timestamp(), last_error text
             );
+            ALTER TABLE autodom_outreach.campaigns ADD COLUMN IF NOT EXISTS project_id uuid
+              REFERENCES autodom_outreach.projects(id);
+            UPDATE autodom_outreach.campaigns SET project_id='${DEFAULT_PROJECT_ID}' WHERE project_id IS NULL;
+            ALTER TABLE autodom_outreach.campaigns ALTER COLUMN project_id SET NOT NULL;
+            UPDATE autodom_outreach.campaigns SET input=jsonb_set(input,'{projectId}',to_jsonb(project_id::text))
+              WHERE NOT (input ? 'projectId');
             CREATE TABLE IF NOT EXISTS autodom_outreach.deliveries (
               id uuid PRIMARY KEY, campaign_id uuid NOT NULL REFERENCES autodom_outreach.campaigns(id),
               candidate jsonb NOT NULL, position integer NOT NULL,
@@ -158,10 +218,280 @@ export class OutreachService {
             INSERT INTO autodom_outreach.source_pacing(source) VALUES ('mashina.kg'), ('lalafo.kg')
               ON CONFLICT DO NOTHING;
           `);
+          for (const source of this.messengers.keys())
+            await client.query(
+              `INSERT INTO autodom_outreach.connections
+                (project_id,platform,account_label,auth,enabled)
+               VALUES ($1,$2,$3,'server_session',true)
+               ON CONFLICT (project_id,platform) DO UPDATE SET
+                 account_label=EXCLUDED.account_label,auth='server_session',enabled=true,
+                 updated_at=clock_timestamp()`,
+              [DEFAULT_PROJECT_ID, source, `${source} · серверная сессия`],
+            );
         });
       } finally {
         client.release();
       }
+    });
+  }
+  private project(row: ProjectRow): MarketingProject {
+    return {
+      id: row.id,
+      name: row.name,
+      description: row.description,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+    };
+  }
+
+  async listProjects(): Promise<MarketingProject[]> {
+    return this.safe(async () => {
+      const rows = await this.pool.query<ProjectRow>(
+        "SELECT * FROM autodom_outreach.projects ORDER BY created_at,id",
+      );
+      return rows.rows.map((row) => this.project(row));
+    });
+  }
+
+  async createProject(input: ProjectInput): Promise<MarketingProject> {
+    const parsed = parse(projectInputSchema, input);
+    return this.safe(async () => {
+      const id = randomUUID();
+      const row = (
+        await this.pool.query<ProjectRow>(
+          `INSERT INTO autodom_outreach.projects(id,name,description)
+           VALUES ($1,$2,$3) RETURNING *`,
+          [id, parsed.name, parsed.description],
+        )
+      ).rows[0];
+      if (!row) throw new ServiceError(503, "Проект не был сохранён");
+      return this.project(row);
+    });
+  }
+
+  private async projectById(id: string): Promise<MarketingProject> {
+    parse(uuidSchema, id);
+    const row = (
+      await this.pool.query<ProjectRow>("SELECT * FROM autodom_outreach.projects WHERE id=$1", [id])
+    ).rows[0];
+    if (!row) throw new ServiceError(404, "Проект не найден");
+    return this.project(row);
+  }
+
+  private async connection(row: ConnectionRow): Promise<ProjectConnection> {
+    const messenger =
+      row.platform === "mashina.kg" || row.platform === "lalafo.kg"
+        ? this.messengers.get(row.platform)
+        : undefined;
+    let ready = false;
+    let message = "Подключение выключено";
+    if (row.enabled && row.auth === "server_session" && messenger) {
+      try {
+        const checked = await messenger.check();
+        ready = checked.ready;
+        message = checked.message;
+      } catch {
+        message = "Серверная сессия недоступна";
+      }
+    } else if (row.enabled && row.auth === "access_token" && row.credential) {
+      ready = this.vault.configured;
+      message = ready
+        ? "Токен сохранён; доступ проверяется перед запуском"
+        : "Хранилище ключей не настроено";
+    } else if (
+      row.enabled &&
+      row.platform === "instagram" &&
+      row.auth === "credentials" &&
+      row.credential &&
+      row.login
+    ) {
+      ready = this.vault.configured;
+      message = ready
+        ? "Логин и пароль сохранены; сессия проверяется перед запуском"
+        : "Хранилище ключей не настроено";
+    } else if (row.enabled && row.auth === "credentials" && row.credential) {
+      message =
+        "Данные сохранены, но площадке нужна серверная сессия. Выполните безопасный вход на сервере.";
+    } else if (row.enabled) {
+      message = "Секрет доступа не настроен";
+    }
+    return {
+      projectId: row.project_id,
+      platform: row.platform,
+      accountLabel: row.account_label,
+      login: row.login,
+      auth: row.auth,
+      credentialConfigured: Boolean(row.credential) || row.auth === "server_session",
+      enabled: row.enabled,
+      ready,
+      message,
+      updatedAt: row.updated_at.toISOString(),
+    };
+  }
+
+  async projectDetail(
+    id: string,
+  ): Promise<{ project: MarketingProject; connections: ProjectConnection[] }> {
+    return this.safe(async () => {
+      const project = await this.projectById(id);
+      const rows = await this.pool.query<ConnectionRow>(
+        "SELECT * FROM autodom_outreach.connections WHERE project_id=$1 ORDER BY platform",
+        [id],
+      );
+      return {
+        project,
+        connections: await Promise.all(rows.rows.map((row) => this.connection(row))),
+      };
+    });
+  }
+
+  async upsertConnection(projectId: string, input: ConnectionInput): Promise<ProjectConnection> {
+    parse(uuidSchema, projectId);
+    const parsed = parse(
+      z.object({
+        platform: platformSchema,
+        accountLabel: z.string().trim().min(1).max(120),
+        login: z.string().trim().max(200),
+        secret: z.string().min(8).max(16_384).optional(),
+        enabled: z.boolean(),
+      }),
+      input,
+    );
+    return this.safe(async () => {
+      await this.projectById(projectId);
+      const current = (
+        await this.pool.query<ConnectionRow>(
+          "SELECT * FROM autodom_outreach.connections WHERE project_id=$1 AND platform=$2",
+          [projectId, parsed.platform],
+        )
+      ).rows[0];
+      if (!current && !parsed.secret)
+        throw new ServiceError(400, "Для нового подключения укажите секрет доступа");
+      let credential = current?.credential ?? null;
+      let auth = current?.auth;
+      if (parsed.secret) {
+        if (!this.vault.configured)
+          throw new ServiceError(409, "Серверное шифрование секретов не настроено");
+        if (parsed.platform === "instagram") {
+          if (!parsed.login) throw new ServiceError(400, "Для Instagram укажите логин аккаунта");
+          credential = this.vault.seal(
+            JSON.stringify({ version: 1, password: parsed.secret, session: null }),
+            `${projectId}:${parsed.platform}`,
+          );
+          auth = "credentials";
+        } else {
+          credential = this.vault.seal(parsed.secret, `${projectId}:${parsed.platform}`);
+          auth =
+            parsed.platform === "facebook" || parsed.platform === "threads"
+              ? "access_token"
+              : "credentials";
+        }
+      }
+      if (!auth) throw new ServiceError(400, "Способ авторизации не определён");
+      const row = (
+        await this.pool.query<ConnectionRow>(
+          `INSERT INTO autodom_outreach.connections
+            (project_id,platform,account_label,login,auth,credential,enabled)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (project_id,platform) DO UPDATE SET
+             account_label=EXCLUDED.account_label,login=EXCLUDED.login,auth=EXCLUDED.auth,
+             credential=EXCLUDED.credential,enabled=EXCLUDED.enabled,updated_at=clock_timestamp()
+           RETURNING *`,
+          [
+            projectId,
+            parsed.platform,
+            parsed.accountLabel,
+            parsed.login,
+            auth,
+            credential,
+            parsed.enabled,
+          ],
+        )
+      ).rows[0];
+      if (!row) throw new ServiceError(503, "Подключение не было сохранено");
+      return this.connection(row);
+    });
+  }
+
+  private async requireConnection(
+    projectId: string,
+    platform: MarketingPlatform,
+    ready: boolean,
+  ): Promise<ProjectConnection> {
+    const row = (
+      await this.pool.query<ConnectionRow>(
+        "SELECT * FROM autodom_outreach.connections WHERE project_id=$1 AND platform=$2",
+        [projectId, platform],
+      )
+    ).rows[0];
+    if (!row || !row.enabled) throw new ServiceError(409, "Площадка не подключена к проекту");
+    const connection = await this.connection(row);
+    if (ready && !connection.ready)
+      throw new ServiceError(409, `Подключение не готово: ${connection.message}`);
+    return connection;
+  }
+
+  async accessToken(projectId: string, platform: MarketingPlatform): Promise<string> {
+    parse(uuidSchema, projectId);
+    parse(platformSchema, platform);
+    return this.safe(async () => {
+      const row = (
+        await this.pool.query<ConnectionRow>(
+          "SELECT * FROM autodom_outreach.connections WHERE project_id=$1 AND platform=$2",
+          [projectId, platform],
+        )
+      ).rows[0];
+      if (!row?.enabled || row.auth !== "access_token" || !row.credential)
+        throw new ServiceError(409, "Активный токен площадки не настроен");
+      if (!this.vault.configured) throw new ServiceError(409, "Хранилище ключей не настроено");
+      try {
+        return this.vault.open(row.credential, `${projectId}:${platform}`);
+      } catch {
+        throw new ServiceError(409, "Секрет подключения повреждён или зашифрован другим ключом");
+      }
+    });
+  }
+
+  async instagramCredentials(projectId: string): Promise<InstagramCredentials> {
+    parse(uuidSchema, projectId);
+    return this.safe(async () => {
+      const row = (
+        await this.pool.query<ConnectionRow>(
+          "SELECT * FROM autodom_outreach.connections WHERE project_id=$1 AND platform='instagram'",
+          [projectId],
+        )
+      ).rows[0];
+      if (!row?.enabled || row.auth !== "credentials" || !row.credential || !row.login)
+        throw new ServiceError(409, "Активный логин Instagram не настроен");
+      if (!this.vault.configured) throw new ServiceError(409, "Хранилище ключей не настроено");
+      try {
+        const secret = instagramCredentialSchema.parse(
+          JSON.parse(this.vault.open(row.credential, `${projectId}:instagram`)),
+        );
+        return { username: row.login, password: secret.password, session: secret.session };
+      } catch {
+        throw new ServiceError(409, "Данные Instagram повреждены или зашифрованы другим ключом");
+      }
+    });
+  }
+
+  async saveInstagramSession(projectId: string, session: Record<string, unknown>): Promise<void> {
+    parse(uuidSchema, projectId);
+    const parsedSession = z.record(z.string(), z.unknown()).parse(session);
+    if (JSON.stringify(parsedSession).length > 200_000)
+      throw new ServiceError(400, "Сессия Instagram слишком большая");
+    return this.safe(async () => {
+      const credentials = await this.instagramCredentials(projectId);
+      const credential = this.vault.seal(
+        JSON.stringify({ version: 1, password: credentials.password, session: parsedSession }),
+        `${projectId}:instagram`,
+      );
+      const updated = await this.pool.query(
+        `UPDATE autodom_outreach.connections SET credential=$2,updated_at=clock_timestamp()
+         WHERE project_id=$1 AND platform='instagram' AND auth='credentials' AND enabled=true`,
+        [projectId, credential],
+      );
+      if (!updated.rowCount) throw new ServiceError(409, "Активный логин Instagram не настроен");
     });
   }
 
@@ -267,6 +597,8 @@ export class OutreachService {
   async create(input: CampaignInput): Promise<Campaign> {
     const parsed = parse(campaignSchema, input);
     return this.safe(async () => {
+      await this.projectById(parsed.projectId);
+      await this.requireConnection(parsed.projectId, parsed.filter.source, false);
       if (
         parsed.imageId &&
         !(
@@ -283,8 +615,9 @@ export class OutreachService {
       try {
         await this.transaction(client, async () => {
           await client.query(
-            "INSERT INTO autodom_outreach.campaigns(id,input,source,image_id) VALUES ($1,$2,$3,$4)",
-            [id, JSON.stringify(parsed), parsed.filter.source, parsed.imageId],
+            `INSERT INTO autodom_outreach.campaigns(id,input,project_id,source,image_id)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [id, JSON.stringify(parsed), parsed.projectId, parsed.filter.source, parsed.imageId],
           );
           await client.query(
             `INSERT INTO autodom_outreach.deliveries(id,campaign_id,candidate,position)
@@ -394,6 +727,7 @@ export class OutreachService {
         if (!confirmed) throw new ServiceError(400, "Требуется явное подтверждение отправки");
         if (!this.sendEnabled)
           throw new ServiceError(409, "Отправка отключена конфигурацией сервиса");
+        await this.requireConnection(existing.projectId, existing.filter.source, true);
         const messenger = this.messengers.get(existing.filter.source);
         if (!messenger || messenger.source !== existing.filter.source)
           throw new ServiceError(409, "Транспорт площадки не настроен");

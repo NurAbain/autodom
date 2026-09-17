@@ -2,7 +2,7 @@
 
 ## Архитектура и границы
 
-Расширяем существующий стек Domcom: **Prometheus → Alertmanager**, **Docker → Alloy → Loki**, **Grafana**. Вторые Prometheus/Grafana/Loki для production Autodom не нужны. Bot + Mini App, parser и VIN API выпускаются независимо; мониторинг не меняет allowlist источников, Korea-first, лимиты VIN или пользовательские уведомления.
+Расширяем существующий стек Domcom: **Prometheus → Alertmanager**, **Docker → Alloy → Loki**, **Grafana**. Вторые Prometheus/Grafana/Loki для production Autodom не нужны. Bot + Mini App, parser, VIN API и маркетинговый outreach выпускаются независимо; мониторинг не меняет allowlist источников, Korea-first, лимиты VIN или пользовательские уведомления.
 
 | Роль | Private scrape target | Job | Что измеряется |
 | --- | --- | --- | --- |
@@ -10,16 +10,17 @@
 | Полный бот + Mini App | `autodom-full-bot:9901/metrics` | `autodom-full-bot` | Те же эксплуатационные метрики и продуктовые события при включении |
 | Parser | `autodom-worker-metrics:9901/metrics` | `autodom-worker` | Разрешённые источники, запросы/результаты заданий, время выполнения, BullMQ, heartbeat, процесс |
 | VIN API | `autodom-vin-api:8080/metrics` | `autodom-vin` | HTTP, длительность, занятые слоты, реально полученные наблюдения провайдеров, процесс |
+| Marketing outreach | `autodom-outreach:8092/metrics` | `autodom-outreach` | Состояния кампаний/доставок, ошибки циклов очереди, процесс |
 
-Общие labels: `application="autodom"`, `role="bot|worker|vin"`. Prometheus добавляет `job` и `instance`. Интервал scrape 15 с, таймаут 5 с. Metrics не опубликованы на host-портах, в публичном Mini App `/metrics` отсутствует. VIN `/metrics` открыт **только внутри приватной сети**, не требует API token и не занимает слот проверки. Все прикладные POST по-прежнему требуют Bearer. Не проксировать VIN listener целиком в интернет.
+Общие labels: `application="autodom"`, `role="bot|worker|vin|outreach"`. Prometheus добавляет `job` и `instance`. Интервал scrape 15 с, таймаут 5 с. Metrics не опубликованы на публичных host-портах, в публичном Mini App `/metrics` отсутствует. VIN и outreach `/metrics` открыты **только внутри приватной сети** и не требуют прикладной авторизации. Scrape не запускает внешние действия и не занимает слот VIN-проверки. Все прикладные POST по-прежнему требуют свою авторизацию. Не проксировать внутренние listeners целиком в интернет.
 
-Prometheus должен находиться в сетях существующих приложений. `autodom-bot-metrics` сохраняется в aliases приватной сети `coolify`, рядом с `autodom-payment-events`: Coolify может переписывать aliases собственной сети ресурса. Worker и VIN доступны в сети `${AUTODOM_NETWORK}`. Имя сети брать из действующей конфигурации, не предполагать, что оно буквально `autodom`.
+Prometheus должен находиться в сетях существующих приложений. `autodom-bot-metrics` сохраняется в aliases приватной сети `coolify`, рядом с `autodom-payment-events`: Coolify может переписывать aliases собственной сети ресурса. Worker и VIN доступны в сети `${AUTODOM_NETWORK}`, outreach — по alias `autodom-outreach` в общей proxy-сети. Имена сетей брать из действующей конфигурации, не предполагать значения по умолчанию.
 
 Grafana: существующие datasource UIDs **`prometheus`** и **`loki`**, папка **Autodom**. Dashboard UID **`autodom-overview`** — эксплуатация: фильтры роли/источника, ошибки, очереди, свежесть и логи. **`autodom-product`** — пользовательские пути и конверсия после отдельного включения аналитики. Смена datasource в фильтре не меняет конфигурацию сервиса.
 
 ## Источник конфигурации
 
-- `deploy/monitoring-scrape.yml`: четыре Autodom scrape jobs, включая отдельный полный бот.
+- `deploy/monitoring-scrape.yml`: пять Autodom scrape jobs, включая отдельный полный бот и marketing outreach.
 - `deploy/prometheus/autodom.rules.yml`: правила; рядом `autodom.rules.test.yml` с граничными сценариями.
 - `deploy/grafana/dashboards/autodom-overview.json` и `autodom-product.json`: эксплуатационный и продуктовый дашборды.
 - `deploy/grafana/provisioning/dashboards/autodom.yml`: файловый provider для окружений, где файловое provisioning действительно доступно.
@@ -66,6 +67,14 @@ Metadata PostgreSQL собирается прежним bounded single-flight: �
 Это изменение увеличивает число архивных обращений для обычных подходящих VIN-проверок, не частоту разрешённых запросов источника. Перед включением нужны совместимые клиенты обоих ботов, принимающие опциональное поле `archives` и текущий CARFAX-контракт, затем VIN API; до обновления API архивная часть в новых клиентах отсутствует. При возврате старых строгих клиентов сначала вернуть совместимый API без нового поля. Сохранять текущие allowlist, квоты, proxy/session settings и более новые релизы; схема БД/платежи не меняются. Одиночный smoke не подтверждает пропускную способность под нагрузкой.
 
 Default process metrics имеют префикс `autodom_`: CPU time, RSS, heap, event-loop lag, GC и uptime. Память интерпретировать с действующим container `mem_limit`; фиксированное число из чужого проекта не является порогом для Autodom.
+
+### Marketing outreach
+
+- `autodom_outreach_entities{kind,status,error}` — текущее количество marketplace/social кампаний и Instagram-мониторингов. `error="true"` означает сохранённый `last_error`; текст ошибки и названия проектов в labels не публикуются.
+- `autodom_outreach_deliveries{kind,status}` — текущее количество доставок/наблюдений, включая `unknown`. Неизвестный результат не считается неудачей и не повторяется автоматически.
+- `autodom_outreach_queue_tick_success{component}` и `autodom_outreach_queue_tick_timestamp_seconds{component}` — результат и время последнего завершённого цикла `marketplace|social|instagram_watch`. Счётчик `autodom_outreach_queue_tick_errors_total{component}` растёт при инфраструктурной ошибке цикла.
+- `/metrics` собирает только агрегаты из собственной schema `autodom_outreach`; scrape не отправляет сообщений/комментариев, не проверяет внешние аккаунты и не раскрывает credentials, usernames или тексты.
+
 
 ### Пользовательский путь и конверсия
 
@@ -175,7 +184,7 @@ pnpm build
 node deploy/sync-monitoring.mjs /path/to/domcom-release
 ```
 
-Синхронизация меняет только четыре одноимённых scrape jobs, подключение Autodom rules, их файл, отмеченный блок Alloy и каталог Autodom dashboards. Другие jobs остаются. Повторный запуск даёт тот же результат. Не выполняет deploy/restart.
+Синхронизация меняет только пять одноимённых scrape jobs, подключение Autodom rules, их файл, отмеченный блок Alloy и каталог Autodom dashboards. Другие jobs остаются. Повторный запуск даёт тот же результат. Не выполняет deploy/restart.
 
 В проверочном окружении с Docker:
 
@@ -203,11 +212,11 @@ node deploy/provision-grafana.mjs
 ## Production rollout без общего рестарта
 
 1. Сверить реальные Coolify git pins, image IDs, env, aliases, Compose и ID всех monitoring-контейнеров. Сохранить конфигурацию/предыдущие images и закрытый backup; не печатать env с секретами.
-2. Собрать независимые bot/worker/VIN images из проверенного SHA. Переключать роли отдельно. Перед bot-релизом сохранить singleton polling: старый poller должен завершиться до нового. Не менять DB/Redis, миграции, allowlists, proxy session settings и платёжные credentials.
-3. Проверить private `/metrics` и labels контейнеров; `/health`/`/ready` и VIN Bearer 401. Scrape не должен вызывать провайдеров. Не посылать VIN в платные/внешние источники ради проверки мониторинга.
+2. Собрать независимые bot/worker/VIN/outreach images из проверенных SHA. Переключать роли отдельно. Перед bot-релизом сохранить singleton polling: старый poller должен завершиться до нового. Не менять DB/Redis, миграции, allowlists, proxy session settings и платёжные credentials.
+3. Проверить private `/metrics` и labels контейнеров; `/health`/`/ready` и VIN Bearer 401. Scrape не должен вызывать провайдеров, отправлять сообщения или публиковать комментарии. Не посылать VIN или marketing-действия во внешние системы ради проверки мониторинга.
 4. Зафиксировать синхронизированную конфигурацию Domcom и pin мониторинга. Его Prometheus config **встроен в image**, простое изменение checkout и reload не обновляет его. Собрать новый monitoring image; использовать сохранённый production Compose и адресный `docker compose up -d --no-deps --no-build --pull never prometheus`, не `down` и не общий Coolify redeploy.
 5. Обновить существующий bind-файл Alloy после `alloy validate`, затем вызвать его reload или перезапустить **только Alloy**, сохранив positions volume. При обновлении одиночного bind-файла заменой inode контейнер может видеть прежние байты: использовать запись в существующий файл либо пересоздать только Alloy.
-6. Импортировать Grafana dashboards через API. Сверить 4 Autodom targets `up=1`, evaluations `health=ok`, актуальный queue snapshot, запросы datasource и реальные строки Loki. Для включённой аналитики дополнительно проверить её свежесть и финансовую сверку. Проверить dashboard в браузере. Остальные monitoring containers/images/volumes и jobs должны сохраниться.
+6. Импортировать Grafana dashboards через API. Сверить 5 Autodom targets `up=1`, evaluations `health=ok`, актуальные queue snapshots, запросы datasource и реальные строки Loki. Для включённой аналитики дополнительно проверить её свежесть и финансовую сверку. Проверить dashboard в браузере. Остальные monitoring containers/images/volumes и jobs должны сохраниться.
 
 Общий Coolify deploy monitoring-ресурса здесь не подходит: установленная версия останавливает весь ресурс перед custom start. Точный операторский Compose/путь зависит от действующего ресурса; не запускать пример из другой директории против production volumes.
 
@@ -242,6 +251,12 @@ node deploy/provision-grafana.mjs
 ### Notification errors
 
 `AutodomNotificationErrors`: доля `retry|error` >10% при >=20 попытках за 10 мин, выдержка 5 мин. Отличать blocked 403 от outage, проверять Telegram throttling и transport. Не включать мониторинг пользователям молча и не менять cursor для сокрытия ошибок. `sent` считает успешный пакет, не уникального пользователя/объявление.
+
+### Outreach
+
+`AutodomOutreachTargetMissing` и общий `AutodomTargetDown`: проверить процесс outreach, private alias `autodom-outreach:8092`, общую proxy-сеть и `/metrics`; не публиковать порт ради восстановления scrape. `AutodomOutreachQueueTickFailed`: проверить PostgreSQL и логи указанного `component`, затем состояние кампаний.
+
+`AutodomOutreachPausedWithError` означает, что workflow уже безопасно остановлен после ошибки. `AutodomOutreachUnknownDelivery` требует ручной сверки с площадкой: автоматический повтор запрещён, поскольку исходная запись могла состояться. Исправить причину, сверить внешнее состояние и только затем явно возобновлять workflow. Не очищать `last_error`/`unknown` напрямую ради зелёного графика.
 
 ## Откат
 

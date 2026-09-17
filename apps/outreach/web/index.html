@@ -4,29 +4,48 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>Autodom · Рассылки продавцам</title>
+  <title>Marketing Command Center</title>
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">Перейти к содержимому</a>
   <header class="masthead">
-    <div class="shell header-row"><div><p class="eyebrow">AUTODOM / OUTREACH</p><h1>Рассылки продавцам</h1><p class="subtitle">Отдельный сервис · VIN-предложения · ручной запуск</p></div><span class="admin-label">Панель администратора</span></div>
+    <div class="shell header-row"><div><p class="eyebrow">MARKETING COMMAND CENTER</p><h1>Центр привлечения клиентов</h1><p class="subtitle">Проекты · площадки · рассылки · комментарии</p></div><span class="admin-label">Панель команды</span></div>
   </header>
   <main id="main" class="shell">
-    <aside class="risk-notice" aria-label="Риск холодной рассылки"><strong>Это холодная рекламная рассылка.</strong> Продавцы не запрашивали предложение. Сообщения могут нарушать правила площадок и привести к жалобам или блокировке аккаунта. Медленная отправка не устраняет этот риск.</aside>
-    <section class="panel health-panel" aria-labelledby="health-heading">
-      <div class="section-heading"><h2 id="health-heading">Готовность отправки</h2><button id="refresh" type="button" class="secondary">Обновить</button></div>
+    <aside class="risk-notice" aria-label="Правила коммуникации"><strong>Каждое действие выполняется от аккаунта выбранного проекта.</strong> Холодные сообщения и комментарии могут нарушать правила площадок. Запуск всегда требует отдельного подтверждения; неизвестный результат не повторяется.</aside>
+    <section class="panel project-panel" aria-labelledby="projects-heading">
+      <div class="section-heading"><div><p class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</p><h2 id="projects-heading">Проект и каналы</h2></div><button id="refresh" type="button" class="secondary">Обновить</button></div>
+      <div class="project-toolbar">
+        <div><label for="project-select">Текущий проект</label><select id="project-select" aria-describedby="project-description"></select><p id="project-description" class="hint"></p></div>
+        <details class="project-create"><summary>Создать проект</summary><form id="project-form"><label for="project-name">Название</label><input id="project-name" maxlength="100" required autocomplete="off"><label for="project-description-input">Описание</label><textarea id="project-description-input" maxlength="500" rows="2"></textarea><button type="submit">Создать и открыть</button></form></details>
+      </div>
+      <div id="connection-grid" class="connection-grid" aria-live="polite"></div>
+      <p id="vault-status" class="hint"></p>
       <p id="global-status" class="status-line" role="status">Проверяем состояние сервиса…</p>
       <ul id="source-status" class="source-list"></ul>
       <p id="refresh-time" class="hint">Обновление каждые 5 секунд, пока вкладка открыта.</p>
       <p id="sync-error" class="error" role="alert" hidden></p>
     </section>
+    <dialog id="connection-dialog" aria-labelledby="connection-title">
+      <form id="connection-form">
+        <div class="section-heading"><h2 id="connection-title">Подключение платформы</h2><button id="close-connection" type="button" class="text-button">Закрыть</button></div>
+        <input id="connection-platform" type="hidden">
+        <label for="connection-label">Название аккаунта</label><input id="connection-label" maxlength="120" required autocomplete="off">
+        <label id="connection-login-label" for="connection-login">Логин / ID аккаунта</label><input id="connection-login" maxlength="200" autocomplete="username">
+        <label id="connection-secret-label" for="connection-secret">Секрет подключения</label><input id="connection-secret" type="password" minlength="8" maxlength="16384" autocomplete="new-password" aria-describedby="connection-secret-help">
+        <p id="connection-secret-help" class="hint">Секрет шифруется на сервере и никогда не возвращается в браузер. Пустое поле сохраняет уже настроенный секрет.</p>
+        <label class="check-row"><input id="connection-enabled" type="checkbox" checked> Подключение включено</label>
+        <button type="submit">Сохранить подключение</button>
+      </form>
+    </dialog>
     <p id="notice" class="notice" role="status" hidden></p>
     <p id="operation-error" class="error page-error" role="alert" hidden></p>
-    <div class="workspace">
+    <nav class="mode-tabs" aria-label="Тип кампании"><button id="marketplace-tab" type="button" aria-pressed="true">Сообщения продавцам</button><button id="social-tab" type="button" class="secondary" aria-pressed="false">Комментарии к постам</button><button id="instagram-watch-tab" type="button" class="secondary" aria-pressed="false">Мониторинг Instagram</button></nav>
+    <div id="marketplace-workspace" class="workspace">
       <section class="panel composer" aria-labelledby="compose-heading">
-        <div class="section-heading"><div><p class="eyebrow">01 / ПОДГОТОВКА</p><h2 id="compose-heading">Новая кампания</h2></div><span class="badge">Без отправки</span></div>
+        <div class="section-heading"><div><p class="eyebrow">01 / ПОДГОТОВКА</p><h2 id="compose-heading">Новая рассылка</h2></div><span class="badge">Без отправки</span></div>
         <form id="campaign-form">
           <label for="name">Название кампании</label><input id="name" name="name" maxlength="100" required placeholder="Например: Бишкек · Toyota · сентябрь" autocomplete="off">
           <fieldset id="audience-fields"><legend>Кому показать предложение</legend>
@@ -35,32 +54,53 @@
             <div class="field-grid"><div><label for="year-min">Год от</label><input id="year-min" name="yearMin" type="number" min="1900" max="2100" step="1" inputmode="numeric" placeholder="Не задан"></div><div><label for="year-max">Год до</label><input id="year-max" name="yearMax" type="number" min="1900" max="2100" step="1" inputmode="numeric" placeholder="Не задан"></div></div>
             <label for="currency">Валюта фильтра цены</label><select id="currency" name="currency"><option value="USD">USD — доллар США</option><option value="KGS">KGS — кыргызский сом</option></select>
             <div class="field-grid"><div><label for="price-min">Цена от</label><input id="price-min" name="priceMin" type="number" min="0" max="10000000000" step="any" inputmode="decimal" placeholder="Не задана"></div><div><label for="price-max">Цена до</label><input id="price-max" name="priceMax" type="number" min="0" max="10000000000" step="any" inputmode="decimal" placeholder="Не задана"></div></div>
-            <label for="limit">Максимум записей получателей</label><input id="limit" name="limit" type="number" min="1" max="1000" step="1" value="100" required inputmode="numeric" aria-describedby="audience-help">
-            <p id="audience-help" class="hint">Выборка из локального каталога за последние 48 часов, не весь рынок. Несколько объявлений могут принадлежать одному продавцу. Фактических отправок может быть меньше из-за исключений и ошибок.</p>
-            <button id="preview-audience" type="button" class="secondary">Показать выборку</button>
-            <p id="audience-summary" class="hint" role="status">Сначала проверьте выборку. Пустую кампанию создать нельзя.</p>
-            <div id="audience-results" class="listing-list bounded-list" aria-label="Объявления в выборке"></div>
+            <label for="limit">Максимум получателей</label><input id="limit" name="limit" type="number" min="1" max="1000" step="1" value="100" required inputmode="numeric">
+            <p class="hint">Выборка из локального каталога за последние 48 часов. Создание фиксирует состав, но ничего не отправляет.</p>
+            <button id="preview-audience" type="button" class="secondary">Показать выборку</button><p id="audience-summary" class="hint" role="status">Сначала проверьте выборку.</p><div id="audience-results" class="listing-list bounded-list"></div>
           </fieldset>
           <fieldset><legend>Что отправить</legend>
-            <label for="image">Фото · JPEG или PNG, до 5 МБ</label><input id="image" type="file" accept="image/jpeg,image/png" aria-describedby="image-status">
-            <div class="inline-actions"><p id="image-status" class="hint" role="status">Фото не выбрано. Можно отправить только текст.</p><button id="remove-image" class="text-button" type="button" hidden>Убрать фото</button></div>
-            <p class="hint">Lalafo отправляет текст и фото двумя отдельными сообщениями. При частичной доставке сервис остановится для ручной проверки, без повторной отправки.</p>
-            <div class="label-row"><label for="message">Текст сообщения</label><span id="message-count" class="hint">0 / 2000</span></div>
-            <textarea id="message" name="text" rows="7" maxlength="2000" required aria-describedby="message-help message-count" placeholder="Напишите предложение без неподтверждённых обещаний"></textarea>
-            <button id="suggest-text" type="button" class="text-button">Вставить нейтральный пример</button>
-            <p id="message-help" class="hint">Пример можно изменить. Не обещайте полную историю или отсутствие ДТП: покрытие VIN-источников различается.</p>
-            <details open><summary>Предпросмотр сообщения</summary><div class="message-preview"><img id="message-image" alt="Фото для сообщения" hidden><p id="message-preview-text" class="message-text muted">Здесь появится текст сообщения.</p></div></details>
+            <label for="image">Фото · JPEG или PNG, до 5 МБ</label><input id="image" type="file" accept="image/jpeg,image/png" aria-describedby="image-status"><div class="inline-actions"><p id="image-status" class="hint" role="status">Фото не выбрано.</p><button id="remove-image" class="text-button" type="button" hidden>Убрать фото</button></div>
+            <div class="label-row"><label for="message">Текст сообщения</label><span id="message-count" class="hint">0 / 2000</span></div><textarea id="message" name="text" rows="7" maxlength="2000" required placeholder="Напишите предложение без неподтверждённых обещаний"></textarea><button id="suggest-text" type="button" class="text-button">Вставить нейтральный пример</button>
+            <details open><summary>Предпросмотр</summary><div class="message-preview"><img id="message-image" alt="Фото для сообщения" hidden><p id="message-preview-text" class="message-text muted">Здесь появится текст сообщения.</p></div></details>
           </fieldset>
-          <fieldset><legend>Темп отправки</legend><div class="field-grid"><div><label for="interval">Интервал, секунд</label><input id="interval" name="intervalSeconds" type="number" min="60" max="86400" step="1" value="300" required inputmode="numeric"></div><div><label for="daily-limit">Попыток за сутки</label><input id="daily-limit" name="dailyLimit" type="number" min="1" max="500" step="1" value="20" required inputmode="numeric"></div></div><p class="hint">Интервал и суточный лимит считаются по попыткам контакта с продавцом, суммарно для площадки. День — по Бишкеку. Минимальный интервал — 60 секунд. Закрытие панели не останавливает запущенную кампанию.</p></fieldset>
-          <button id="create-campaign" type="submit" disabled>Создать черновик</button><p class="hint">Создание фиксирует выборку заново по фильтрам и ничего не отправляет. Перед отдельным запуском проверьте сохранённый состав справа.</p>
+          <fieldset><legend>Темп</legend><div class="field-grid"><div><label for="interval">Интервал, секунд</label><input id="interval" type="number" min="60" max="86400" value="300" required></div><div><label for="daily-limit">Попыток за сутки</label><input id="daily-limit" type="number" min="1" max="500" value="20" required></div></div></fieldset>
+          <button id="create-campaign" type="submit" disabled>Создать черновик</button>
         </form>
       </section>
-      <div class="campaign-column">
-        <section class="panel" aria-labelledby="campaigns-heading"><div class="section-heading"><div><p class="eyebrow">02 / КОНТРОЛЬ</p><h2 id="campaigns-heading">Кампании</h2></div></div><div id="campaign-list" class="campaign-list"><p class="muted">Загрузка кампаний…</p></div></section>
-        <section class="panel" aria-labelledby="detail-heading"><h2 id="detail-heading">Детали кампании</h2><div id="campaign-detail"><p class="muted">Выберите кампанию, чтобы проверить состав, запустить или приостановить отправку.</p></div></section>
-      </div>
+      <div class="campaign-column"><section class="panel"><div class="section-heading"><div><p class="eyebrow">02 / КОНТРОЛЬ</p><h2>Рассылки проекта</h2></div></div><div id="campaign-list" class="campaign-list"></div></section><section class="panel"><h2>Детали рассылки</h2><div id="campaign-detail"><p class="muted">Выберите кампанию.</p></div></section></div>
     </div>
-    <footer>Неизвестный результат отправки требует ручной проверки и не повторяется автоматически. Исключение продавца действует только на последующие отправки.</footer>
+    <div id="social-workspace" class="workspace" hidden>
+      <section class="panel composer">
+        <div class="section-heading"><div><p class="eyebrow">01 / ПОДГОТОВКА</p><h2>Новая кампания комментариев</h2></div><span class="badge">Явные публикации</span></div>
+        <form id="social-form">
+          <label for="social-name">Название кампании</label><input id="social-name" maxlength="100" required>
+          <label for="social-platform">Платформа</label><select id="social-platform"><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="threads">Threads</option></select>
+          <label for="social-targets">Публикации</label><textarea id="social-targets" rows="7" required placeholder="ID | https://www.instagram.com/p/... | photo&#10;ID | https://www.instagram.com/reel/... | video"></textarea>
+          <p class="hint">Одна строка: ID публикации | HTTPS-ссылка | photo, video или text. Используются только явно указанные публикации; произвольные аккаунты не скрейпятся.</p>
+          <label for="social-message">Комментарий</label><textarea id="social-message" maxlength="2000" rows="6" required></textarea>
+          <div class="field-grid"><div><label for="social-interval">Интервал, секунд</label><input id="social-interval" type="number" min="60" max="86400" value="300" required></div><div><label for="social-daily-limit">Комментариев за сутки</label><input id="social-daily-limit" type="number" min="1" max="500" value="20" required></div></div>
+          <button type="submit">Создать черновик</button>
+        </form>
+      </section>
+      <div class="campaign-column"><section class="panel"><div class="section-heading"><div><p class="eyebrow">02 / КОНТРОЛЬ</p><h2>Комментарии проекта</h2></div></div><div id="social-list" class="campaign-list"></div></section><section class="panel"><h2>Детали комментариев</h2><div id="social-detail"><p class="muted">Выберите кампанию.</p></div></section></div>
+    </div>
+    <div id="instagram-watch-workspace" class="workspace" hidden>
+      <section class="panel composer">
+        <div class="section-heading"><div><p class="eyebrow">01 / НАСТРОЙКА</p><h2>Автокомментарии Instagram</h2></div><span class="badge">Все публикации</span></div>
+        <form id="instagram-watch-form">
+          <label for="instagram-watch-name">Название мониторинга</label><input id="instagram-watch-name" maxlength="100" required placeholder="Например: дилеры Кыргызстана">
+          <label for="instagram-watch-accounts">Аккаунты для отслеживания</label><textarea id="instagram-watch-accounts" rows="7" required placeholder="dealer_one&#10;dealer_two&#10;dealer_three"></textarea>
+          <p class="hint">Один username в строке, без ссылки. Список можно изменить после создания; удалённые аккаунты больше не обрабатываются.</p>
+          <fieldset><legend>Типы публикаций</legend><div class="inline-actions"><label class="check-row"><input id="instagram-watch-photo" type="checkbox" checked> Фото и карусели</label><label class="check-row"><input id="instagram-watch-video" type="checkbox" checked> Видео и Reels</label></div></fieldset>
+          <label for="instagram-watch-message">Комментарий</label><textarea id="instagram-watch-message" maxlength="2000" rows="6" required placeholder="Текст комментария для новых публикаций"></textarea>
+          <div class="field-grid"><div><label for="instagram-watch-interval">Интервал между комментариями, секунд</label><input id="instagram-watch-interval" type="number" min="300" max="86400" value="300" required></div><div><label for="instagram-watch-daily-limit">Комментариев за сутки</label><input id="instagram-watch-daily-limit" type="number" min="1" max="100" value="10" required></div></div>
+          <p class="hint">Профили проверяются каждые 5 минут. В очередь попадают выбранные фото и видео независимо от времени публикации. Отправка соблюдает заданный интервал и суточный лимит.</p>
+          <div class="action-row"><button id="save-instagram-watch" type="submit">Создать мониторинг</button><button id="cancel-instagram-watch-edit" type="button" class="secondary" hidden>Отменить редактирование</button></div>
+        </form>
+      </section>
+      <div class="campaign-column"><section class="panel"><div class="section-heading"><div><p class="eyebrow">02 / КОНТРОЛЬ</p><h2>Мониторинги проекта</h2></div></div><div id="instagram-watch-list" class="campaign-list"></div></section><section class="panel"><h2>Состояние мониторинга</h2><div id="instagram-watch-detail"><p class="muted">Выберите мониторинг.</p></div></section></div>
+    </div>
+    <footer>Instagram подключается через неофициальный Private API: логин, пароль и сохранённая сессия шифруются на сервере. Facebook и Threads используют access token. Любое ограничение, challenge или неизвестный результат останавливает автоматические действия.</footer>
   </main>
 </body>
 </html>
