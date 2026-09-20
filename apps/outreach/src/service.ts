@@ -27,8 +27,11 @@ import {
   type OutreachSource,
   type ProjectConnection,
   type ProjectInput,
+  type PropertyVehicleCandidate,
+  type PropertyVehicleSelectionInput,
   platformSchema,
   projectInputSchema,
+  propertyVehicleSelectionSchema,
   type Recipient,
   ServiceError,
   sourceSchema,
@@ -80,6 +83,23 @@ type ConnectionRow = {
   enabled: boolean;
   updated_at: Date;
 };
+type PropertyVehicleRow = {
+  id: string;
+  purpose: PropertyVehicleCandidate["purpose"];
+  make_model: string;
+  year: number;
+  mileage_km: string | null;
+  sale_price_minor: string | null;
+  sale_currency: PropertyVehicleCandidate["saleCurrency"];
+  property_city: string;
+  property_type: PropertyVehicleCandidate["propertyType"];
+  cash_minor: string | null;
+  cash_currency: PropertyVehicleCandidate["cashCurrency"];
+  monthly_minor: string | null;
+  monthly_currency: PropertyVehicleCandidate["monthlyCurrency"];
+  updated_at: number;
+  selected: boolean;
+};
 const instagramCredentialSchema = z
   .object({
     version: z.literal(1),
@@ -106,6 +126,12 @@ function validUrl(raw: string, source: OutreachSource): boolean {
   } catch {
     return false;
   }
+}
+function safeInteger(value: string | null): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error("Invalid owner vehicle amount");
+  return parsed;
 }
 
 export class OutreachService {
@@ -173,6 +199,14 @@ export class OutreachService {
               updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
               PRIMARY KEY (project_id,platform)
             );
+            CREATE TABLE IF NOT EXISTS autodom_outreach.property_vehicle_selections (
+              project_id uuid NOT NULL REFERENCES autodom_outreach.projects(id) ON DELETE CASCADE,
+              owner_user_id bigint NOT NULL REFERENCES public.owner_vehicles(user_id) ON DELETE CASCADE,
+              selected_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+              PRIMARY KEY (project_id,owner_user_id)
+            );
+            CREATE INDEX IF NOT EXISTS outreach_property_vehicle_selected
+              ON autodom_outreach.property_vehicle_selections(project_id,selected_at DESC);
             CREATE TABLE IF NOT EXISTS autodom_outreach.images (
               id uuid PRIMARY KEY, mime text NOT NULL CHECK (mime IN ('image/jpeg','image/png')),
               bytes bytea NOT NULL CHECK (octet_length(bytes) BETWEEN 1 AND 5242880),
@@ -357,6 +391,105 @@ export class OutreachService {
         connections: await Promise.all(rows.rows.map((row) => this.connection(row))),
       };
     });
+  }
+  private propertyVehicle(row: PropertyVehicleRow): PropertyVehicleCandidate {
+    const updatedAt = new Date(row.updated_at * 1000);
+    if (Number.isNaN(updatedAt.getTime())) throw new Error("Invalid owner vehicle timestamp");
+    return {
+      id: row.id,
+      purpose: row.purpose,
+      makeModel: row.make_model,
+      year: row.year,
+      mileageKm: safeInteger(row.mileage_km),
+      salePriceMinor: safeInteger(row.sale_price_minor),
+      saleCurrency: row.sale_currency,
+      propertyCity: row.property_city,
+      propertyType: row.property_type,
+      cashMinor: safeInteger(row.cash_minor),
+      cashCurrency: row.cash_currency,
+      monthlyMinor: safeInteger(row.monthly_minor),
+      monthlyCurrency: row.monthly_currency,
+      updatedAt: updatedAt.toISOString(),
+      selected: row.selected,
+    };
+  }
+
+  async propertyVehicles(
+    projectId: string,
+  ): Promise<{ vehicles: PropertyVehicleCandidate[]; total: number }> {
+    return this.safe(async () => {
+      await this.projectById(projectId);
+      await this.pool.query(
+        `DELETE FROM autodom_outreach.property_vehicle_selections s
+         WHERE s.project_id=$1 AND NOT EXISTS (
+           SELECT 1 FROM public.owner_vehicles v
+           WHERE v.user_id=s.owner_user_id AND v.purpose IN ('property','downpayment')
+         )`,
+        [projectId],
+      );
+      const rows = await this.pool.query<PropertyVehicleRow & { total: string }>(
+        `SELECT v.user_id::text id,v.purpose,v.make_model,v.year,
+           v.mileage_km::text,v.sale_price_minor::text,v.sale_currency,
+           v.property_city,v.property_type,v.cash_minor::text,v.cash_currency,
+           v.monthly_minor::text,v.monthly_currency,v.updated_at,
+           (s.owner_user_id IS NOT NULL) selected,COUNT(*) OVER ()::text total
+         FROM public.owner_vehicles v
+         LEFT JOIN autodom_outreach.property_vehicle_selections s
+           ON s.project_id=$1 AND s.owner_user_id=v.user_id
+         WHERE v.purpose IN ('property','downpayment')
+         ORDER BY selected DESC,v.updated_at DESC,v.user_id DESC
+         LIMIT 2000`,
+        [projectId],
+      );
+      const total = rows.rows[0] ? Number(rows.rows[0].total) : 0;
+      if (!Number.isSafeInteger(total) || total < 0) throw new Error("Invalid owner vehicle count");
+      return { vehicles: rows.rows.map((row) => this.propertyVehicle(row)), total };
+    });
+  }
+
+  async replacePropertyVehicleSelection(
+    projectId: string,
+    input: PropertyVehicleSelectionInput,
+  ): Promise<{ vehicles: PropertyVehicleCandidate[]; total: number }> {
+    parse(uuidSchema, projectId);
+    const parsed = parse(propertyVehicleSelectionSchema, input);
+    await this.safe(async () => {
+      const client = await this.pool.connect();
+      try {
+        await this.transaction(client, async () => {
+          const project = await client.query(
+            "SELECT 1 FROM autodom_outreach.projects WHERE id=$1 FOR UPDATE",
+            [projectId],
+          );
+          if (!project.rowCount) throw new ServiceError(404, "Проект не найден");
+          if (parsed.vehicleIds.length) {
+            const eligible = await client.query<{ id: string }>(
+              `SELECT user_id::text id FROM public.owner_vehicles
+               WHERE user_id=ANY($1::bigint[]) AND purpose IN ('property','downpayment')`,
+              [parsed.vehicleIds],
+            );
+            if (eligible.rowCount !== parsed.vehicleIds.length)
+              throw new ServiceError(
+                400,
+                "Выбор содержит удалённый автомобиль или карточку без цели обмена на недвижимость",
+              );
+          }
+          await client.query(
+            "DELETE FROM autodom_outreach.property_vehicle_selections WHERE project_id=$1",
+            [projectId],
+          );
+          if (parsed.vehicleIds.length)
+            await client.query(
+              `INSERT INTO autodom_outreach.property_vehicle_selections(project_id,owner_user_id)
+               SELECT $1,vehicle_id FROM unnest($2::bigint[]) vehicle_id`,
+              [projectId, parsed.vehicleIds],
+            );
+        });
+      } finally {
+        client.release();
+      }
+    });
+    return this.propertyVehicles(projectId);
   }
 
   async upsertConnection(projectId: string, input: ConnectionInput): Promise<ProjectConnection> {

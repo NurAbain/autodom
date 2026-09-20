@@ -69,7 +69,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   delivered.length = 0;
   await pool.query(
-    "TRUNCATE autodom_outreach.instagram_watch_pacing,autodom_outreach.instagram_observations,autodom_outreach.instagram_watches,autodom_outreach.contacts,autodom_outreach.deliveries,autodom_outreach.campaigns,autodom_outreach.images,public.events,public.listings CASCADE",
+    "TRUNCATE autodom_outreach.instagram_watch_pacing,autodom_outreach.instagram_observations,autodom_outreach.instagram_watches,autodom_outreach.property_vehicle_selections,autodom_outreach.contacts,autodom_outreach.deliveries,autodom_outreach.campaigns,autodom_outreach.images,public.owner_vehicles,public.events,public.listings CASCADE",
   );
   await pool.query(
     "UPDATE autodom_outreach.source_pacing SET last_attempt=NULL,next_allowed=NULL,attempt_day=NULL,attempts=0,blocked=false",
@@ -100,6 +100,30 @@ async function seed(ids: string[]) {
     ),
     Date.now() / 1000,
   );
+}
+async function seedOwner(
+  userId: number,
+  purpose: "sale" | "property" | "downpayment",
+  makeModel: string,
+) {
+  return catalog.saveOwnerVehicle({
+    user_id: userId,
+    chat_id: userId + 10_000,
+    purpose,
+    make_model: makeModel,
+    year: 2020,
+    mileage_km: 75_000,
+    sale_price_minor: 2_000_000,
+    sale_currency: "USD",
+    property_city: purpose === "sale" ? null : "Бишкек",
+    property_type: purpose === "sale" ? null : "apartment",
+    cash_minor: purpose === "sale" ? null : 500_000,
+    cash_currency: purpose === "sale" ? null : "USD",
+    monthly_minor: purpose === "sale" ? null : 50_000,
+    monthly_currency: purpose === "sale" ? null : "USD",
+    consent_at: Date.now() / 1000 - 1,
+    updated_at: Date.now() / 1000,
+  });
 }
 async function releasePacing() {
   await pool.query(
@@ -152,6 +176,7 @@ describe("durable marketplace delivery boundary", () => {
         DROP SCHEMA autodom_outreach CASCADE;
         CREATE SCHEMA autodom_outreach AUTHORIZATION "${role}";
         GRANT USAGE ON SCHEMA public TO "${role}";
+        GRANT SELECT,REFERENCES ON public.owner_vehicles TO "${role}";
         GRANT SELECT ON public.listings TO "${role}";
       `);
       const restricted = new OutreachService(
@@ -404,6 +429,64 @@ describe("durable marketplace delivery boundary", () => {
     expect(result.candidates.map((candidate: Candidate) => candidate.listingId)).toEqual(["match"]);
     expect(result.candidates[0]?.price).toBe(20000);
     expect((await service.preview({ ...input.filter, query: "%" })).candidates).toEqual([]);
+  });
+  it("keeps a private project shortlist of owner cars explicitly offered for property", async () => {
+    await seedOwner(101, "property", "Toyota Camry");
+    await seedOwner(102, "downpayment", "Lexus RX");
+    await seedOwner(103, "sale", "Honda Fit");
+    const project = await service.createProject({
+      name: "Property partners",
+      description: "Internal vehicle shortlist",
+    });
+
+    const initial = await service.propertyVehicles(project.id);
+    expect(initial.total).toBe(2);
+    expect(initial.vehicles.map((vehicle) => vehicle.id).sort()).toEqual(["101", "102"]);
+    expect(initial.vehicles.find((vehicle) => vehicle.id === "101")).toMatchObject({
+      purpose: "property",
+      makeModel: "Toyota Camry",
+      propertyCity: "Бишкек",
+      propertyType: "apartment",
+      selected: false,
+    });
+    expect(initial.vehicles[0]).not.toHaveProperty("chatId");
+    expect(initial.vehicles[0]).not.toHaveProperty("userId");
+
+    const selected = await service.replacePropertyVehicleSelection(project.id, {
+      vehicleIds: ["101"],
+    });
+    expect(
+      selected.vehicles.filter((vehicle) => vehicle.selected).map((vehicle) => vehicle.id),
+    ).toEqual(["101"]);
+    const otherProject = await service.createProject({
+      name: "Another property partner",
+      description: "",
+    });
+    expect(
+      (await service.propertyVehicles(otherProject.id)).vehicles.every(
+        (vehicle) => !vehicle.selected,
+      ),
+    ).toBe(true);
+    await expect(
+      service.replacePropertyVehicleSelection(project.id, { vehicleIds: ["103"] }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(
+      (await service.propertyVehicles(project.id)).vehicles.filter((vehicle) => vehicle.selected),
+    ).toHaveLength(1);
+
+    await seedOwner(101, "sale", "Toyota Camry");
+    const changed = await service.propertyVehicles(project.id);
+    expect(changed.vehicles.map((vehicle) => vehicle.id)).toEqual(["102"]);
+    expect(
+      Number(
+        (
+          await pool.query(
+            "SELECT COUNT(*) amount FROM autodom_outreach.property_vehicle_selections WHERE project_id=$1",
+            [project.id],
+          )
+        ).rows[0]?.amount,
+      ),
+    ).toBe(0);
   });
   it("keeps shared marketplace sessions when projects are created or edited", async () => {
     const vault = new CredentialVault(Buffer.alloc(32, 5).toString("base64"));

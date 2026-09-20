@@ -11,6 +11,17 @@ const PLATFORM_LABELS = {
   facebook: "Facebook",
   threads: "Threads",
 };
+const PROPERTY_PURPOSE_LABELS = {
+  property: "Обмен на недвижимость",
+  downpayment: "Авто как первоначальный взнос",
+};
+const PROPERTY_TYPE_LABELS = {
+  apartment: "Квартира",
+  house: "Дом",
+  land: "Участок",
+  commercial: "Коммерческая недвижимость",
+  any: "Тип пока не выбран",
+};
 const DELIVERY_LABELS = { pending: "В очереди", sending: "Отправляется", sent: "Отправлено", failed: "Ошибка", unknown: "Неизвестно", skipped: "Пропущено" };
 const CAMPAIGN_LABELS = { draft: "Черновик", running: "Запущена", paused: "На паузе", completed: "Завершена", cancelled: "Отменена" };
 const state = {
@@ -37,6 +48,11 @@ const state = {
   previewKey: null,
   previewCount: 0,
   previewBusy: false,
+  propertyProjectId: null,
+  propertyVehicles: [],
+  propertyTotal: 0,
+  propertySelectedIds: new Set(),
+  propertySelectionDirty: false,
 };
 const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const string = (value) => typeof value === "string";
@@ -113,6 +129,7 @@ function updateControls() {
   $("refresh").disabled = state.busy || Boolean(state.refreshing);
   $("project-select").disabled = state.busy;
   $("save-instagram-watch").disabled = state.busy || !hasProject;
+  $("save-property-selection").disabled = state.busy || !hasProject || !state.propertySelectionDirty;
   for (const button of document.querySelectorAll("[data-action]")) button.disabled = state.busy || button.dataset.blocked === "true";
 }
 
@@ -240,6 +257,79 @@ function invalidatePreview() {
   $("audience-results").replaceChildren();
   show("audience-summary", "Фильтры изменились. Снова проверьте выборку.");
   updateControls();
+}
+function money(minor, currency) {
+  if (minor === null || currency === null) return "не указано";
+  return `${(minor / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${currency}`;
+}
+function renderPropertyVehicles() {
+  const query = $("property-query").value.trim().toLocaleLowerCase("ru-RU");
+  const purpose = $("property-purpose").value;
+  const vehicles = state.propertyVehicles.filter((vehicle) => {
+    if (purpose !== "all" && vehicle.purpose !== purpose) return false;
+    if (!query) return true;
+    return `${vehicle.makeModel} ${vehicle.propertyCity}`.toLocaleLowerCase("ru-RU").includes(query);
+  });
+  const fragment = document.createDocumentFragment();
+  for (const vehicle of vehicles) {
+    const card = node("label", undefined, "property-vehicle-card");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.propertySelectedIds.has(vehicle.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.propertySelectedIds.add(vehicle.id);
+      else state.propertySelectedIds.delete(vehicle.id);
+      state.propertySelectionDirty = true;
+      renderPropertyVehicles();
+      updateControls();
+    });
+    const content = node("span", undefined, "property-vehicle-content");
+    const top = node("span", undefined, "campaign-topline");
+    top.append(
+      node("strong", `${vehicle.makeModel}, ${vehicle.year}`),
+      node("span", PROPERTY_PURPOSE_LABELS[vehicle.purpose] || vehicle.purpose, "badge"),
+    );
+    const mileage = vehicle.mileageKm === null ? "Пробег не указан" : `${vehicle.mileageKm.toLocaleString("ru-RU")} км`;
+    content.append(
+      top,
+      node("span", `${mileage} · Желаемая цена: ${money(vehicle.salePriceMinor, vehicle.saleCurrency)}`, "listing-meta"),
+      node("span", `${vehicle.propertyCity} · ${PROPERTY_TYPE_LABELS[vehicle.propertyType] || vehicle.propertyType}`, "listing-meta"),
+      node("span", `Доплата сейчас: ${money(vehicle.cashMinor, vehicle.cashCurrency)} · в месяц: ${money(vehicle.monthlyMinor, vehicle.monthlyCurrency)}`, "listing-meta"),
+      node("span", `Обновлено: ${dateLabel(vehicle.updatedAt)} · данные со слов владельца`, "hint"),
+    );
+    card.append(checkbox, content);
+    fragment.append(card);
+  }
+  if (!vehicles.length)
+    fragment.append(
+      node(
+        "p",
+        state.propertyVehicles.length ? "По текущему фильтру карточек нет." : "Владельцы ещё не сохранили карточки для обмена на недвижимость.",
+        "empty-state",
+      ),
+    );
+  $("property-vehicle-list").replaceChildren(fragment);
+  $("property-visible-count").textContent = String(vehicles.length);
+  const selected = state.propertySelectedIds.size;
+  const shown = state.propertyVehicles.length;
+  const truncation = state.propertyTotal > shown ? ` Показаны ${shown} самых свежих карточек из ${state.propertyTotal}.` : "";
+  $("property-summary").textContent = `Выбрано: ${selected}. Подходящих карточек: ${state.propertyTotal}.${truncation}${state.propertySelectionDirty ? " Есть несохранённые изменения." : ""}`;
+}
+async function savePropertySelection() {
+  if (!state.projectId || !state.propertySelectionDirty) return;
+  await operation(async () => {
+    const result = await api(`/api/projects/${encodeURIComponent(state.projectId)}/property-vehicles`, {
+      method: "POST",
+      body: { vehicleIds: [...state.propertySelectedIds] },
+      validate: (value) => Array.isArray(value?.vehicles) && Number.isSafeInteger(value?.total),
+    });
+    state.propertyVehicles = result.vehicles;
+    state.propertyTotal = result.total;
+    state.propertySelectedIds = new Set(result.vehicles.filter((vehicle) => vehicle.selected).map((vehicle) => vehicle.id));
+    state.propertySelectionDirty = false;
+    renderPropertyVehicles();
+    show("notice", `Выбор сохранён: ${state.propertySelectedIds.size} автомобилей. Ничего не отправлено.`);
+  });
 }
 function safeListingUrl(candidate) {
   try {
@@ -713,6 +803,22 @@ async function refreshData() {
     state.instagramWatches = Array.isArray(base[4].watches) ? base[4].watches : [];
     if (!state.projects.some((project) => project.id === state.projectId)) state.projectId = state.projects[0]?.id || null;
     state.projectDetail = state.projectId ? await api(`/api/projects/${encodeURIComponent(state.projectId)}`) : null;
+    const propertyResult = state.projectId
+      ? await api(`/api/projects/${encodeURIComponent(state.projectId)}/property-vehicles`, {
+          validate: (value) => Array.isArray(value?.vehicles) && Number.isSafeInteger(value?.total),
+        })
+      : { vehicles: [], total: 0 };
+    const projectChanged = state.propertyProjectId !== state.projectId;
+    state.propertyProjectId = state.projectId;
+    state.propertyVehicles = propertyResult.vehicles;
+    state.propertyTotal = propertyResult.total;
+    if (projectChanged || !state.propertySelectionDirty) {
+      state.propertySelectedIds = new Set(propertyResult.vehicles.filter((vehicle) => vehicle.selected).map((vehicle) => vehicle.id));
+      state.propertySelectionDirty = false;
+    } else {
+      const available = new Set(propertyResult.vehicles.map((vehicle) => vehicle.id));
+      state.propertySelectedIds = new Set([...state.propertySelectedIds].filter((id) => available.has(id)));
+    }
     if (!state.campaigns.some((campaign) => campaign.id === state.selectedId && campaign.projectId === state.projectId)) { state.selectedId = null; state.detail = null; }
     if (!state.socialCampaigns.some((campaign) => campaign.id === state.selectedSocialId && campaign.projectId === state.projectId)) { state.selectedSocialId = null; state.socialDetail = null; }
     if (!state.instagramWatches.some((watch) => watch.id === state.selectedInstagramWatchId && watch.projectId === state.projectId)) {
@@ -726,6 +832,7 @@ async function refreshData() {
     renderStatus();
     renderCampaigns();
     renderDetail();
+    renderPropertyVehicles();
     renderSocialCampaigns();
     renderSocialDetail();
     renderInstagramWatches();
@@ -737,15 +844,19 @@ async function refreshData() {
   try { await state.refreshing; return true; } catch (error) { show("sync-error", errorText(error)); return false; } finally { state.refreshing = null; updateControls(); }
 }
 function selectMode(mode) {
+  const property = mode === "property";
   const social = mode === "social";
   const instagramWatch = mode === "instagram-watch";
-  const marketplace = !social && !instagramWatch;
+  const marketplace = !property && !social && !instagramWatch;
+  $("property-workspace").hidden = !property;
   $("social-workspace").hidden = !social;
   $("instagram-watch-workspace").hidden = !instagramWatch;
   $("marketplace-workspace").hidden = !marketplace;
+  $("property-tab").setAttribute("aria-pressed", String(property));
   $("social-tab").setAttribute("aria-pressed", String(social));
   $("instagram-watch-tab").setAttribute("aria-pressed", String(instagramWatch));
   $("marketplace-tab").setAttribute("aria-pressed", String(marketplace));
+  $("property-tab").classList.toggle("secondary", !property);
   $("social-tab").classList.toggle("secondary", !social);
   $("instagram-watch-tab").classList.toggle("secondary", !instagramWatch);
   $("marketplace-tab").classList.toggle("secondary", !marketplace);
@@ -768,10 +879,14 @@ $("project-form").addEventListener("submit", (event) => void createProject(event
 $("connection-form").addEventListener("submit", (event) => void saveConnection(event));
 $("close-connection").addEventListener("click", () => $("connection-dialog").close());
 $("marketplace-tab").addEventListener("click", () => selectMode("marketplace"));
+$("property-tab").addEventListener("click", () => selectMode("property"));
 $("social-tab").addEventListener("click", () => selectMode("social"));
 $("instagram-watch-tab").addEventListener("click", () => selectMode("instagram-watch"));
 $("audience-fields").addEventListener("input", invalidatePreview);
 $("audience-fields").addEventListener("change", invalidatePreview);
+$("property-filter-form").addEventListener("input", renderPropertyVehicles);
+$("property-filter-form").addEventListener("change", renderPropertyVehicles);
+$("save-property-selection").addEventListener("click", () => void savePropertySelection());
 $("preview-audience").addEventListener("click", () => void previewAudience());
 $("message").addEventListener("input", updateMessage);
 $("image").addEventListener("change", () => void uploadImage());

@@ -49,7 +49,9 @@ Lalafo uses an ISP-bound browser session; renew it with login-lalafo after expir
 then explicitly resume. Its photo and text are two messages; partial delivery is unknown.
 Cold offers can violate platform rules and cause account bans; slow sending is not
 permission. Admin must confirm each campaign. Source-wide pacing, seller dedup and
-suppression persist in autodom_outreach schema. Existing catalog is read-only.
+suppression persist in autodom_outreach schema. Existing catalog and owner cards are
+read-only. The property shortlist includes only owners who chose property exchange or
+down payment; it displays no Telegram/chat ID and never sends or transfers a request.
 Pause/cancel prevents new sends; already in-flight sends may finish. Unknown outcomes
 are never retried automatically. Service performs no real sends during checks.
 `;

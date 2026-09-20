@@ -48,6 +48,32 @@ export interface ProjectConnection {
   message: string;
   updatedAt: string;
 }
+export const propertyVehicleSelectionSchema = z
+  .object({
+    vehicleIds: z
+      .array(z.string().regex(/^[1-9]\d{0,18}$/u))
+      .max(1000)
+      .refine((ids) => new Set(ids).size === ids.length, "Автомобиль выбран несколько раз"),
+  })
+  .strict();
+export type PropertyVehicleSelectionInput = z.infer<typeof propertyVehicleSelectionSchema>;
+export interface PropertyVehicleCandidate {
+  id: string;
+  purpose: "property" | "downpayment";
+  makeModel: string;
+  year: number;
+  mileageKm: number | null;
+  salePriceMinor: number | null;
+  saleCurrency: "USD" | "KGS" | null;
+  propertyCity: string;
+  propertyType: "apartment" | "house" | "land" | "commercial" | "any";
+  cashMinor: number | null;
+  cashCurrency: "USD" | "KGS" | null;
+  monthlyMinor: number | null;
+  monthlyCurrency: "USD" | "KGS" | null;
+  updatedAt: string;
+  selected: boolean;
+}
 export const filterSchema = z
   .object({
     source: sourceSchema,
