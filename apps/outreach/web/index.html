@@ -42,7 +42,7 @@
     </dialog>
     <p id="notice" class="notice" role="status" hidden></p>
     <p id="operation-error" class="error page-error" role="alert" hidden></p>
-    <nav class="mode-tabs" aria-label="Раздел центра"><button id="marketplace-tab" type="button" aria-pressed="true">Сообщения продавцам</button><button id="property-tab" type="button" class="secondary" aria-pressed="false">Авто → недвижимость</button><button id="social-tab" type="button" class="secondary" aria-pressed="false">Комментарии к постам</button><button id="instagram-watch-tab" type="button" class="secondary" aria-pressed="false">Мониторинг Instagram</button></nav>
+    <nav class="mode-tabs" aria-label="Раздел центра"><button id="marketplace-tab" type="button" aria-pressed="true">Сообщения продавцам</button><button id="social-tab" type="button" class="secondary" aria-pressed="false">Комментарии к постам</button><button id="instagram-watch-tab" type="button" class="secondary" aria-pressed="false">Мониторинг Instagram</button></nav>
     <div id="marketplace-workspace" class="workspace">
       <section class="panel composer" aria-labelledby="compose-heading">
         <div class="section-heading"><div><p class="eyebrow">01 / ПОДГОТОВКА</p><h2 id="compose-heading">Новая рассылка</h2></div><span class="badge">Без отправки</span></div>
@@ -54,6 +54,7 @@
             <div class="field-grid"><div><label for="year-min">Год от</label><input id="year-min" name="yearMin" type="number" min="1900" max="2100" step="1" inputmode="numeric" placeholder="Не задан"></div><div><label for="year-max">Год до</label><input id="year-max" name="yearMax" type="number" min="1900" max="2100" step="1" inputmode="numeric" placeholder="Не задан"></div></div>
             <label for="currency">Валюта фильтра цены</label><select id="currency" name="currency"><option value="USD">USD — доллар США</option><option value="KGS">KGS — кыргызский сом</option></select>
             <div class="field-grid"><div><label for="price-min">Цена от</label><input id="price-min" name="priceMin" type="number" min="0" max="10000000000" step="any" inputmode="decimal" placeholder="Не задана"></div><div><label for="price-max">Цена до</label><input id="price-max" name="priceMax" type="number" min="0" max="10000000000" step="any" inputmode="decimal" placeholder="Не задана"></div></div>
+            <label class="check-row"><input id="property-exchange-only" name="propertyExchangeOnly" type="checkbox"> Только продавцы, указавшие «Обмен на недвижимость»</label>
             <label for="limit">Максимум получателей</label><input id="limit" name="limit" type="number" min="1" max="1000" step="1" value="100" required inputmode="numeric">
             <p class="hint">Выборка из локального каталога за последние 48 часов. Создание фиксирует состав, но ничего не отправляет.</p>
             <button id="preview-audience" type="button" class="secondary">Показать выборку</button><p id="audience-summary" class="hint" role="status">Сначала проверьте выборку.</p><div id="audience-results" class="listing-list bounded-list"></div>
@@ -68,23 +69,6 @@
         </form>
       </section>
       <div class="campaign-column"><section class="panel"><div class="section-heading"><div><p class="eyebrow">02 / КОНТРОЛЬ</p><h2>Рассылки проекта</h2></div></div><div id="campaign-list" class="campaign-list"></div></section><section class="panel"><h2>Детали рассылки</h2><div id="campaign-detail"><p class="muted">Выберите кампанию.</p></div></section></div>
-    </div>
-    <div id="property-workspace" class="workspace property-workspace" hidden>
-      <section class="panel composer" aria-labelledby="property-heading">
-        <div class="section-heading"><div><p class="eyebrow">ВНУТРЕННИЙ ПОДБОР</p><h2 id="property-heading">Автомобили для недвижимости</h2></div><span class="badge">Без отправки</span></div>
-        <p>Здесь только карточки владельцев, которые сами выбрали обмен на недвижимость или первоначальный взнос автомобилем.</p>
-        <aside class="selection-notice">Выбор сохраняется внутри текущего проекта. Он не отправляет заявку, контакты или документы партнёру и не подтверждает наличие программы застройщика.</aside>
-        <form id="property-filter-form">
-          <label for="property-query">Автомобиль или город</label><input id="property-query" maxlength="120" placeholder="Например: Camry или Бишкек" autocomplete="off">
-          <label for="property-purpose">Цель владельца</label><select id="property-purpose"><option value="all">Обе цели</option><option value="property">Обмен на недвижимость</option><option value="downpayment">Первоначальный взнос</option></select>
-        </form>
-        <p id="property-summary" class="status-line" role="status">Загружаем карточки…</p>
-        <button id="save-property-selection" type="button" disabled>Сохранить выбор</button>
-      </section>
-      <section class="panel">
-        <div class="section-heading"><div><p class="eyebrow">КАРТОЧКИ ВЛАДЕЛЬЦЕВ</p><h2>Выберите автомобили</h2></div><span id="property-visible-count" class="badge">0</span></div>
-        <div id="property-vehicle-list" class="property-vehicle-list"></div>
-      </section>
     </div>
     <div id="social-workspace" class="workspace" hidden>
       <section class="panel composer">

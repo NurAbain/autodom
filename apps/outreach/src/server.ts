@@ -13,7 +13,6 @@ import {
   type Messenger,
   type OutreachSource,
   projectInputSchema,
-  propertyVehicleSelectionSchema,
   ServiceError,
   type SourceStatus,
   socialCampaignSchema,
@@ -274,23 +273,13 @@ export async function startOutreachServer(
           const image = /^\/api\/images\/([0-9a-f-]{36})$/.exec(path);
           const project = /^\/api\/projects\/([0-9a-f-]{36})$/.exec(path);
           const connection = /^\/api\/projects\/([0-9a-f-]{36})\/connections$/.exec(path);
-          const propertyVehicles = /^\/api\/projects\/([0-9a-f-]{36})\/property-vehicles$/.exec(
-            path,
-          );
           const socialDetail = /^\/api\/social-campaigns\/([0-9a-f-]{36})$/.exec(path);
           const socialAction =
             /^\/api\/social-campaigns\/([0-9a-f-]{36})\/(start|pause|cancel)$/.exec(path);
           const instagramWatch = /^\/api\/instagram-watches\/([0-9a-f-]{36})$/.exec(path);
           const instagramWatchAction =
             /^\/api\/instagram-watches\/([0-9a-f-]{36})\/(start|pause|cancel)$/.exec(path);
-          if (propertyVehicles && method === "GET")
-            result = await service.propertyVehicles(propertyVehicles.at(1) ?? "");
-          else if (propertyVehicles && method === "POST")
-            result = await service.replacePropertyVehicleSelection(
-              propertyVehicles.at(1) ?? "",
-              propertyVehicleSelectionSchema.parse(await jsonBody(request, 32_768)),
-            );
-          else if (project && method === "GET")
+          if (project && method === "GET")
             result = await service.projectDetail(project.at(1) ?? "");
           else if (connection && method === "POST")
             result = {
