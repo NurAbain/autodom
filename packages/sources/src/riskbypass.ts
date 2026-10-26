@@ -25,7 +25,8 @@ const taskResultSchema = z.object({
     .trim()
     .toUpperCase(),
   result: z.unknown().optional(),
-  error: z.string().max(512).optional(),
+  // The provider sends a null error field next to a successful result.
+  error: z.string().max(512).nullish(),
 });
 // The provider asks for another exit when it refuses the current one; that exit
 // stays unusable, so the caller must switch routes instead of parking a cooldown.

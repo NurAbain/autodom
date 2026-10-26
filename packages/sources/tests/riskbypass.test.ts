@@ -104,6 +104,21 @@ describe("RiskBypass paid-task lifecycle", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("accepts a successful task that carries a null error field", async () => {
+    const { pool, solver } = fixture();
+    pool
+      .intercept({ path: "/task/submit", method: "POST" })
+      .reply(200, { ok: true, task_id: "task-4" })
+      .persist();
+    pool
+      .intercept({ path: "/task/result/task-4", method: "GET" })
+      .reply(200, { status: "SUCCESS", result: session, error: null, completed_at: 1792998000 });
+    await expect(solver.solve(target, proxy, new AbortController().signal)).resolves.toEqual({
+      cookies: { cf_clearance: "clearance-token" },
+      userAgent: session.user_agent,
+    });
+  });
+
   it("marks a refused exit IP so the caller switches to another static port", async () => {
     const { pool, solver } = fixture();
     pool
