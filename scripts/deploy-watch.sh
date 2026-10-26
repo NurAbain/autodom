@@ -26,13 +26,19 @@ api_url=${COOLIFY_API_URL:-http://192.168.0.2:8000}
 
 [ -r "$apps" ] || { echo "no application list at $apps" >&2; exit 0; }
 
+declare -A branch_heads=()
+
 while read -r application branch; do
   [ -n "${application:-}" ] || continue
   case "$application" in \#*) continue ;; esac
-  head=$(git ls-remote "$repository" "refs/heads/$branch" 2>/dev/null | cut -f1)
+  head=${branch_heads[$branch]:-}
   if [ -z "$head" ]; then
-    echo "$application: no head for $branch" >&2
-    continue
+    head=$(git ls-remote "$repository" "refs/heads/$branch" 2>/dev/null | cut -f1)
+    if [ -z "$head" ]; then
+      echo "$application: no head for $branch" >&2
+      continue
+    fi
+    branch_heads[$branch]=$head
   fi
   pinned=$(curl -fsS -H "Authorization: Bearer $COOLIFY_API_TOKEN" \
     "$api_url/api/v1/applications/$application" |
