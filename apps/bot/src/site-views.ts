@@ -166,8 +166,8 @@ function carCard(listing: Listing, currency: string, photo: string | null): stri
 function filterForm(query: CatalogQuery, action: string): string {
   const budgetMin = query.budget_min_minor === null ? "" : String(query.budget_min_minor / 100);
   const budgetMax = query.budget_max_minor === null ? "" : String(query.budget_max_minor / 100);
-  const field = (name: string, label: string, value: string, type = "text"): string =>
-    `<label class="field"><span class="field__label">${escapeHtml(label)}</span><input class="field__input" type="${type}" name="${escapeHtml(name)}" value="${escapeHtml(value)}"${type === "number" ? ' min="0" step="1"' : ""}></label>`;
+  const field = (name: string, label: string, value: string, type = "text", wide = false): string =>
+    `<label class="field${wide ? " field--wide" : ""}"><span class="field__label">${escapeHtml(label)}</span><input class="field__input" type="${type}" name="${escapeHtml(name)}" value="${escapeHtml(value)}"${type === "number" ? ' min="0" step="1"' : ""}></label>`;
   const select = (
     name: string,
     label: string,
@@ -188,9 +188,12 @@ function filterForm(query: CatalogQuery, action: string): string {
   return [
     `<form class="filters" method="get" action="${escapeHtml(action)}">`,
     hidden,
-    field("q", "Поиск по названию", query.q),
+    `<div class="filters__pair">`,
     field("budget_min", `Бюджет от, ${query.currency === "USD" ? "$" : "с"}`, budgetMin, "number"),
     field("budget_max", `Бюджет до, ${query.currency === "USD" ? "$" : "с"}`, budgetMax, "number"),
+    `</div>`,
+    field("q", "Поиск по названию", query.q, "text", true),
+    `<div class="filters__pair">`,
     field("year_min", "Год от", query.year_min === null ? "" : String(query.year_min), "number"),
     field(
       "mileage_max_km",
@@ -198,10 +201,7 @@ function filterForm(query: CatalogQuery, action: string): string {
       query.mileage_max_km === null ? "" : String(query.mileage_max_km),
       "number",
     ),
-    select("market", "Направление", query.market, [
-      ["ALL", "Все рынки"],
-      ["KG", "Кыргызстан"],
-    ]),
+    `</div>`,
     select("currency", "Валюта", query.currency, [
       ["KGS", "Сомы (KGS)"],
       ["USD", "Доллары (USD)"],
@@ -238,11 +238,6 @@ function emptyState(query: CatalogQuery): string {
     relaxations.push({
       label: "Искать все марки",
       href: catalogHref(query, { make: "", model: "" }),
-    });
-  if (query.market !== "ALL")
-    relaxations.push({
-      label: "Искать по всем рынкам",
-      href: catalogHref(query, { market: "ALL" }),
     });
   if (query.q)
     relaxations.push({

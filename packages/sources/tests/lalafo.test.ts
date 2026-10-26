@@ -145,7 +145,9 @@ describe("Lalafo passenger feed", () => {
       ]),
     ).listings;
     expect(structured).toMatchObject({ make: "Toyota", model: "Camry", year: 2019 });
+    expect(structured?.catalog_attributes).toMatchObject({ make: "Toyota", model: "Camry" });
     expect(unknown).toMatchObject({ make: null, model: null, year: null, mileage: "" });
+    expect(unknown?.catalog_attributes).toEqual({});
   });
 
   it("keeps unsupported or invalid prices unknown and rounds decimal tokens without floating-point drift", () => {

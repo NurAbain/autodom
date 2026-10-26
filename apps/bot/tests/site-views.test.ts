@@ -87,6 +87,14 @@ describe("catalogue page", () => {
     expect(html).toContain('value="15000"');
   });
 
+  it("leads with the budget and offers no market control", () => {
+    const html = renderCatalog(context({ total: 1 }), new Map());
+    expect(html).not.toContain('name="market"');
+    expect(html).not.toContain("Направление");
+    expect(html.indexOf('name="budget_min"')).toBeLessThan(html.indexOf('name="q"'));
+    expect(html.indexOf('name="q"')).toBeLessThan(html.indexOf('name="year_min"'));
+  });
+
   it("explains an empty result and offers concrete relaxations", () => {
     const query = parseCatalogQuery("?year_min=2022&budget_max=15000");
     const html = renderCatalog(context({ query, total: 0 }), new Map());

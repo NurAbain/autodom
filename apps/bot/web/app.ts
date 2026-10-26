@@ -72,6 +72,8 @@ let currentView: View = "home";
 let generation = 0;
 const pending = new Set<AbortController>();
 const reportUrls = new Set<string>();
+/** Closes the make sheet when the view changes. */
+let closeSheet: (() => void) | null = null;
 let config: { mode: BotMode; reportBotUrl?: string; analyticsEnabled: boolean } | undefined;
 type CheckoutProduct = "vin_report" | "vin_photos";
 let launchConsumed = false;
@@ -124,6 +126,8 @@ function cancelRequests(): void {
   pending.clear();
   for (const url of reportUrls) URL.revokeObjectURL(url);
   reportUrls.clear();
+  closeSheet?.();
+  closeSheet = null;
 }
 
 window.addEventListener("pagehide", cancelRequests);
@@ -511,18 +515,18 @@ function showHome(): void {
   const goals = element("nav", "goals");
   goals.setAttribute("aria-label", "Выберите цель");
   for (const [view, number, title, description] of [
-    ["vin", "01", "Проверить VIN", "Бесплатные данные об автомобиле. VIN или фото в чате."],
-    [
-      "sell",
-      "02",
-      "Продать или обменять авто",
-      "Продажа, обмен на недвижимость или первый взнос автомобилем.",
-    ],
     [
       "filters",
-      "03",
+      "01",
       "Купить авто",
       "Настройте условия: автомобиль, бюджет, город и характеристики.",
+    ],
+    ["vin", "02", "Проверить VIN", "Бесплатные данные об автомобиле. VIN или фото в чате."],
+    [
+      "sell",
+      "03",
+      "Продать или обменять авто",
+      "Продажа, обмен на недвижимость или первый взнос автомобилем.",
     ],
   ] as const) {
     const goal = button("", () => navigate(view), "goal");
@@ -705,35 +709,80 @@ function showCarfaxExample(): void {
 
 type FilterChoice = { id: string; value: string; label: string };
 
+/**
+ * What the user picked with the buttons: several makes and, under them, several
+ * models. The query is built from that, so no free text is needed to search.
+ */
+type FilterSelection = {
+  makes: FilterChoice[];
+  models: Map<string, FilterChoice[]>;
+  freeText: string;
+};
+
 type FilterDraft = {
   currency: "USD" | "KGS";
   budgetMin: number;
   budgetMax: number;
-  query: string;
+  selection: FilterSelection;
   city: string;
   bodyType: string;
   transmission: string;
   yearMin: number | null;
   yearMax: number | null;
   mileageMax: number | null;
-  make: FilterChoice | null;
-  model: FilterChoice | null;
 };
 
-const emptyFilterDraft = (): FilterDraft => ({
-  currency: "USD",
-  budgetMin: 0,
-  budgetMax: 0,
-  query: "",
-  city: "",
-  bodyType: "",
-  transmission: "",
-  yearMin: null,
-  yearMax: null,
-  mileageMax: null,
-  make: null,
-  model: null,
-});
+type FilterAlternative = {
+  text: string;
+  label: string;
+  make: FilterChoice | null;
+  model: FilterChoice | null;
+  free: boolean;
+};
+
+/** The search accepts five alternatives at most, as the chat text search did. */
+const MAX_ALTERNATIVES = 5;
+
+/** The catalogue of makes is public and stable: one load per session is enough. */
+let makeCatalogue: { items: FilterChoice[] } | null = null;
+
+const catalogueWords = (text: string): string[] =>
+  text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+
+/** The make the query starts with, and how many words of it matched. */
+const findMake = (
+  items: readonly FilterChoice[],
+  words: readonly string[],
+): { choice: FilterChoice; words: number } | null => {
+  for (const item of items) {
+    for (const candidate of [item.value, item.label]) {
+      const label = catalogueWords(candidate);
+      if (label.length && label.every((word, index) => words[index] === word))
+        return { choice: item, words: label.length };
+    }
+  }
+  return null;
+};
+
+/** The model the rest of the query names. */
+const findModel = (
+  items: readonly FilterChoice[],
+  words: readonly string[],
+): FilterChoice | null => {
+  for (const item of items) {
+    for (const candidate of [item.value, item.label]) {
+      const label = catalogueWords(candidate);
+      if (label.length === words.length && label.every((word, index) => words[index] === word))
+        return item;
+    }
+  }
+  return null;
+};
 
 const moneyLabel = (value: number, currency: string): string =>
   `${new Intl.NumberFormat("ru-RU").format(value)} ${currency}`;
@@ -755,15 +804,6 @@ const plural = (count: number, one: string, few: string, many: string): string =
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
   return many;
 };
-
-/** The chip shows what the user reads; the query keeps the catalogue spelling. */
-const queryLabel = (query: string): string =>
-  query
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(", ");
 
 async function showFilters(): Promise<void> {
   const main = shell();
@@ -794,22 +834,19 @@ async function showFilters(): Promise<void> {
   }
   if (started !== generation) return;
   const saved = state.profile;
-  const draft: FilterDraft = saved
-    ? {
-        currency: saved.currency,
-        budgetMin: Math.floor(saved.budget_min_minor / 100),
-        budgetMax: Math.floor(saved.budget_max_minor / 100),
-        query: saved.query,
-        city: saved.city,
-        bodyType: saved.body_type,
-        transmission: saved.transmission,
-        yearMin: saved.year_min,
-        yearMax: saved.year_max,
-        mileageMax: saved.mileage_max_km,
-        make: null,
-        model: null,
-      }
-    : emptyFilterDraft();
+  const selection: FilterSelection = { makes: [], models: new Map(), freeText: "" };
+  const draft: FilterDraft = {
+    currency: saved?.currency ?? "USD",
+    budgetMin: Math.floor((saved?.budget_min_minor ?? 0) / 100),
+    budgetMax: Math.floor((saved?.budget_max_minor ?? 0) / 100),
+    selection,
+    city: saved?.city ?? "",
+    bodyType: saved?.body_type ?? "",
+    transmission: saved?.transmission ?? "",
+    yearMin: saved?.year_min ?? null,
+    yearMax: saved?.year_max ?? null,
+    mileageMax: saved?.mileage_max_km ?? null,
+  };
   const bodyLabels = new Map(state.bodyTypes.map((option) => [option.value, option.label]));
   const transmissionLabels = new Map(
     state.transmissions.map((option) => [option.value, option.label]),
@@ -823,11 +860,45 @@ async function showFilters(): Promise<void> {
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
 
+  /** Every choice the user made, one search alternative each. */
+  const alternatives = (): FilterAlternative[] => {
+    const list: FilterAlternative[] = [];
+    for (const make of selection.makes) {
+      const models = selection.models.get(make.value) ?? [];
+      if (!models.length) {
+        list.push({ text: make.value, label: make.label, make, model: null, free: false });
+        continue;
+      }
+      for (const model of models) {
+        list.push({
+          text: `${make.value} ${model.value}`,
+          label: `${make.label} ${model.label}`,
+          make,
+          model,
+          free: false,
+        });
+      }
+    }
+    for (const part of selection.freeText
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)) {
+      list.push({ text: part, label: part, make: null, model: null, free: true });
+    }
+    return list;
+  };
+
+  /** The search query: alternatives separated by a comma, as the chat search reads it. */
+  const queryText = (): string =>
+    alternatives()
+      .map((item) => item.text)
+      .join(",");
+
   const draftBody = (): Record<string, unknown> => ({
     currency: draft.currency,
     budget_min_minor: Math.round(draft.budgetMin * 100),
     budget_max_minor: Math.round(draft.budgetMax * 100),
-    query: draft.query.trim(),
+    query: queryText(),
     city: draft.city.trim(),
     body_type: draft.bodyType,
     transmission: draft.transmission,
@@ -867,40 +938,15 @@ async function showFilters(): Promise<void> {
   };
 
   const vehicle = element("section", "panel");
-  const queryInput = element("input", "text-input");
-  queryInput.id = "filter-query";
-  queryInput.type = "text";
-  queryInput.maxLength = 160;
-  queryInput.placeholder = "Toyota Camry";
-  queryInput.value = draft.query;
-  queryInput.addEventListener("input", () => {
-    draft.query = queryInput.value;
-    renderChips();
-    schedulePreview();
-  });
-  const suggestionHost = element("div", "filter-suggest");
-  const makeButton = button(
-    draft.make ? `Марка: ${draft.make.label}` : "Выбрать марку",
-    () => void openMakes(),
-    "button button-quiet",
-  );
-  const modelButton = button(
-    draft.model ? `Модель: ${draft.model.label}` : "Выбрать модель",
-    () => void openModels(),
-    "button button-quiet",
-  );
-  modelButton.disabled = !draft.make;
-  const choiceRow = element("div", "button-row");
-  choiceRow.append(makeButton, modelButton);
+  const vehicleHost = element("div", "filter-vehicles");
   vehicle.append(
     element("h2", "", "Автомобиль"),
-    choiceRow,
-    field(
-      "Марка, модель — текстом",
-      queryInput,
-      "До пяти альтернатив через запятую: все слова внутри варианта обязательны.",
+    vehicleHost,
+    element(
+      "p",
+      "footnote",
+      "Выберите марку и модель кнопками. Можно выбрать несколько вариантов — до пяти.",
     ),
-    suggestionHost,
   );
 
   const budget = element("section", "panel");
@@ -938,11 +984,16 @@ async function showFilters(): Promise<void> {
     renderChips();
     schedulePreview();
   });
+  const pair = (...controls: HTMLElement[]): HTMLElement => {
+    const row = element("div", "filter-pair");
+    row.append(...controls);
+    return row;
+  };
   budget.append(
     element("h2", "", "Бюджет"),
     currencyRow,
-    field("От", minimumInput),
-    field("До", maximumInput, "Цена объявления. Полная стоимость ввоза пока не рассчитывается."),
+    pair(field("От", minimumInput), field("До", maximumInput)),
+    element("p", "footnote", "Цена объявления. Полная стоимость ввоза пока не рассчитывается."),
   );
 
   const place = element("section", "panel");
@@ -1010,9 +1061,7 @@ async function showFilters(): Promise<void> {
     element("h2", "", "Характеристики"),
     field("Кузов", bodySelect),
     field("Коробка передач", transmissionSelect),
-    element("div", "filter-row", ""),
-    field("Год от", yearMinInput),
-    field("Год до", yearMaxInput),
+    pair(field("Год от", yearMinInput), field("Год до", yearMaxInput)),
     field(
       "Пробег до, км",
       mileageInput,
@@ -1057,22 +1106,17 @@ async function showFilters(): Promise<void> {
     }
   }
 
-  function renderChoices(): void {
-    makeButton.textContent = draft.make ? `Марка: ${draft.make.label}` : "Выбрать марку";
-    modelButton.textContent = draft.model ? `Модель: ${draft.model.label}` : "Выбрать модель";
-    modelButton.disabled = !draft.make;
-  }
-
   function renderChips(): void {
     const chips: { label: string; clear: () => void }[] = [];
-    if (draft.query.trim())
+    for (const item of alternatives()) {
       chips.push({
-        label: queryLabel(draft.query),
+        label: item.label,
         clear: () => {
-          draft.query = "";
-          queryInput.value = "";
+          removeAlternative(item);
+          renderVehicle();
         },
       });
+    }
     if (draft.budgetMax > 0)
       chips.push({
         label:
@@ -1174,80 +1218,216 @@ async function showFilters(): Promise<void> {
     }
   }
 
-  /** Renders a pick list with a search field and a counter. */
-  function pickList(
-    items: readonly { label: string; hint?: string }[],
-    placeholder: string,
-    onPick: (index: number) => void,
-    back?: HTMLElement,
-  ): HTMLElement {
-    const list = element("div", "filter-suggest-list");
-    const search = element("input", "text-input");
-    search.type = "search";
-    search.placeholder = placeholder;
-    search.autocomplete = "off";
-    const counter = element("p", "footnote");
-    const render = () => {
-      const needle = search.value.trim().toLowerCase();
-      const visible = items
-        .map((item, index) => ({ item, index }))
-        .filter(({ item }) => !needle || item.label.toLowerCase().includes(needle));
-      list.replaceChildren();
-      if (back) list.append(back);
-      for (const { item, index } of visible) {
-        const control = button(item.label, () => onPick(index), "button button-quiet");
-        if (item.hint) control.append(element("span", "filter-suggest-hint", item.hint));
-        list.append(control);
-      }
-      if (!visible.length) list.append(element("p", "footnote", "Ничего не найдено."));
-      counter.textContent = `Вариантов: ${visible.length} из ${items.length}`;
-    };
-    search.addEventListener("input", render);
-    render();
-    const host = element("div", "filter-suggest-body");
-    host.append(search, counter, list);
-    return host;
+  /** The models of one make under the current conditions, with their ad counts. */
+  const modelCache = new Map<
+    string,
+    { signature: string; pending: boolean; items: (FilterChoice & { matches: number })[] }
+  >();
+
+  const conditionSignature = (): string =>
+    [
+      draft.currency,
+      draft.budgetMin,
+      draft.budgetMax,
+      draft.city,
+      draft.bodyType,
+      draft.transmission,
+      draft.yearMin,
+      draft.yearMax,
+      draft.mileageMax,
+    ].join("|");
+
+  const isMakeSelected = (make: FilterChoice): boolean =>
+    selection.makes.some((item) => item.value === make.value);
+
+  const isModelSelected = (make: FilterChoice, model: FilterChoice): boolean =>
+    (selection.models.get(make.value) ?? []).some((item) => item.value === model.value);
+
+  /** How many search alternatives the given choice would produce. */
+  const alternativeCount = (
+    makes: readonly FilterChoice[],
+    models: ReadonlyMap<string, readonly FilterChoice[]>,
+  ): number => {
+    let total = 0;
+    for (const make of makes) {
+      const chosen = models.get(make.value) ?? [];
+      total += chosen.length ? chosen.length : 1;
+    }
+    return total;
+  };
+
+  const removeAlternative = (item: FilterAlternative): void => {
+    if (item.free) {
+      selection.freeText = selection.freeText
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part && part !== item.text)
+        .join(",");
+      return;
+    }
+    if (!item.make) return;
+    if (!item.model) {
+      selection.makes = selection.makes.filter((make) => make.value !== item.make?.value);
+      selection.models.delete(item.make.value);
+      return;
+    }
+    selection.models.set(
+      item.make.value,
+      (selection.models.get(item.make.value) ?? []).filter(
+        (model) => model.value !== item.model?.value,
+      ),
+    );
+  };
+
+  function toggleMake(make: FilterChoice): void {
+    if (isMakeSelected(make)) {
+      selection.makes = selection.makes.filter((item) => item.value !== make.value);
+      selection.models.delete(make.value);
+      renderVehicle();
+      renderChips();
+      schedulePreview();
+      return;
+    }
+    const makes = [...selection.makes, make];
+    if (alternativeCount(makes, selection.models) > MAX_ALTERNATIVES) {
+      status.textContent = `Можно выбрать не больше ${MAX_ALTERNATIVES} вариантов. Снимите один, чтобы добавить марку.`;
+      return;
+    }
+    selection.makes = makes;
+    renderVehicle();
+    renderChips();
+    schedulePreview();
+    void loadModels(make);
   }
 
-  async function openMakes(): Promise<void> {
-    suggestionHost.replaceChildren(element("p", "footnote", "Загружаем марки…"));
+  function toggleModel(make: FilterChoice, model: FilterChoice): void {
+    const current = selection.models.get(make.value) ?? [];
+    if (current.some((item) => item.value === model.value)) {
+      selection.models.set(
+        make.value,
+        current.filter((item) => item.value !== model.value),
+      );
+      renderVehicle();
+      renderChips();
+      schedulePreview();
+      return;
+    }
+    const models = new Map(selection.models);
+    models.set(make.value, [...current, model]);
+    if (alternativeCount(selection.makes, models) > MAX_ALTERNATIVES) {
+      status.textContent = `Можно выбрать не больше ${MAX_ALTERNATIVES} вариантов. Снимите один, чтобы добавить модель.`;
+      return;
+    }
+    selection.models = models;
+    renderVehicle();
+    renderChips();
+    schedulePreview();
+  }
+
+  /** The make buttons: the popular ones first, the chosen ones always visible. */
+  function renderVehicle(): void {
+    if (!makeCatalogue) {
+      vehicleHost.replaceChildren(element("p", "footnote", "Загружаем марки…"));
+      return;
+    }
+    const parts: HTMLElement[] = [];
+    const strip = element("div", "filter-makes");
+    const shown = makeCatalogue.items.slice(0, 12);
+    for (const make of selection.makes) {
+      if (!shown.some((item) => item.value === make.value)) shown.push(make);
+    }
+    for (const make of shown) {
+      const control = button(make.label, () => toggleMake(make), "button filter-choice");
+      control.setAttribute("aria-pressed", String(isMakeSelected(make)));
+      strip.append(control);
+    }
+    strip.append(
+      button("Все марки", () => openMakeSheet(), "button filter-choice filter-choice-all"),
+    );
+    parts.push(element("p", "filter-label", "Марка"), strip);
+
+    for (const make of selection.makes) {
+      const block = element("div", "filter-make-block");
+      const head = element("div", "filter-make-head");
+      head.append(element("span", "filter-make-name", make.label));
+      head.append(button("Убрать", () => toggleMake(make), "back-link"));
+      block.append(head);
+      const cached = modelCache.get(make.value);
+      if (!cached) block.append(element("p", "footnote", "Загружаем модели…"));
+      else if (cached.pending)
+        block.append(
+          element(
+            "p",
+            "footnote",
+            "Справочник готовится. Повторите выбор модели через несколько секунд.",
+          ),
+        );
+      else if (!cached.items.length)
+        block.append(
+          element(
+            "p",
+            "footnote",
+            "Под текущие условия моделей не нашлось. Снимите условие или увеличьте бюджет.",
+          ),
+        );
+      else {
+        const grid = element("div", "filter-models");
+        for (const model of cached.items) {
+          const control = button(
+            model.label,
+            () => toggleModel(make, model),
+            "button filter-choice",
+          );
+          control.setAttribute("aria-pressed", String(isModelSelected(make, model)));
+          control.title = `${model.matches} ${plural(model.matches, "объявление", "объявления", "объявлений")}`;
+          control.append(element("span", "filter-choice-hint", String(model.matches)));
+          grid.append(control);
+        }
+        block.append(grid);
+      }
+      parts.push(block);
+    }
+    if (!selection.makes.length)
+      parts.push(element("p", "footnote", "Марка не выбрана — подбор идёт по всем автомобилям."));
+    vehicleHost.replaceChildren(...parts);
+  }
+
+  async function loadCatalogue(): Promise<void> {
+    if (makeCatalogue) {
+      renderVehicle();
+      return;
+    }
+    vehicleHost.replaceChildren(element("p", "footnote", "Загружаем марки…"));
     try {
       const result = await request<MiniAppSuggestions | { state: "loading" }>(
         "/miniapp/api/filter/suggest?key=make",
       );
       if (started !== generation) return;
       if (result.state !== "ready") {
-        suggestionHost.replaceChildren(
+        vehicleHost.replaceChildren(
           element("p", "footnote", "Готовим справочник. Повторите через несколько секунд."),
         );
         return;
       }
-      const items = result.items.map((item) => ({ label: item.label }));
-      suggestionHost.replaceChildren(
-        pickList(items, "Поиск марки", (index) => {
-          const chosen = result.items[index];
-          if (!chosen) return;
-          draft.make = { id: chosen.id, value: chosen.value, label: chosen.label };
-          draft.model = null;
-          draft.query = chosen.value;
-          queryInput.value = draft.query;
-          renderChoices();
-          renderChips();
-          schedulePreview();
-          void openModels();
-        }),
-      );
+      makeCatalogue = {
+        items: result.items.map((item) => ({ id: item.id, value: item.value, label: item.label })),
+      };
+      renderVehicle();
+      await restoreSelection();
     } catch (error) {
       if (started === generation)
-        suggestionHost.replaceChildren(element("p", "footnote", errorText(error)));
+        vehicleHost.replaceChildren(element("p", "footnote", errorText(error)));
     }
   }
 
   /** Only the models that have ads under the current conditions. */
-  async function openModels(): Promise<void> {
-    const make = draft.make;
-    if (!make) return;
-    suggestionHost.replaceChildren(element("p", "footnote", "Ищем модели под ваш поиск…"));
+  async function loadModels(make: FilterChoice): Promise<void> {
+    const signature = conditionSignature();
+    const cached = modelCache.get(make.value);
+    if (cached && cached.signature === signature) {
+      renderVehicle();
+      return;
+    }
     try {
       const result = await request<{
         state?: "ready" | "loading";
@@ -1259,55 +1439,127 @@ async function showFilters(): Promise<void> {
         make_label: make.label,
       });
       if (started !== generation) return;
-      if (result.state === "loading" || !result.items) {
-        suggestionHost.replaceChildren(
-          element(
-            "p",
-            "footnote",
-            "Справочник готовится. Повторите выбор модели через несколько секунд.",
-          ),
-          button("← Марки", () => void openMakes(), "back-link"),
-        );
-        return;
-      }
-      const matching = result.items ?? [];
-      if (!matching.length) {
-        suggestionHost.replaceChildren(
-          element(
-            "p",
-            "footnote",
-            "Под текущие условия моделей не нашлось. Увеличьте бюджет или снимите условие — либо впишите модель текстом.",
-          ),
-          button("← Марки", () => void openMakes(), "back-link"),
-        );
-        return;
-      }
-      const items = matching.map((item) => ({
-        label: item.label,
-        hint: `${item.matches} ${plural(item.matches, "объявление", "объявления", "объявлений")}`,
-      }));
-      suggestionHost.replaceChildren(
-        pickList(
-          items,
-          "Поиск модели",
-          (index) => {
-            const chosen = matching[index];
-            if (!chosen) return;
-            draft.model = { id: chosen.id, value: chosen.value, label: chosen.label };
-            draft.query = `${make.value} ${chosen.value}`;
-            queryInput.value = draft.query;
-            suggestionHost.replaceChildren();
-            renderChoices();
-            renderChips();
-            schedulePreview();
-          },
-          button("← Марки", () => void openMakes(), "back-link"),
-        ),
-      );
+      const items = result.items ?? [];
+      const pending = result.state === "loading" || result.items === undefined;
+      modelCache.set(make.value, {
+        signature,
+        pending,
+        items: pending
+          ? []
+          : items.map((item) => ({
+              id: item.id,
+              value: item.value,
+              label: item.label,
+              matches: item.matches,
+            })),
+      });
+      renderVehicle();
     } catch (error) {
-      if (started === generation)
-        suggestionHost.replaceChildren(element("p", "footnote", errorText(error)));
+      if (started === generation) status.textContent = errorText(error);
     }
+  }
+
+  async function modelItems(make: FilterChoice): Promise<(FilterChoice & { matches: number })[]> {
+    const cached = modelCache.get(make.value);
+    if (cached && cached.signature === conditionSignature() && !cached.pending) return cached.items;
+    await loadModels(make);
+    return modelCache.get(make.value)?.items ?? [];
+  }
+
+  /** Puts the saved query back into the buttons where the catalogue knows it. */
+  async function restoreSelection(): Promise<void> {
+    const savedQuery = saved?.query.trim() ?? "";
+    if (!savedQuery || !makeCatalogue) return;
+    const unresolved: string[] = [];
+    for (const part of savedQuery
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)) {
+      const words = catalogueWords(part);
+      const make = findMake(makeCatalogue.items, words);
+      if (!make) {
+        unresolved.push(part);
+        continue;
+      }
+      const rest = words.slice(make.words);
+      const model = rest.length ? findModel(await modelItems(make.choice), rest) : null;
+      if (rest.length && !model) {
+        unresolved.push(part);
+        continue;
+      }
+      const makes = isMakeSelected(make.choice)
+        ? selection.makes
+        : [...selection.makes, make.choice];
+      const models = new Map(selection.models);
+      if (model) {
+        const current = models.get(make.choice.value) ?? [];
+        if (!current.some((item) => item.value === model.value))
+          models.set(make.choice.value, [...current, model]);
+      }
+      if (alternativeCount(makes, models) > MAX_ALTERNATIVES) {
+        // A query with more variants than the buttons allow stays as plain text.
+        unresolved.push(part);
+        continue;
+      }
+      selection.makes = makes;
+      selection.models = models;
+    }
+    selection.freeText = unresolved.join(",");
+    renderVehicle();
+    renderChips();
+    schedulePreview();
+  }
+
+  /** Every make as a button, grouped by the first letter. */
+  function openMakeSheet(): void {
+    if (!makeCatalogue) return;
+    const sheet = element("div", "filter-sheet");
+    sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-modal", "true");
+    sheet.setAttribute("aria-label", "Все марки");
+    const panel = element("div", "filter-sheet-panel");
+    const head = element("div", "filter-sheet-head");
+    const list = element("div", "filter-sheet-list");
+    const dismiss = (): void => {
+      document.removeEventListener("keydown", onKey);
+      sheet.remove();
+      if (closeSheet === dismiss) closeSheet = null;
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") dismiss();
+    };
+    const done = button("Готово", dismiss, "button");
+    head.append(element("h2", "", "Все марки"), done);
+    const sorted = [...makeCatalogue.items].sort((left, right) =>
+      left.label.localeCompare(right.label, "ru"),
+    );
+    let letter = "";
+    for (const make of sorted) {
+      const first = make.label.charAt(0).toUpperCase();
+      if (first !== letter) {
+        letter = first;
+        list.append(element("p", "filter-sheet-letter", letter));
+      }
+      const control = button(
+        make.label,
+        () => {
+          toggleMake(make);
+          control.setAttribute("aria-pressed", String(isMakeSelected(make)));
+        },
+        "button filter-choice",
+      );
+      control.setAttribute("aria-pressed", String(isMakeSelected(make)));
+      list.append(control);
+    }
+    panel.append(head, list);
+    sheet.append(panel);
+    sheet.addEventListener("click", (event) => {
+      if (event.target === sheet) dismiss();
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.append(sheet);
+    closeSheet = dismiss;
+    done.focus();
   }
 
   async function save(monitoring: boolean): Promise<void> {
@@ -1353,10 +1605,11 @@ async function showFilters(): Promise<void> {
   }
 
   renderCurrency();
-  renderChoices();
+  renderVehicle();
   renderChips();
   renderSaveState();
   void refreshMatches();
+  void loadCatalogue();
 }
 
 function showDialogue(view: "sell"): void {

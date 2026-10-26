@@ -48,6 +48,16 @@ export function queryGroups(query: string): string[][] {
     .map((part) => normalize(part).split(" ").filter(Boolean))
     .filter((group) => group.length > 0);
 }
+/**
+ * The make and the model as the marketplace states them. Mashina keeps them in the
+ * catalogue attributes, the other marketplaces only name the car in the title.
+ */
+export function vehicleWords(listing: Listing): string[] {
+  const attribute = listing.catalog_attributes ?? {};
+  return [attribute.make, attribute.model].filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+}
 export function searchableText(listing: Listing): string {
   return ` ${normalize(
     [
@@ -59,6 +69,7 @@ export function searchableText(listing: Listing): string {
       listing.trim,
       listing.search_aliases,
       listing.year === null ? "" : String(listing.year),
+      ...vehicleWords(listing),
     ].join(" "),
   )} `;
 }
