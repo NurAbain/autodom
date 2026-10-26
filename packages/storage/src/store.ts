@@ -25,15 +25,6 @@ import {
   TRANSMISSIONS,
   USE_CASES,
 } from "@autodom/core";
-import {
-  CATALOG_OPTION_LABELS,
-  CATALOG_RANGE_LABELS,
-  CATALOG_VEHICLE_LABELS,
-  type CatalogOptionKey,
-  type CatalogRangeKey,
-  type CatalogVehicleKey,
-  catalogFilterSchema,
-} from "@autodom/core/catalog-filter";
 import type { CatalogSort } from "@autodom/core/catalog-query";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
@@ -141,10 +132,13 @@ export function validateProfile(input: Profile): Profile {
     throw new Error("Invalid city");
   for (const [value, minimum, maximum] of [
     [p.year_min, 1900, new Date().getUTCFullYear() + 1],
+    [p.year_max, 1900, new Date().getUTCFullYear() + 1],
     [p.mileage_max_km, 0, 10_000_000],
   ] as const)
     if (value !== null && (!Number.isInteger(value) || value < minimum || value > maximum))
       throw new Error("Year or mileage outside supported integer range");
+  if (p.year_min !== null && p.year_max !== null && p.year_max < p.year_min)
+    throw new Error("Year range ends before it starts");
   if (p.allow_import !== null && typeof p.allow_import !== "boolean")
     throw new Error("Invalid import preference");
   if (
@@ -345,6 +339,7 @@ export class Store {
         "0011_payment_channels.sql",
         "0012_vin_report_kinds.sql",
         "0013_vin_photos.sql",
+        "0014_buyer_filter.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
@@ -617,22 +612,10 @@ export class Store {
     if (!sources.length) return sql`false`;
     const price = p.currency === "USD" ? listings.price_usd_minor : listings.price_kgs_minor;
     const now = nowSeconds();
-    const filter = catalogFilterSchema.parse(p.catalog_filter);
     const clauses: (SQL | undefined)[] = [
       gt(price, 0),
       between(price, p.budget_min_minor, p.budget_max_minor),
-      filter.options.availibility?.length
-        ? and(
-            sql`COALESCE(NULLIF(${listings.data}->'catalog_attributes'->>'publication_status', ''), 'active') = 'active'`,
-            or(
-              inArray(listings.availability, ["в наличии", "опубликовано"]),
-              and(
-                sql`${listings.data}->'catalog_attributes'->>'publication_status' = 'active'`,
-                sql`${listings.availability} <> 'неактивно'`,
-              ),
-            ),
-          )
-        : inArray(listings.availability, ["в наличии", "опубликовано"]),
+      inArray(listings.availability, ["в наличии", "опубликовано"]),
       gte(listings.last_seen, now - FRESH_SECONDS),
       inArray(listings.source, sources),
       or(
@@ -657,58 +640,9 @@ export class Store {
       p.body_type ? eq(listings.normalized_body_type, p.body_type) : undefined,
       p.transmission ? eq(listings.normalized_transmission, p.transmission) : undefined,
       p.year_min !== null ? gte(listings.vehicle_year, p.year_min) : undefined,
+      p.year_max !== null ? lte(listings.vehicle_year, p.year_max) : undefined,
       p.mileage_max_km !== null ? lte(listings.mileage_km, p.mileage_max_km) : undefined,
     ];
-    const attribute = (key: string) => sql`${listings.data}->'catalog_attributes'->>${key}`;
-    const number = (key: string) => sql`CASE
-      WHEN jsonb_typeof(${listings.data}->'catalog_numbers'->${key}) = 'number'
-      THEN (${listings.data}->'catalog_numbers'->>${key})::numeric
-      ELSE NULL END`;
-    if (filter.vehicles.length) {
-      clauses.push(
-        or(
-          ...filter.vehicles.map((vehicle) =>
-            and(
-              ...(Object.keys(CATALOG_VEHICLE_LABELS) as CatalogVehicleKey[]).map((key) => {
-                const choice = vehicle[key];
-                if (!choice) return undefined;
-                const words = normalize(choice.value).split(" ").filter(Boolean);
-                return or(
-                  sql`${attribute(key)} = ${choice.value}`,
-                  and(
-                    sql`COALESCE(${attribute(key)}, '') = ''`,
-                    words.length
-                      ? and(
-                          ...words.map(
-                            (word) => sql`strpos(${listings.normalized_title}, ${` ${word} `}) > 0`,
-                          ),
-                        )
-                      : sql`false`,
-                  ),
-                );
-              }),
-            ),
-          ),
-        ),
-      );
-    }
-    for (const key of Object.keys(CATALOG_OPTION_LABELS) as CatalogOptionKey[]) {
-      const values = filter.options[key];
-      if (values?.length)
-        clauses.push(
-          inArray(
-            attribute(key),
-            values.map((choice) => choice.value),
-          ),
-        );
-    }
-    for (const key of Object.keys(CATALOG_RANGE_LABELS) as CatalogRangeKey[]) {
-      const range = filter.ranges[key];
-      if (range?.min != null) clauses.push(sql`${number(key)} >= ${range.min}`);
-      if (range?.max != null) clauses.push(sql`${number(key)} <= ${range.max}`);
-    }
-    if (filter.below_market_percent !== null)
-      clauses.push(sql`${number("price_range")} <= ${-filter.below_market_percent}`);
     const groups = queryGroups(p.query);
     if (p.query.trim() && !groups.length) return sql`false`;
     if (groups.length)

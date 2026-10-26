@@ -601,14 +601,18 @@ describe("mandatory proxy document transport", () => {
       };
     });
     const url = "https://lalafo.kg/api/search/v3/feed/search";
-    await expect(transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" })).resolves.toEqual({
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).resolves.toEqual({
       items: [{ id: 42 }],
     });
     // The refused exit is abandoned for another static port.
     expect(pages.size).toBe(2);
     // The replacement route is the one that gets reused on the next renewal.
     vi.setSystemTime(started + 121 * 60_000);
-    await expect(transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" })).resolves.toEqual({
+    await expect(
+      transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" }),
+    ).resolves.toEqual({
       items: [{ id: 42 }],
     });
     expect(pages.size).toBe(2);

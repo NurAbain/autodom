@@ -3,7 +3,7 @@ import {
   CATALOG_SORTS,
   catalogQueryIsPlain,
   catalogQueryParams,
-  catalogQueryToFilter,
+  catalogQueryText,
   catalogQueryToProfile,
   parseCatalogQuery,
 } from "../src/catalog-query.js";
@@ -15,7 +15,7 @@ describe("catalogue query parsing", () => {
     );
     expect(query).toEqual({
       q: "Toyota",
-      market: "ALL",
+      market: "KG",
       currency: "USD",
       budget_min_minor: 500_000,
       budget_max_minor: 1_500_000,
@@ -42,7 +42,7 @@ describe("catalogue query parsing", () => {
     expect(query.year_min).toBeNull();
     expect(query.mileage_max_km).toBeNull();
     expect(query.budget_min_minor).toBeNull();
-    expect(query.market).toBe("ALL");
+    expect(query.market).toBe("KG");
     expect(query.make).toBe("");
   });
 
@@ -81,30 +81,16 @@ describe("catalogue query round trip", () => {
 });
 
 describe("catalogue query to shared conditions", () => {
-  it("maps make and model onto the shared vehicle filter", () => {
-    const filter = catalogQueryToFilter(parseCatalogQuery("?make=BMW&model=X5"));
-    expect(filter.vehicles).toEqual([
-      {
-        make: { id: "BMW", value: "BMW", label: "BMW" },
-        model: { id: "X5", value: "X5", label: "X5" },
-      },
-    ]);
-  });
-
-  it("keeps the body type and the year range in the shared filter", () => {
-    const filter = catalogQueryToFilter(parseCatalogQuery("?body_type=suv&year_max=2021"));
-    expect(filter.options.body_type).toEqual([{ id: "suv", value: "suv", label: "suv" }]);
-    expect(filter.ranges.year).toEqual({ min: null, max: 2021 });
-  });
-
-  it("leaves the vehicle filter empty without a make", () => {
-    expect(catalogQueryToFilter(parseCatalogQuery("?model=X5")).vehicles).toEqual([]);
+  it("turns make, model and free text into one vehicle request", () => {
+    expect(catalogQueryText(parseCatalogQuery("?make=BMW&model=X5"))).toBe("BMW X5");
+    expect(catalogQueryText(parseCatalogQuery("?q=BMW&make=BMW&model=X5"))).toBe("BMW X5 BMW");
+    expect(catalogQueryText(parseCatalogQuery(""))).toBe("");
   });
 
   it("builds a neutral profile that keeps every search condition", () => {
     const profile = catalogQueryToProfile(
       parseCatalogQuery(
-        "?q=BMW&budget_min=3000&budget_max=9000&year_min=2020&mileage_max_km=120000&body_type=suv&transmission=automatic&city=Osh&currency=USD",
+        "?q=BMW&budget_min=3000&budget_max=9000&year_min=2020&year_max=2024&mileage_max_km=120000&body_type=suv&transmission=automatic&city=Osh&currency=USD",
       ),
     );
     expect(profile.user_id).toBe(0);
@@ -114,12 +100,13 @@ describe("catalogue query to shared conditions", () => {
     expect(profile.budget_max_minor).toBe(900_000);
     expect(profile.query).toBe("BMW");
     expect(profile.year_min).toBe(2020);
+    expect(profile.year_max).toBe(2024);
     expect(profile.mileage_max_km).toBe(120_000);
     expect(profile.body_type).toBe("suv");
     expect(profile.transmission).toBe("automatic");
     expect(profile.city).toBe("Osh");
+    expect(profile.market).toBe("KG");
     expect(profile.allow_import).toBe(true);
-    expect(profile.catalog_filter.vehicles).toEqual([]);
   });
 
   it("keeps the unbounded budget when no bound is given", () => {

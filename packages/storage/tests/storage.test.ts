@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type Listing, makeListing, makeProfile, matches } from "@autodom/core";
-import { emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import type { OwnerVehicle } from "@autodom/core/owner-vehicle";
 import type { PaymentEvent, PaymentOfferInput } from "@autodom/core/payments";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
@@ -119,6 +118,12 @@ async function rewriteSnapshot(
           "pre_checkout_id",
         ])
           delete row[name];
+    }
+  }
+  if (Number(records[0]?.schema_version) < 12) {
+    for (const record of records) {
+      const row = record.row as Record<string, unknown> | undefined;
+      if (row && record.table === "profiles") delete row.year_max;
     }
   }
   if (Number(records[0]?.schema_version) < 8) {
@@ -1376,67 +1381,41 @@ describe("Telegram Stars financial and delivery boundaries", () => {
 });
 
 describe("PostgreSQL Store", () => {
-  it("keeps catalog OR groups, strict unknowns and boundaries identical before pagination and after restore", async () => {
-    const choice = (value: string) => ({ id: `lookup-${value}`, value, label: value });
-    const filter = {
-      ...emptyCatalogFilter(),
-      vehicles: [
-        { make: choice("Toyota"), model: choice("Camry") },
-        { make: choice("Honda"), model: choice("Fit") },
-      ],
-      options: { gearbox: [choice("Автомат"), choice("Вариатор")] },
-      ranges: { engine_volume: { min: 1.5, max: 2.5 }, mileage: { min: 0, max: 160.9344 } },
-      below_market_percent: 10,
-    };
-    const selected = makeProfile({ ...profile(), monitoring: false, catalog_filter: filter });
-    const facts = { gearbox: "Автомат" };
-    const numbers = { engine_volume: 2.5, mileage: 160.9344, price_range: -10 };
+  it("keeps the text filter, the year range and the marketplace parity identical before pagination and after restore", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,lalafo.kg");
+    const selected = makeProfile({
+      ...profile(),
+      monitoring: false,
+      query: "Toyota Camry, Honda Fit",
+      year_min: 2015,
+      year_max: 2021,
+    });
     const cars = [
-      car({ id: "01-unknown", title: "Toyota Camry" }),
+      car({ id: "01-unknown-year", title: "Toyota Camry" }),
+      car({ id: "02-good", title: "Toyota Camry", year: 2018 }),
+      car({ id: "03-good", title: "Honda Fit", year: 2021 }),
+      car({ id: "04-outside", title: "Toyota Camry", year: 2022 }),
+      car({ id: "05-other", title: "Toyota Corolla", year: 2018 }),
       car({
-        id: "02-wrong-row",
-        title: "Toyota Fit",
-        catalog_attributes: facts,
-        catalog_numbers: numbers,
-      }),
-      car({
-        id: "03-conflict",
+        id: "06-other-marketplace",
         title: "Toyota Camry",
-        catalog_attributes: { ...facts, model: "Corolla" },
-        catalog_numbers: numbers,
-      }),
-      car({
-        id: "04-substring",
-        title: "Honda Fitment",
-        catalog_attributes: facts,
-        catalog_numbers: numbers,
-      }),
-      car({
-        id: "05-null-market",
-        catalog_attributes: facts,
-        catalog_numbers: { ...numbers, price_range: null },
-      }),
-      car({ id: "06-good", catalog_attributes: facts, catalog_numbers: numbers }),
-      car({
-        id: "07-good",
-        title: "Honda Fit",
-        catalog_attributes: { gearbox: "Вариатор" },
-        catalog_numbers: numbers,
-      }),
-      car({
-        id: "08-outside",
-        catalog_attributes: facts,
-        catalog_numbers: { ...numbers, engine_volume: 2.5001 },
+        year: 2018,
+        source: "lalafo.kg",
+        catalog_attributes: {},
+        catalog_numbers: {},
       }),
     ];
     await db.upsertListings(cars, NOW);
-    const expected = ["06-good", "07-good"];
+    const expected = ["02-good", "03-good", "06-other-marketplace"];
     expect(cars.filter((item) => matches(selected, item)).map((item) => item.id)).toEqual(expected);
-    expect((await db.search(selected, 1)).map((item) => item.id)).toEqual(["06-good"]);
-    expect((await db.search(selected, 1, 1)).map((item) => item.id)).toEqual(["07-good"]);
-    expect(await db.countMatches(selected)).toBe(2);
+    expect((await db.search(selected, 2)).map((item) => item.id)).toEqual(["02-good", "03-good"]);
+    expect((await db.search(selected, 2, 1)).map((item) => item.id)).toEqual([
+      "03-good",
+      "06-other-marketplace",
+    ]);
+    expect(await db.countMatches(selected)).toBe(3);
     const saved = await db.saveProfile(selected);
-    expect((await db.getProfile(selected.user_id))?.catalog_filter).toEqual(filter);
+    expect((await db.getProfile(selected.user_id))?.year_max).toBe(2021);
     const snapshot = join(directory, "catalog.ndjson");
     await backup(db, snapshot);
     const restoredUrl = await database();
@@ -1445,41 +1424,31 @@ describe("PostgreSQL Store", () => {
     expect(await restored.getProfile(selected.user_id)).toEqual(saved);
     expect(saved.monitoring).toBe(false);
     expect((await restored.search(saved)).map((item) => item.id)).toEqual(expected);
-    expect(await restored.countMatches(saved)).toBe(2);
+    expect(await restored.countMatches(saved)).toBe(3);
   });
-  it("admits selected in-transit stock only with active publication evidence", async () => {
-    const choice = { id: "lookup-transit", value: "В пути", label: "В пути" };
-    const selected = makeProfile({
-      ...profile(),
-      catalog_filter: {
-        ...emptyCatalogFilter(),
-        options: { availibility: [choice] },
-      },
-    });
+  it("admits published offers only and ignores source publication attributes", async () => {
+    const selected = makeProfile({ ...profile() });
     const cars = [
+      car({ id: "active", availability: "В наличии" }),
+      car({ id: "published", availability: "Опубликовано" }),
       car({
-        id: "active",
+        id: "in-transit",
         availability: "В пути",
         catalog_attributes: { availibility: "В пути", publication_status: "active" },
       }),
       car({
         id: "inactive",
         availability: "Неактивно",
-        catalog_attributes: { availibility: "В пути", publication_status: "inactive" },
-      }),
-      car({
-        id: "unknown",
-        availability: "В пути",
-        catalog_attributes: { availibility: "В пути" },
+        catalog_attributes: { availibility: "В пути", publication_status: "active" },
       }),
     ];
     await db.upsertListings(cars, NOW);
     expect(cars.filter((item) => matches(selected, item)).map((item) => item.id)).toEqual([
       "active",
+      "published",
     ]);
-    expect((await db.search(selected)).map((item) => item.id)).toEqual(["active"]);
-    expect(await db.countMatches(selected)).toBe(1);
-    expect(await db.countMatches(profile())).toBe(0);
+    expect((await db.search(selected)).map((item) => item.id)).toEqual(["active", "published"]);
+    expect(await db.countMatches(selected)).toBe(2);
   });
   it("serializes concurrent startup migrations without losing either connection", async () => {
     const fresh = await database();
@@ -1590,6 +1559,63 @@ describe("PostgreSQL Store", () => {
     const saved = await migrated.getProfile(1);
     await migrated.migrate();
     expect(await migrated.getProfile(1)).toEqual(saved);
+  });
+  it("moves the catalogue vehicles into the text query and clears the source criteria", async () => {
+    const oldUrl = await database();
+    const old = new pg.Pool({ connectionString: oldUrl });
+    try {
+      await old.query(
+        "CREATE TABLE autodom_migrations (version integer PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz DEFAULT now())",
+      );
+      for (const [index, name] of [
+        "0001_initial.sql",
+        "0002_mileage_bigint.sql",
+        "0003_advertising_consent.sql",
+        "0004_remove_advertising_consent.sql",
+        "0005_owner_vehicles.sql",
+        "0006_payments.sql",
+        "0007_uae_market.sql",
+        "0008_catalog_filters.sql",
+        "0009_telegram_stars.sql",
+        "0010_web_report_payments.sql",
+        "0011_payment_channels.sql",
+        "0012_vin_report_kinds.sql",
+        "0013_vin_photos.sql",
+      ].entries()) {
+        const statement = await readFile(join("packages/storage/migrations", name), "utf8");
+        await old.query(statement);
+        await old.query("INSERT INTO autodom_migrations(version, checksum) VALUES ($1, $2)", [
+          index + 1,
+          createHash("sha256").update(statement).digest("hex"),
+        ]);
+      }
+      await old.query(
+        "INSERT INTO profiles (user_id, chat_id, currency, budget_min_minor, budget_max_minor, query, monitoring, revision, cursor) VALUES (1, 10, 'USD', 100, 200, '', true, 7, 3)",
+      );
+      await old.query(
+        `UPDATE profiles SET catalog_filter = '{"vehicles":[{"make":{"id":"toyota","value":"toyota","label":"Toyota"}},{"make":{"id":"honda","value":"honda","label":"Honda"},"model":{"id":"fit","value":"Fit","label":"Fit"}}],"options":{"color":[{"id":"white","value":"Белый","label":"Белый"}]},"ranges":{"mileage":{"min":null,"max":100000}},"below_market_percent":10}'::jsonb WHERE user_id = 1`,
+      );
+    } finally {
+      await old.end();
+    }
+    const migrated = await open(oldUrl);
+    expect((await migrated.getProfile(1))?.query).toBe("toyota, Fit");
+    const client = new pg.Client({ connectionString: oldUrl });
+    await client.connect();
+    try {
+      const saved = await client.query(
+        "SELECT catalog_filter, year_max FROM profiles WHERE user_id = 1",
+      );
+      expect(saved.rows[0]?.catalog_filter).toEqual({
+        vehicles: [],
+        options: {},
+        ranges: {},
+        below_market_percent: null,
+      });
+      expect(saved.rows[0]?.year_max).toBeNull();
+    } finally {
+      await client.end();
+    }
   });
   it("rejects invalid profile updates without replacing saved private preferences", async () => {
     const original = await db.saveProfile(profile());

@@ -1,5 +1,4 @@
 import { Decimal } from "decimal.js";
-import { matchesCatalogFilter } from "./catalog-filter.js";
 import { approvedSources } from "./config.js";
 import { type Listing, listingPrice, MARKETS, type Profile } from "./models.js";
 import { normalize, normalizeCity } from "./normalization.js";
@@ -67,7 +66,6 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
   if (
     !["USD", "KGS"].includes(profile.currency) ||
     !Object.hasOwn(MARKETS, profile.market) ||
-    !matchesCatalogFilter(profile.catalog_filter, listing) ||
     !approvedSources().includes(listing.source) ||
     (profile.market !== "ALL" && listing.market !== profile.market) ||
     (listing.market !== "KG" &&
@@ -77,7 +75,11 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
     (profile.transmission &&
       normalizeTransmission(listing.transmission) !== profile.transmission) ||
     (profile.year_min !== null &&
-      (listing.year === null || !Number.isInteger(listing.year) || listing.year < profile.year_min))
+      (listing.year === null ||
+        !Number.isInteger(listing.year) ||
+        listing.year < profile.year_min)) ||
+    (profile.year_max !== null &&
+      (listing.year === null || !Number.isInteger(listing.year) || listing.year > profile.year_max))
   )
     return false;
   if (profile.mileage_max_km !== null) {
@@ -86,17 +88,12 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
   }
   const price = listingPrice(listing, profile.currency, now);
   const availability = normalize(listing.availability);
-  const publication = listing.catalog_attributes.publication_status;
-  const selectedAvailability = Boolean(profile.catalog_filter.options.availibility?.length);
   if (
     price === null ||
     price <= 0 ||
     price < profile.budget_min_minor ||
     price > profile.budget_max_minor ||
-    (selectedAvailability && publication && publication !== "active") ||
-    (availability !== "в наличии" &&
-      availability !== "опубликовано" &&
-      !(selectedAvailability && publication === "active" && availability !== "неактивно"))
+    (availability !== "в наличии" && availability !== "опубликовано")
   )
     return false;
   const groups = queryGroups(profile.query);

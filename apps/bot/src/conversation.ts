@@ -3,39 +3,21 @@ import { randomBytes } from "node:crypto";
 import {
   BODY_TYPES,
   BUDGET_SCOPES,
-  enabledMarkets,
   enabledSources,
-  foreignOffersEnabled,
   type Listing,
   listingPrice,
   MARKETS,
-  makeProfile,
-  marketChoiceOffered,
   money,
-  normalize,
-  normalizeCity,
   type Profile,
-  parseBudget,
   sourceStatus,
   TRANSMISSIONS,
   USE_CASES,
 } from "@autodom/core";
-import type { CatalogLookup } from "@autodom/core/catalog-filter";
-import { type CatalogFilter, emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import type { Store } from "@autodom/storage";
 import type { AnalyticsEvent, AnalyticsRecorder, AnalyticsSurface } from "./analytics-contract.js";
-import {
-  CATALOG_COVERAGE_NOTE,
-  catalogActionAllowed,
-  catalogSummary,
-  renderCatalog,
-  renderFilterOverview,
-  updateCatalog,
-} from "./catalog-dialogue.js";
 import { escapeHtml } from "./html.js";
 import { listingPhotoUrls } from "./media.js";
 import type { SellerConversation } from "./seller-conversation.js";
-import { vehicleCatalog } from "./vehicle-catalog.js";
 import { VIN_ARCHIVE_DISCLOSURE, VIN_DISCLOSURE } from "./vin-text.js";
 
 export type Button = readonly [string, string];
@@ -46,28 +28,8 @@ export interface Reply {
   photos?: readonly string[];
   listingId?: string;
   richHtml?: string;
-  miniAppView?: "vin" | "buy" | "sell" | "report-example" | "orders";
+  miniAppView?: "vin" | "filters" | "orders";
   input?: { label: string; placeholder: string; mode: "text" | "numeric" | "decimal" };
-  filterEditor?: {
-    applyCommand?: string;
-    description: string;
-    sections: {
-      title: string;
-      fields: { label: string; value: string; command: string }[];
-    }[];
-    chips: { label: string; command: string }[];
-  };
-  picker?: {
-    title: string;
-    subtitle?: string;
-    page: number;
-    pages: number;
-    selected: number;
-    searchable: boolean;
-    options: { command: string; selected: boolean }[];
-    applyCommand?: string;
-    search: string;
-  };
 }
 export type ConversationStore = Pick<
   Store,
@@ -86,57 +48,17 @@ export type ConversationStore = Pick<
   | "sourceStats"
 >;
 type Draft = Record<string, unknown>;
+/** The buyer goal opens the Mini App editor; the chat only summarises and searches. */
+export const FILTERS_ACTION = "/filters";
 const START_BUTTONS: Buttons = [
+  [["Настроить поиск", FILTERS_ACTION]],
+  [["Найти автомобили", "/search"]],
+  [["Мои условия", "/profile"]],
   [["Проверить VIN", "/vin"]],
   [["Продать / обменять авто на недвижимость", "/sell"]],
-  [["Купить автомобиль", "/buy"]],
+  [["Данные и согласие", "/privacy"]],
+  [["Удалить данные", "/delete"]],
 ];
-const OPTIONAL_DEFAULTS = {
-  city: "",
-  body_type: "",
-  year_min: null,
-  mileage_max_km: null,
-  transmission: "",
-  use_case: "",
-  allow_import: null,
-  purchase_by: "",
-};
-const FIELD_LABELS: Record<string, string> = {
-  market: "Рынок",
-  currency: "Валюта",
-  budget: "Бюджет",
-  query: "Марки и модели",
-  budget_scope: "Что входит в бюджет",
-  city: "Город объявления",
-  body_type: "Кузов",
-  year_min: "Год от",
-  mileage_max_km: "Пробег до, км",
-  transmission: "Коробка передач",
-  use_case: "Для чего автомобиль",
-  allow_import: "Готовность ждать импорт",
-  purchase_by: "Планируемая дата покупки",
-};
-
-/**
- * Editable buyer fields. A country choice needs more than one market, and the import
- * readiness and the landed budget only mean something when foreign offers exist.
- */
-function offeredFields(): readonly string[] {
-  return Object.keys(FIELD_LABELS).filter((field) => {
-    if (field === "market") return marketChoiceOffered();
-    if (field === "allow_import" || field === "budget_scope") return foreignOffersEnabled();
-    return true;
-  });
-}
-const CHOICES: Record<string, Readonly<Record<string, string>>> = {
-  budget_scope: BUDGET_SCOPES,
-  body_type: BODY_TYPES,
-  transmission: TRANSMISSIONS,
-  use_case: USE_CASES,
-  allow_import: { yes: "Готов ждать импорт", no: "Без импорта" },
-};
-const FILTER_NOTE =
-  "Жёсткие фильтры поиска и уведомлений: рынок, цена объявления, слова марки/модели, город, кузов, год, пробег, коробка и запрет импорта, если выбраны. Неизвестные или нераспознанные данные не проходят соответствующий выбранный фильтр. Город — место объявления, не пункт доставки.\nЦель и дата покупки — только заметки: не определяют пригодность машины и не останавливают мониторинг.\nБюджет «под ключ» исключает иностранные объявления: полной стоимости ввоза пока нет. Даже для местных объявлений проверяется цена машины, а не все расходы покупки. Аукционы сравниваются с бюджетом только по Buy Now, пока предложение активно: текущая ставка, оценка и результат завершённых торгов не являются ценой покупки. Готовность к импорту не включает выключенные источники и не гарантирует срок доставки.";
 const USE_CASE_TIPS: Record<string, string> = {
   city: "Для городских поездок проверьте реальные габариты парковки и расход в пробках.",
   family:
@@ -145,10 +67,13 @@ const USE_CASE_TIPS: Record<string, string> = {
   travel:
     "Для дальних поездок проверьте запасное колесо, тормоза и историю обслуживания перед выездом.",
 };
+const FILTER_NOTE =
+  "Жёсткие фильтры поиска и уведомлений: цена объявления, слова марки/модели, город, кузов, диапазон года, пробег, коробка и рынок. Неизвестные или нераспознанные данные не проходят соответствующий выбранный фильтр. Город — место объявления, не пункт доставки.\nНабор условий одинаков для всех площадок Кыргызстана: справочные уточнения одной площадки не применяются к другой.\nЦель и дата покупки — только заметки: не определяют пригодность машины и не останавливают мониторинг.\nБюджет «под ключ» исключает иностранные объявления: полной стоимости ввоза пока нет. Даже для местных объявлений проверяется цена машины, а не все расходы покупки. Аукционы сравниваются с бюджетом только по Buy Now, пока предложение активно: текущая ставка, оценка и результат завершённых торгов не являются ценой покупки.";
+
 function bishkekTime(timestamp: number): string {
   const date = new Date((timestamp + 6 * 3600) * 1000);
   const pad = (number: number) => String(number).padStart(2, "0");
-  return `${pad(date.getUTCDate())}.${pad(date.getUTCMonth() + 1)}.${date.getUTCFullYear()} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+  return `${pad(date.getUTCDate())}.${pad(date.getUTCMonth() + 1)}.${pad(date.getUTCFullYear())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
 }
 
 export function privacyText(): string {
@@ -158,14 +83,14 @@ export function privacyText(): string {
       .map((source) => escapeHtml(source.name))
       .join(", ")}. ` +
     "Иностранные адаптеры без согласованного доступа не собирают и не показывают объявления. Цена за рубежом не включает доставку, таможню, оформление и возможный ремонт; доступность экспорта не подтверждена. Бесплатное ядро не требует платных заказов.\n\n" +
-    "После вашего согласия на хранение сохраняю на сервере проекта Telegram ID, ID личного чата, черновик рынка, бюджета, текстового запроса и выбранных условий: марки, модели, поколения, модификации, регион и город, кузов, топливо, привод, коробка, руль, цвет, состояние, обмен, наличие, диапазоны года, пробега и объёма двигателя, порог «ниже рынка», цель, готовность к импорту и планируемая дата покупки; затем профиль и настройки. Поиск по справочнику временно хранится в черновике. Это нужно для бесплатного поиска. Профиль сохраняется только после проверки и кнопки «Сохранить». Дополнительные поля необязательны. Цель и дата покупки — заметки, не оценка пригодности автомобиля и не срок остановки мониторинга. До кнопки «Согласен на хранение» новый черновик не сохраняется.\n\n" +
+    "После вашего согласия на хранение сохраняю на сервере проекта Telegram ID, ID личного чата и условия покупки: валюту и границы бюджета, текстовый запрос с марками и моделями, город объявления, кузов, коробку передач, диапазон года, предельный пробег, а также заметки о цели и дате покупки; затем профиль и настройки уведомлений. В незавершённом вводе эти данные живут только до сохранения. Это нужно для бесплатного поиска. Профиль сохраняется только после явного согласия и кнопки сохранения. Не вводите в поля контакты.\n\n" +
     "Мониторинг бесплатный. При сохранении явно выбираете «с бесплатным мониторингом» или «без уведомлений». Позже /resume включает, /pause останавливает уведомления. После разделения ботов уведомления приходят из @autodomkgbot только после вашего обращения к нему в личном чате; ранее выбранная настройка мониторинга сохраняется. Для этого хранится отметка Telegram ID пользователя и бота, удаляемая при /delete.\n\n" +
     `По команде /vin или кнопке «Проверить VIN»: ${VIN_DISCLOSURE} Заявки партнёрам сейчас не подключены. Архив истории чата не ведётся, контакты не собираются; однако текст, который вы сами вводите в поля поиска, сохраняется в этих полях. Не вводите туда контакты. Сообщения чата хранит Telegram. Профиль и уведомления доступны пользователю только в личном чате. Интерфейса доступа операторов к профилям и контактам нет; привилегированные администраторы инфраструктуры технически могут получить доступ к базе и резервным копиям.\n\n` +
     `Архивные фото: ${VIN_ARCHIVE_DISCLOSURE}\n\n` +
     "Раздел своего авто не требует анкеты покупателя: отдельное согласие перед вводом, затем карточка марки/модели, года, пробега, цены и цели продажи или обмена. До сохранения ввод хранится временно в памяти; переключение цели его сбрасывает. Сохранённая карточка отделена от фильтров покупки. Мы не публикуем её и не отправляем партнёрам.\n\n" +
-    "Данные хранятся до /delete: подтверждение удаляет профиль покупки, карточку своего авто, настройки и незавершённый ввод из рабочей базы. /cancel отменяет текущий ввод, а не сохранённые данные; при подтверждении удаления отменяет удаление и возвращает прежний черновик покупки. /start, /vin и /sell не удаляют черновик покупки: /buy продолжает его. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения этого срока. /delete не удаляет переписку в Telegram.\n\n" +
+    "Данные хранятся до /delete: подтверждение удаляет профиль покупки, карточку своего авто, настройки и незавершённый ввод из рабочей базы. /cancel отменяет текущее действие, а не сохранённые данные; при подтверждении удаления отменяет удаление и возвращает прежний черновик покупки. /start, /vin и /sell не удаляют черновик покупки. Локальные снимки при управляемом хранении сохраняются не более 7 дней; удалённые данные могут оставаться в них до истечения этого срока. /delete не удаляет переписку в Telegram.\n\n" +
     "Для улучшения продукта используем собственную псевдонимную аналитику действий за последние 90 дней: шаги поиска, результаты проверки и этапы покупки. Тексты сообщений, содержимое VIN, контакты и бюджет в аналитику не попадают; внешних трекеров нет. Подтверждённый /delete удаляет эту аналитику и отключает дальнейший сбор; финансовые записи, обязательные по закону, сохраняются отдельно.\n\n" +
-    "Заказы и платёжная поддержка остаются в @autokgbot, отдельно от бесплатного поиска. В заказе сохраняются Telegram ID покупателя, продавец, исполнитель, состав, цена, принятые условия, идентификаторы и серверные подтверждения платежа, а также заявки на возврат. /delete не удаляет эти финансовые записи. Для счёта Finik получает номер, описание и сумму заказа, но не Telegram ID, контакты или профиль поиска. Создание счёта не означает оплату; заявка на возврат не означает возврат денег. Условия и поддержка конкретного заказа — /orders."
+    "Заказы и платёжная поддержка остаются в @autokgbot, отдельно от бесплатного поиска. В заказе сохраняются Telegram ID покупателя, продавец, исполнитель, состав, цена, принятые условия, идентификаторы и серверные подтверждения оплаты, а также заявки на возврат. /delete не удаляет эти финансовые записи. Для счёта Finik получает номер, описание и сумму заказа, но не Telegram ID, контакты или профиль поиска. Создание счёта не означает оплату; заявка на возврат не означает возврат денег. Условия и поддержка конкретного заказа — /orders."
   );
 }
 export function profileText(profile: Profile): string {
@@ -182,22 +107,26 @@ export function profileText(profile: Profile): string {
       )
       .join("–");
   }
-  const catalog = catalogSummary(profile.catalog_filter);
+  const year =
+    profile.year_min === null && profile.year_max === null
+      ? ""
+      : `Год: ${profile.year_min ?? "любой"} — ${profile.year_max ?? "любой"}\n`;
+  const notes =
+    profile.use_case || profile.purchase_by
+      ? `Цель (заметка): ${USE_CASES[profile.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${profile.purchase_by ? escapeHtml(profile.purchase_by) : "не задана"}\n`
+      : "";
   return (
     `Рынок: <b>${MARKETS[profile.market as keyof typeof MARKETS]}</b>\nБюджет: <b>${budget}</b> · ${BUDGET_SCOPES[profile.budget_scope as keyof typeof BUDGET_SCOPES]}\nТекстовый запрос: ${profile.query ? escapeHtml(profile.query) : "не задан"}\n` +
     (profile.city ? `Город объявления: ${escapeHtml(profile.city)}\n` : "") +
     (profile.body_type
       ? `Кузов: ${BODY_TYPES[profile.body_type as keyof typeof BODY_TYPES]}\n`
       : "") +
-    (profile.year_min !== null ? `Год от: ${profile.year_min}\n` : "") +
+    year +
     (profile.mileage_max_km !== null ? `Пробег до: ${profile.mileage_max_km} км\n` : "") +
     (profile.transmission
       ? `Коробка: ${TRANSMISSIONS[profile.transmission as keyof typeof TRANSMISSIONS]}\n`
       : "") +
-    `Импорт: ${profile.allow_import === true ? "готов ждать" : profile.allow_import === false ? "исключён" : "не уточнён, разрешён из включённых источников"}\n` +
-    `Цель (заметка): ${USE_CASES[profile.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${profile.purchase_by ? escapeHtml(profile.purchase_by) : "не задана"}\n` +
-    (catalog ? `${catalog}\n` : "") +
-    `${CATALOG_COVERAGE_NOTE}\n` +
+    notes +
     `Мониторинг: ${profile.monitoring ? "включён" : "на паузе"}\nТихие часы (Бишкек, UTC+6): ${quiet}. /quiet — настройка.`
   );
 }
@@ -207,9 +136,10 @@ export function menu(profile: Profile): Buttons {
     : ["Включить мониторинг", `monitor:${profile.revision}:on`];
   return [
     [["Найти автомобили", "/search"]],
-    [monitor, ["Изменить поиск", "/edit"]],
+    [["Настроить поиск", FILTERS_ACTION]],
+    [monitor],
     [
-      ["Мой поиск", "/profile"],
+      ["Мои условия", "/profile"],
       ["Советы", "/tips"],
     ],
     [["Данные и согласие", "/privacy"]],
@@ -339,7 +269,6 @@ export function packReplies(
   header: string,
   sections: readonly string[],
   buttons: Buttons = [],
-  metadata: Pick<Reply, "input" | "picker" | "filterEditor"> = {},
 ): Reply[] {
   const chunks: Reply[] = [];
   let current = "";
@@ -352,7 +281,7 @@ export function packReplies(
       } else current += (current ? "\n\n" : "") + piece;
     }
   }
-  if (current) chunks.push({ text: current, buttons, ...metadata });
+  if (current) chunks.push({ text: current, buttons });
   return chunks;
 }
 
@@ -421,7 +350,6 @@ export class Conversation {
     private readonly store: ConversationStore,
     private readonly options: {
       seller?: SellerConversation;
-      catalog?: CatalogLookup;
       analytics?: AnalyticsRecorder;
     } = {},
   ) {}
@@ -446,257 +374,22 @@ export class Conversation {
     return packReplies(
       detailed
         ? privacyText()
-        : "<b>Поиск автомобиля</b>\nНужны только валюта, бюджет и модели. Остальные фильтры — по желанию.\n\nС вашего согласия сохраним Telegram ID, ID личного чата и черновик пожеланий на сервере проекта; после проверки — профиль. Не вводите контакты. Уведомления включаются только по вашему выбору. /delete удаляет рабочие данные, резервные копии могут храниться до 7 дней; переписку хранит Telegram. /privacy — все условия.\n\nСогласны на хранение для бесплатного поиска?",
+        : "<b>Поиск автомобиля</b>\nУсловия настраиваются в приложении: автомобиль, бюджет, город и характеристики. Остальные фильтры — по желанию.\n\nС вашего согласия сохраним Telegram ID, ID личного чата и условия покупки на сервере проекта; после проверки — профиль. Не вводите контакты. Уведомления включаются только по вашему выбору. /delete удаляет рабочие данные, резервные копии могут храниться до 7 дней; переписку хранит Telegram. /privacy — все условия.\n\nСогласны на хранение для бесплатного поиска?",
       [],
-      [[["Согласен на хранение — начать подбор", action]], [["Не сейчас", "/start"]]],
+      [[["Согласен на хранение — настроить поиск", action]], [["Не сейчас", "/start"]]],
     );
   }
-  private async begin(userId: number, profile: Profile | null): Promise<Reply[]> {
-    const data: Draft = {
-      consent: true,
-      budget_scope: "car",
-      query: "",
-      catalog_filter: emptyCatalogFilter(),
-      ...OPTIONAL_DEFAULTS,
-    };
-    if (profile) {
-      await this.store.setMonitoring(userId, false);
-      if (profile.monitoring)
-        await this.record(userId, {
-          event: "monitoring_paused",
-          flow: "buyer",
-          outcome: "success",
-        });
-      for (const field of Object.keys(OPTIONAL_DEFAULTS) as (keyof typeof OPTIONAL_DEFAULTS)[])
-        data[field] = profile[field];
-      Object.assign(data, {
-        market: profile.market,
-        currency: profile.currency,
-        minimum: profile.budget_min_minor,
-        maximum: profile.budget_max_minor,
-        query: profile.query,
-        budget_scope: profile.budget_scope,
-        catalog_filter: structuredClone(profile.catalog_filter),
-      });
-    }
-    const markets = enabledMarkets();
-    if (!data.market) data.market = markets.includes("KG") ? "KG" : (markets[0] ?? "KG");
-    return this.prompt(userId, profile ? "review" : "currency", data);
-  }
-  private draftProfile(userId: number, data: Draft, profile: Profile | null): Profile {
-    const fields = offeredFields();
-    const markets = enabledMarkets();
-    return makeProfile({
-      user_id: userId,
-      chat_id: userId,
-      currency: data.currency as Profile["currency"],
-      budget_min_minor: data.minimum as number,
-      budget_max_minor: data.maximum as number,
-      query: data.query as string,
-      market: (fields.includes("market") ? data.market : (markets[0] ?? "KG")) as Profile["market"],
-      budget_scope: (fields.includes("budget_scope")
-        ? data.budget_scope
-        : "car") as Profile["budget_scope"],
-      quiet_start_minute: profile?.quiet_start_minute ?? null,
-      quiet_end_minute: profile?.quiet_end_minute ?? null,
-      city: (data.city ?? "") as string,
-      body_type: (data.body_type ?? "") as Profile["body_type"],
-      year_min: (data.year_min ?? null) as number | null,
-      mileage_max_km: (data.mileage_max_km ?? null) as number | null,
-      transmission: (data.transmission ?? "") as Profile["transmission"],
-      use_case: (data.use_case ?? "") as Profile["use_case"],
-      allow_import: (fields.includes("allow_import") ? data.allow_import : null) as boolean | null,
-      purchase_by: (data.purchase_by ?? "") as string,
-      catalog_filter: (data.catalog_filter as CatalogFilter | undefined) ?? emptyCatalogFilter(),
-    });
-  }
-  private async prompt(
-    userId: number,
-    state: string,
-    original: Draft,
-    error = "",
-  ): Promise<Reply[]> {
-    if (state === "refine" || state === "cat_menu") state = "review";
-    const data: Draft = { ...original, nonce: randomBytes(12).toString("base64url") };
-    const choice = (label: string, value: string): Button => [
-      label,
-      `draft:${data.nonce}:${state}:${value}`,
-    ];
-    if (state.startsWith("cat_")) {
-      const reply = await renderCatalog(
-        state,
-        data,
-        choice,
-        this.options.catalog ?? vehicleCatalog,
-      );
-      await this.store.setDraft(userId, state, data);
-      await this.record(userId, {
-        event: "profile_step",
-        flow: "buyer",
-        step:
-          state === "cat_vehicles" ||
-          state === "cat_row" ||
-          (state === "cat_pick" &&
-            ["make", "model", "generation", "modification"].includes(String(data.cat_key)))
-            ? "model"
-            : "filters",
-        outcome: error ? "invalid" : "success",
-      });
-      if (error) reply.text = escapeHtml(error) + "\n\n" + reply.text;
-      return packReplies(reply.text, [], reply.buttons, {
-        ...(reply.input ? { input: reply.input } : {}),
-        ...(reply.picker ? { picker: reply.picker } : {}),
-        ...(reply.filterEditor ? { filterEditor: reply.filterEditor } : {}),
-      });
-    }
-    let text: string;
-    let buttons: Buttons;
-    let input: Reply["input"];
-    let filterEditor: Reply["filterEditor"];
-    if (state === "review") {
-      const overview = renderFilterOverview(data, choice);
-      const monitor = choice("Сохранить + бесплатный мониторинг", "save.monitor");
-      filterEditor = overview.filterEditor!;
-      filterEditor.applyCommand = monitor[1];
-      text =
-        overview.text +
-        "\n\nВыберите, присылать ли новые совпадения и снижение цены. Оба варианта бесплатны. /cancel — отменить изменения.";
-      buttons = [
-        [monitor],
-        [choice("Сохранить без уведомлений", "save.silent")],
-        ...overview.buttons,
-        [choice("Как работают условия и источники", "limitations")],
-        [["Отмена", "/cancel"]],
-      ];
-    } else if (state === "limitations") {
-      text = `<b>Как работает поиск</b>\n${FILTER_NOTE}\n\n${CATALOG_COVERAGE_NOTE}`;
-      buttons = [[choice("Назад к условиям поиска", "back")], [["Отмена", "/cancel"]]];
-    } else {
-      const prompts: Record<string, string> = {
-        market:
-          "На каком рынке искать? Иностранная цена не включает доставку, таможню, оформление и ремонт.",
-        currency: "В какой валюте задать бюджет? Значение бюджета уточняется перед сохранением.",
-        budget: `Какой бюджет в ${data.pending_currency ?? data.currency ?? "USD"}? Например: 15000, 15к или 10000–15000. Без обозначения валюты.`,
-        query:
-          "Дополнительный текстовый запрос: Toyota Camry, Honda Accord. Запятая разделяет альтернативы; внутри варианта все слова обязательны. Запрос применяется вместе с условиями справочника. Можно оставить пустым, нажав «Пока не знаю».",
-        budget_scope:
-          "Что входит в бюджет? Цена автомобиля — сравнение с ценой объявления. Под ключ — иностранные объявления исключены, пока нет полной стоимости ввоза; для местных проверяется только цена машины, дополнительные расходы не рассчитаны.",
-        city: "Город объявления (до 80 символов), например Бишкек. Это место автомобиля в источнике, не адрес доставки. При выборе города объявления без известного города исключаются.",
-        body_type: "Какой кузов? Неизвестный или нераспознанный кузов не пройдёт выбранный фильтр.",
-        year_min: `Самый ранний год выпуска: целое число от 1900 до ${new Date().getUTCFullYear() + 1}. Неизвестный год не пройдёт фильтр.`,
-        mileage_max_km:
-          "Максимальный пробег в километрах: целое число от 0 до 10 000 000. Можно разделять тысячи пробелами. Неизвестный пробег не пройдёт фильтр.",
-        transmission:
-          "Какая коробка передач? Неизвестная или нераспознанная коробка не пройдёт фильтр.",
-        use_case:
-          "Для чего автомобиль? Это заметка для общих советов, не оценка пригодности конкретной модели и не фильтр.",
-        allow_import:
-          "Готовы ждать импорт? «Без импорта» исключает зарубежные объявления. Готовность не гарантирует срок и не включает выключенные источники; бюджет под ключ всё равно исключает иностранные объявления.",
-        purchase_by:
-          "Планируемая дата покупки: ГГГГ-ММ-ДД (например 2026-12-31) или ДД.ММ.ГГГГ. Это заметка, не фильтр и не дата автоматической остановки мониторинга. Прошлая дата допустима.",
-      };
-      text =
-        prompts[state] ??
-        "Черновик использует прежний шаг. /edit — начать ввод заново; /cancel — отменить.";
-      let choices = CHOICES[state] ?? {};
-      if (state === "market") {
-        const markets = enabledMarkets();
-        choices = Object.fromEntries(
-          (markets.length > 1 ? [...markets, "ALL"] : markets).map((market) => [
-            market,
-            MARKETS[market as keyof typeof MARKETS],
-          ]),
-        );
-      } else if (state === "currency") choices = { USD: "Доллары США · USD", KGS: "Сомы · KGS" };
-      buttons = Object.entries(choices).map(([value, label]) => [choice(label, value)]);
-      if (state === "query") {
-        input = {
-          label: "Текстовый запрос (необязательно)",
-          placeholder: "Toyota Camry, Honda Accord",
-          mode: "text",
-        };
-        buttons = [[choice("Выбрать автомобиль кнопками", "catalog")], ...buttons];
-      } else if (state === "budget") {
-        const currency = data.pending_currency ?? data.currency;
-        const presets =
-          currency === "KGS"
-            ? ["500000", "1000000", "1500000", "2000000", "3000000"]
-            : ["5000", "10000", "15000", "20000", "30000"];
-        buttons = presets.map((value) => [
-          choice(`До ${Number(value).toLocaleString("ru-RU")} ${currency}`, `preset.${value}`),
-        ]);
-        input = {
-          label: `Бюджет в ${currency}`,
-          placeholder: "15000 или 10000–15000",
-          mode: "text",
-        };
-      } else if (["city", "year_min", "mileage_max_km", "purchase_by"].includes(state)) {
-        input = {
-          label: FIELD_LABELS[state]!,
-          placeholder:
-            state === "city"
-              ? "Бишкек"
-              : state === "year_min"
-                ? "2015"
-                : state === "mileage_max_km"
-                  ? "100000"
-                  : "2026-12-31",
-          mode: ["year_min", "mileage_max_km"].includes(state) ? "numeric" : "text",
-        };
-      }
-      if (state === "query" || Object.hasOwn(OPTIONAL_DEFAULTS, state))
-        buttons = [
-          ...buttons,
-          [
-            choice(
-              state === "query"
-                ? "Пока не знаю / без ограничения"
-                : "Не знаю / пропустить (снять значение)",
-              "skip",
-            ),
-          ],
-        ];
-      if (data.return_review || ["budget", "query"].includes(state))
-        buttons = [...buttons, [choice("Назад — сохранить прежнее значение", "back")]];
-      buttons = [...buttons, [["Отмена", "/cancel"]]];
-      text += "\n/cancel — отменить весь ввод. Мониторинг на время изменений приостановлен.";
-    }
-    await this.store.setDraft(userId, state, data);
-    await this.record(userId, {
-      event: "profile_step",
-      flow: "buyer",
-      step:
-        state === "currency" || state === "budget" || state === "review"
-          ? state
-          : state === "query"
-            ? "model"
-            : "filters",
-      outcome: error ? "invalid" : "success",
-    });
-    return packReplies((error ? escapeHtml(error) + "\n\n" : "") + text, [], buttons, {
-      ...(input ? { input } : {}),
-      ...(filterEditor ? { filterEditor } : {}),
-    });
-  }
-  private async advance(userId: number, state: string, data: Draft): Promise<Reply[]> {
-    const filter = data.catalog_filter as CatalogFilter | undefined;
-    if (filter) {
-      if (state === "body_type") delete filter.options.body_type;
-      else if (state === "transmission") delete filter.options.gearbox;
-      else if (state === "city") {
-        delete filter.options.city;
-        delete filter.options.region;
-      } else if (state === "year_min") delete filter.ranges.year;
-      else if (state === "mileage_max_km") delete filter.ranges.mileage;
-    }
-    const returnReview = data.return_review;
-    delete data.return_review;
-    const next: Record<string, string> = {
-      market: "currency",
-      currency: "budget",
-      budget: "review",
-    };
-    return this.prompt(userId, returnReview ? "review" : (next[state] ?? "review"), data);
+  /** The conditions live in the Mini App; the chat points to it and keeps the summary. */
+  private filtersReply(profile: Profile | null): Reply[] {
+    return packReplies(
+      "<b>Условия поиска</b>\n" +
+        "Настройте условия в приложении: автомобиль, бюджет, город и характеристики. Один набор условий работает для всех площадок Кыргызстана.\n\n" +
+        (profile
+          ? "Сохранённые условия откроются в приложении."
+          : "Перед сохранением отметьте согласие на хранение данных в приложении."),
+      [],
+      profile ? menu(profile) : START_BUTTONS,
+    );
   }
   private async catalogNote(profile: Profile | null = null): Promise<string> {
     const lines: string[] = [];
@@ -721,7 +414,7 @@ export class Conversation {
         lines.push("Ошибка этого источника; его данные могут быть неполными или устаревшими.");
     }
     if (!lines.length)
-      lines.push("Рынок поиска сейчас выключен. Выберите доступный рынок через /edit.");
+      lines.push("Рынок поиска сейчас выключен. Выберите доступный рынок через /filters.");
     lines.push(
       "Это не весь рынок. В выдаче — наблюдения за последние 48 часов; зарубежные объявления означают публикацию на сайте, а не подтверждённое наличие.",
     );
@@ -803,58 +496,7 @@ export class Conversation {
         step: "consent",
         outcome: "success",
       });
-      return this.begin(userId, null);
-    }
-    let action: string | null = null;
-    if (text.startsWith("draft:")) {
-      const parts = text.split(":");
-      if (
-        !draft ||
-        parts.length !== 4 ||
-        parts[1] !== draft[1].nonce ||
-        parts[2] !== draft[0] ||
-        draft[0] === "delete_confirm"
-      )
-        return packReplies(
-          "Эта кнопка устарела или не относится к вашему текущему шагу. Продолжите текущий ввод или /edit.",
-          [],
-        );
-      const state = draft[0];
-      action = parts[3]!;
-      let allowed = Object.keys(CHOICES[state] ?? {});
-      if (state.startsWith("cat_"))
-        allowed = Object.keys((draft[1].cat_actions as Record<string, unknown> | undefined) ?? {});
-      else if (state === "review" || state === "refine")
-        allowed = [
-          "save.monitor",
-          "save.silent",
-          "refine",
-          "catalog",
-          "limitations",
-          "back",
-          ...offeredFields().map((field) => `edit.${field}`),
-          ...Object.keys((draft[1].cat_actions as Record<string, unknown> | undefined) ?? {}),
-        ];
-      else if (state === "limitations") allowed = ["back"];
-      else if (state === "currency") allowed.push("USD", "KGS");
-      else if (state === "query") allowed.push("catalog", "manual");
-      else if (state === "budget") {
-        const presets =
-          (draft[1].pending_currency ?? draft[1].currency) === "KGS"
-            ? ["500000", "1000000", "1500000", "2000000", "3000000"]
-            : ["5000", "10000", "15000", "20000", "30000"];
-        allowed.push(...presets.map((value) => `preset.${value}`));
-      } else if (state === "market") {
-        const markets = enabledMarkets();
-        allowed.push(...markets, ...(markets.length > 1 ? ["ALL"] : []));
-      }
-      if (state === "query" || Object.hasOwn(OPTIONAL_DEFAULTS, state)) allowed.push("skip");
-      if (draft[1].return_review || ["budget", "query"].includes(state)) allowed.push("back");
-      if (!allowed.includes(action))
-        return packReplies(
-          "Эта кнопка не относится к текущему шагу. Продолжите ввод или /cancel.",
-          [],
-        );
+      return this.filtersReply(null);
     }
     if (text.startsWith("monitor:")) {
       const parts = text.split(":");
@@ -879,7 +521,7 @@ export class Conversation {
       this.setGoal(userId, "home");
       await this.record(userId, { event: "bot_started", flow: "navigation", step: "start" });
       return packReplies(
-        "<b>Autodom</b>\nВаш следующий автомобиль — с понятными фактами.\n\nПроверьте VIN, подберите автомобиль или расскажите о своём для продажи и обмена.\n\nПоиск и мониторинг бесплатны. Сохранённые данные остаются на месте.",
+        "<b>Autodom</b>\nВаш следующий автомобиль — с понятными фактами.\n\nНастройте условия поиска, проверьте VIN или расскажите о своём для продажи и обмена.\n\nПоиск и мониторинг бесплатны. Сохранённые данные остаются на месте.",
         [],
         START_BUTTONS,
       );
@@ -895,12 +537,11 @@ export class Conversation {
         },
       ];
     }
-    if (["/buy", "/begin", "/edit"].includes(command)) {
+    if ([FILTERS_ACTION, "/buy", "/begin", "/edit"].includes(command)) {
       this.setGoal(userId, "buy");
       if (draft?.[0] === "delete_confirm")
         return packReplies("Сначала подтвердите удаление или /cancel.", [], []);
       await this.record(userId, { event: "goal_selected", flow: "buyer", step: "buy" });
-      if (draft && draft[1].consent === true) return this.prompt(userId, draft[0], draft[1]);
       if (!profile) {
         await this.record(userId, {
           event: "profile_step",
@@ -910,26 +551,23 @@ export class Conversation {
         });
         return this.privacy(userId, null);
       }
-      if (command === "/buy")
-        return packReplies("Ваш поиск сохранён.\n\n" + profileText(profile), [], menu(profile));
-      return this.begin(userId, profile);
+      return this.filtersReply(profile);
     }
     if (command === "/cancel") {
       if (this.goals.get(userId) === "sell" && draft?.[0] !== "delete_confirm") {
         this.setGoal(userId, "home");
         return packReplies(
-          "Ввод по вашему авто отменён. Сохранённая карточка авто и черновик покупки не изменены.",
+          "Ввод по вашему авто отменён. Сохранённая карточка авто и условия покупки не изменены.",
           [],
           START_BUTTONS,
         );
       }
-      if (draft?.[0] !== "delete_confirm" && this.goals.get(userId) !== "buy") {
+      if (draft?.[0] !== "delete_confirm") {
         this.setGoal(userId, "home");
         return packReplies(
-          "Текущее действие отменено. Сохранённые данные не изменены." +
-            (draft ? " Черновик покупки сохранён; /buy — продолжить." : ""),
+          "Текущее действие отменено. Сохранённые данные не изменены.",
           [],
-          START_BUTTONS,
+          profile ? menu(profile) : START_BUTTONS,
         );
       }
       this.setGoal(userId, "home");
@@ -955,7 +593,7 @@ export class Conversation {
     }
     if (command === "/help")
       return packReplies(
-        "/start — три цели: VIN, продажа/обмен, покупка\n/vin — бесплатные корейские данные; можно отправить фото VIN\n/sell — продать или обменять своё авто на недвижимость / первоначальный взнос\n/mycar — сохранённое авто\n/orders — мои заказы, оплата и поддержка услуг\n/buy — открыть поиск или продолжить черновик\n/search — подходящие автомобили с фото\n/profile — сохранённые фильтры и их ограничения\n/edit — изменить фильтры\n/resume — включить бесплатный мониторинг\n/pause — остановить уведомления\n/quiet HH:MM-HH:MM — тихие часы (Бишкек); /quiet off — отключить\n/privacy — данные и согласие\n/tips — советы\n/status — каталог\n/cancel — отменить текущий ввод; сохранённые данные остаются\n/delete — удалить данные с подтверждением\n\nПокупка: валюта → бюджет → условия поиска → сохранение. Марка, модель и остальные фильтры необязательны. Уведомления — только по вашему выбору. Переключение целей сохраняет черновик покупки; незавершённый ввод своего авто сбрасывается, сохранённая карточка остаётся.",
+        "/start — цели: покупка, VIN, продажа и обмен\n/vin — бесплатные корейские данные; можно отправить фото VIN\n/sell — продать или обменять своё авто на недвижимость / первоначальный взнос\n/mycar — сохранённое авто\n/orders — мои заказы, оплата и поддержка услуг\n/filters — настроить условия поиска в приложении\n/search — подходящие автомобили с фото\n/profile — сохранённые условия и их ограничения\n/resume — включить бесплатный мониторинг\n/pause — остановить уведомления\n/quiet HH:MM-HH:MM — тихие часы (Бишкек); /quiet off — отключить\n/privacy — данные и согласие\n/tips — советы\n/status — каталог\n/cancel — отменить текущее действие; сохранённые данные остаются\n/delete — удалить данные с подтверждением\n\nПокупка: условия настраиваются в приложении — автомобиль, бюджет, город и характеристики. Уведомления — только по вашему выбору.",
         [],
         profile ? menu(profile) : START_BUTTONS,
       );
@@ -973,7 +611,7 @@ export class Conversation {
         if (this.deletions.size > 2048) this.deletions.delete(this.deletions.keys().next().value!);
       }
       return packReplies(
-        "Удалить карточку своего авто, фильтры покупки, незавершённый ввод, Telegram ID из профиля и настройки уведомлений из рабочей базы? После подтверждения мониторинг остановится. Резервные снимки могут содержать удалённые данные до 7 дней. Переписка в Telegram не удаляется. Отдельные записи заказов, платежей и заявок на возврат сохраняются; это удаление не отменяет заказ и не возвращает деньги.",
+        "Удалить карточку своего авто, условия покупки, незавершённый ввод, Telegram ID из профиля и настройки уведомлений из рабочей базы? После подтверждения мониторинг остановится. Резервные снимки могут содержать удалённые данные до 7 дней. Переписка в Telegram не удаляется. Отдельные записи заказов, платежей и заявок на возврат сохраняются; это удаление не отменяет заказ и не возвращает деньги.",
         [],
         [
           [
@@ -1015,7 +653,11 @@ export class Conversation {
       text.startsWith("page:")
     ) {
       if (!profile)
-        return packReplies("Сначала задайте бюджет и пожелания через /start.", [], START_BUTTONS);
+        return packReplies(
+          "Сначала настройте условия поиска в приложении: «Настроить поиск».",
+          [],
+          START_BUTTONS,
+        );
       if (command === "/profile" || command === "/search") this.setGoal(userId, "buy");
       if (command === "/profile")
         return packReplies(profileText(profile) + "\n\n" + FILTER_NOTE, [], menu(profile));
@@ -1046,7 +688,7 @@ export class Conversation {
         }
         profile = await this.store.setQuietHours(userId, start, end);
         if (!profile)
-          return packReplies("Сначала задайте бюджет и пожелания через /start.", [], START_BUTTONS);
+          return packReplies("Сначала настройте условия поиска в приложении.", [], START_BUTTONS);
         return packReplies("Тихие часы сохранены.\n\n" + profileText(profile), [], menu(profile));
       }
       if (command === "/pause") {
@@ -1071,7 +713,7 @@ export class Conversation {
           );
         if (draft)
           return packReplies(
-            "Сначала завершите изменение поиска или /cancel. Мониторинг остаётся на паузе.",
+            "Сначала завершите удаление или /cancel. Настройки мониторинга не изменены.",
             [],
           );
         if (!profile.monitoring) profile = await this.store.setMonitoring(userId, true);
@@ -1123,223 +765,10 @@ export class Conversation {
       if (command === "/sell" || command === "/mycar")
         return packReplies("Раздел своего авто сейчас недоступен.", [], START_BUTTONS);
     }
-    if (action === null && this.goals.get(userId) !== "buy")
-      return packReplies(
-        "Выберите цель. /buy продолжит сохранённый черновик покупки.",
-        [],
-        START_BUTTONS,
-      );
-    if (action !== null) this.setGoal(userId, "buy");
-    if (!draft)
-      return packReplies(
-        "Используйте /edit для изменения пожеланий или /search для подбора.",
-        [],
-        profile ? menu(profile) : START_BUTTONS,
-      );
-    const [state, data] = draft;
-    if (!profile && data.consent !== true) return this.privacy(userId, null);
-    if (
-      action === null &&
-      (text.includes(":") || text.startsWith("/") || /[\p{Cc}&&\p{ASCII}]/v.test(text))
-    )
-      return packReplies(
-        "Команда или кнопка не может быть значением поля. Продолжите ввод или /cancel.",
-        [],
-      );
-    if (
-      state.startsWith("cat_") ||
-      ((state === "review" || state === "refine") &&
-        action !== null &&
-        catalogActionAllowed(data, action))
-    ) {
-      if (action !== null && !catalogActionAllowed(data, action))
-        return packReplies("Эта кнопка не относится к текущему шагу.", [], []);
-      const updated = updateCatalog(state, data, action, text);
-      return this.prompt(userId, updated.state, updated.data, updated.error);
-    }
-    if (state === "limitations" && action === "back") return this.prompt(userId, "review", data);
-    if (action === "catalog")
-      return this.prompt(userId, state === "query" ? "cat_vehicles" : "cat_menu", {
-        ...data,
-        return_review: true,
-      });
-    if (state === "query" && action === "manual")
-      return this.prompt(
-        userId,
-        state,
-        data,
-        "Введите слова для поиска в названии. Этот запрос применяется дополнительно к справочнику; «Пока не знаю» снимает только текстовый запрос.",
-      );
-    if (state === "review" || state === "refine") {
-      if (action === "save.monitor" || action === "save.silent") {
-        const candidate = this.draftProfile(userId, data, profile);
-        candidate.monitoring = action === "save.monitor";
-        profile = await this.store.saveProfile(candidate);
-        await this.record(userId, {
-          event: "profile_saved",
-          flow: "buyer",
-          step: "saved",
-          outcome: "success",
-        });
-        await this.record(userId, {
-          event: profile.monitoring ? "monitoring_enabled" : "monitoring_paused",
-          flow: "buyer",
-          outcome: "success",
-        });
-        await this.store.clearDraft(userId);
-        return [
-          {
-            text:
-              action === "save.monitor"
-                ? "Поиск сохранён. Бесплатные уведомления о новых совпадениях и снижении цены включены. /pause — остановить."
-                : "Поиск сохранён без уведомлений. /resume — включить бесплатный мониторинг.",
-            buttons: [],
-          },
-          ...(await this.search(profile)),
-        ];
-      }
-      if (action === "limitations") return this.prompt(userId, "limitations", data);
-      if (action === "refine") return this.prompt(userId, "refine", data);
-      if (action === "back") return this.prompt(userId, "review", data);
-      if (action?.startsWith("edit."))
-        return this.prompt(userId, action.slice(5), { ...data, return_review: true });
-      return this.prompt(
-        userId,
-        state,
-        data,
-        "Выберите действие кнопкой: сохранить или уточнить условия.",
-      );
-    }
-    if (action === "back") {
-      delete data.pending_currency;
-      if (data.return_review) {
-        delete data.return_review;
-        return this.prompt(userId, "review", data);
-      }
-      const previous: Record<string, string> = {
-        currency: "market",
-        budget: "currency",
-        query: "budget",
-      };
-      return this.prompt(userId, previous[state]!, data);
-    }
-    const unknown = [
-      "любые",
-      "любой",
-      "любая",
-      "не знаю",
-      "пока не знаю",
-      "все",
-      "пропустить",
-    ].includes(text.toLowerCase());
-    if (
-      action === "skip" ||
-      (action === null && unknown && (state === "query" || Object.hasOwn(OPTIONAL_DEFAULTS, state)))
-    ) {
-      data[state] = Object.hasOwn(OPTIONAL_DEFAULTS, state)
-        ? OPTIONAL_DEFAULTS[state as keyof typeof OPTIONAL_DEFAULTS]
-        : "";
-      return this.advance(userId, state, data);
-    }
-    const value =
-      state === "budget" && action?.startsWith("preset.") ? action.slice(7) : (action ?? text);
-    if ([...value].length > 160)
-      return this.prompt(
-        userId,
-        state,
-        data,
-        "Слишком длинный ввод: максимум 160 символов, для города — 80.",
-      );
-    if (state === "market") {
-      const market = value.toUpperCase();
-      const markets = enabledMarkets();
-      if (!(markets.length > 1 ? [...markets, "ALL"] : markets).includes(market))
-        return this.prompt(userId, state, data, "Выберите включённый рынок кнопкой.");
-      data.market = market;
-    } else if (state === "currency") {
-      const aliases: Record<string, string> = { СОМ: "KGS", СОМЫ: "KGS", $: "USD" };
-      const currency = aliases[value.toUpperCase()] ?? value.toUpperCase();
-      if (!["USD", "KGS"].includes(currency))
-        return this.prompt(userId, state, data, "Выберите USD или KGS.");
-      if (data.return_review && currency !== data.currency)
-        return this.prompt(userId, "budget", { ...data, pending_currency: currency });
-      data.currency = currency;
-    } else if (state === "budget") {
-      try {
-        [data.minimum, data.maximum] = parseBudget(value);
-      } catch (error) {
-        return this.prompt(
-          userId,
-          state,
-          data,
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-      if (Object.hasOwn(data, "pending_currency")) {
-        data.currency = data.pending_currency;
-        delete data.pending_currency;
-      }
-    } else if (state === "query") {
-      if (value.split(",").length > 5 || value.split(",").some((part) => !normalize(part)))
-        return this.prompt(
-          userId,
-          state,
-          data,
-          "Укажите до пяти непустых вариантов с буквами или цифрами через запятую, не более 160 символов, либо выберите «Пока не знаю».",
-        );
-      data.query = value;
-    } else if (Object.hasOwn(CHOICES, state)) {
-      const choices = CHOICES[state]!;
-      let selected = value.toLowerCase();
-      if (!Object.hasOwn(choices, selected))
-        selected =
-          Object.entries(choices).find(([, label]) => label.toLowerCase() === selected)?.[0] ?? "";
-      if (!Object.hasOwn(choices, selected))
-        return this.prompt(userId, state, data, "Выберите один из вариантов кнопкой.");
-      data[state] = state === "allow_import" ? selected === "yes" : selected;
-    } else if (state === "city") {
-      if ([...value].length > 80 || !/\p{L}/u.test(normalizeCity(value)))
-        return this.prompt(
-          userId,
-          state,
-          data,
-          "Введите название города с буквами, не более 80 символов, или пропустите.",
-        );
-      data.city = value;
-    } else if (state === "year_min" || state === "mileage_max_km") {
-      const digits = state === "mileage_max_km" ? value.replace(/[ \u00a0]/g, "") : value;
-      const minimum = state === "year_min" ? 1900 : 0;
-      const maximum = state === "year_min" ? new Date().getUTCFullYear() + 1 : 10_000_000;
-      if (!/^[0-9]+$/.test(digits) || Number(digits) < minimum || Number(digits) > maximum)
-        return this.prompt(
-          userId,
-          state,
-          data,
-          `Введите целое число от ${minimum} до ${maximum} или пропустите.`,
-        );
-      data[state] = Number(digits);
-    } else if (state === "purchase_by") {
-      const dotted = /^([0-9]{2})\.([0-9]{2})\.([0-9]{4})$/.exec(value);
-      const iso = dotted ? `${dotted[3]}-${dotted[2]}-${dotted[1]}` : value;
-      const date = new Date(iso + "T00:00:00Z");
-      if (
-        !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(iso) ||
-        iso.startsWith("0000") ||
-        !Number.isFinite(date.getTime()) ||
-        date.toISOString().slice(0, 10) !== iso
-      )
-        return this.prompt(
-          userId,
-          state,
-          data,
-          "Введите существующую календарную дату ГГГГ-ММ-ДД или ДД.ММ.ГГГГ, либо пропустите.",
-        );
-      data[state] = iso;
-    } else
-      return packReplies(
-        "Черновик использует прежний шаг. /edit — начать ввод заново; /cancel — отменить.",
-        [],
-      );
-    return this.advance(userId, state, data);
+    return packReplies(
+      "Выберите цель. Условия поиска настраиваются в приложении.",
+      [],
+      profile ? menu(profile) : START_BUTTONS,
+    );
   }
 }

@@ -1,23 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { catalogFilterSchema, emptyCatalogFilter } from "../src/catalog-filter.js";
+import { catalogChoicesSchema } from "../src/catalog-filter.js";
 
-describe("catalog filter validation", () => {
-  it("rejects unscoped vehicles and malformed or unbounded criteria before persistence", () => {
-    const choice = { id: "lookup", value: "Camry", label: "Camry" };
+describe("catalogue lookup choices", () => {
+  it("keeps the identifier, the canonical value and the label", () => {
+    expect(catalogChoicesSchema.parse([{ id: "12", value: "Camry", label: "Camry" }])).toEqual([
+      { id: "12", value: "Camry", label: "Camry" },
+    ]);
+  });
+
+  it("rejects choices the catalogue cannot identify", () => {
+    const bell = String.fromCharCode(7);
     for (const changed of [
-      { vehicles: [{ model: choice }] },
-      { vehicles: [{ make: choice, modification: choice }] },
-      { vehicles: Array.from({ length: 6 }, () => ({ make: choice })) },
-      { options: { untrusted_key: [choice] } },
-      { options: { gearbox: [{ ...choice, value: "x".repeat(257) }] } },
-      { ranges: { engine_volume: { min: 3, max: 2 } } },
-      { ranges: { mileage: { min: "100", max: null } } },
-      { ranges: { year: { min: 2020.5, max: null } } },
-      { ranges: { engine_volume: { min: Number.NaN, max: null } } },
-      { below_market_percent: 12 },
+      { id: "", value: "Camry", label: "Camry" },
+      { id: "12", value: "   ", label: "Camry" },
+      { id: "12", value: `Cam${bell}ry`, label: "Camry" },
+      { id: "12", value: "Camry", label: `Camry${bell}` },
+      { id: "x".repeat(129), value: "Camry", label: "Camry" },
+      { id: "12", value: "x".repeat(257), label: "Camry" },
+      { id: "12", value: "Camry" },
+      { id: "12", value: "Camry", label: "Camry", extra: true },
     ])
-      expect(catalogFilterSchema.safeParse({ ...emptyCatalogFilter(), ...changed }).success).toBe(
-        false,
-      );
+      expect(catalogChoicesSchema.safeParse([changed]).success).toBe(false);
+  });
+
+  it("keeps an empty catalogue valid", () => {
+    expect(catalogChoicesSchema.parse([])).toEqual([]);
   });
 });

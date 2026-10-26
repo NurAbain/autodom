@@ -11,6 +11,7 @@ import {
   MARKETS,
   money,
 } from "@autodom/core";
+import type { CatalogFieldKey, CatalogLookup } from "@autodom/core/catalog-filter";
 import { normalizeVin, VIN_PROVIDERS, type VinLookup } from "@autodom/core/vin";
 import { VIN_ARCHIVE_PHOTO_MAX_BYTES, type VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import {
@@ -27,12 +28,18 @@ import {
   PURCHASE_REASONS,
 } from "./analytics-contract.js";
 import type { BotMode } from "./bot-mode.js";
-import { listingText, type Reply } from "./conversation.js";
+import { listingText, privacyText, type Reply } from "./conversation.js";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
+import {
+  draftToProfile,
+  filterChoices,
+  filterProfileView,
+  parseFilterDraft,
+} from "./miniapp-filter.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
 import {
   CARFAX_REPORT_FINIK_MINOR,
@@ -41,6 +48,7 @@ import {
 } from "./payment-text.js";
 import { PaymentRequestError, type PaymentService } from "./payments.js";
 import { handlePaymentRequest } from "./payments-http.js";
+import { CatalogPendingError, vehicleCatalog } from "./vehicle-catalog.js";
 import { confirmedVinPhotoCount, withoutVinPhotos } from "./vin-photo-access.js";
 import { confirmedVinReportKind, VIN_NOT_ENABLED } from "./vin-text.js";
 import type { WebReportAuth } from "./web-report-auth.js";
@@ -130,7 +138,7 @@ function carView(listing: Listing, currency: string): MiniAppCar {
 }
 
 export interface MiniAppServerOptions {
-  store: Pick<Store, "getProfile" | "getListing">;
+  store: Pick<Store, "getProfile" | "getListing" | "saveProfile" | "countMatches">;
   token: string;
   publicUrl: string;
   host: string;
@@ -151,6 +159,8 @@ export interface MiniAppServerOptions {
   getVinArchivePhoto?: VinArchivePhotoLookup;
   /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
   dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
+  /** Make and model suggestions; the parser owns the catalogue. */
+  catalog?: CatalogLookup;
   payments?: PaymentService;
   analytics?: AnalyticsRecorder;
   webReportAuth?: WebReportAuth;
@@ -201,6 +211,9 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
   const apiRoutes = [
     "/miniapp/api/config",
     "/miniapp/api/car",
+    "/miniapp/api/filter",
+    "/miniapp/api/filter/suggest",
+    "/miniapp/api/filter/preview",
     "/miniapp/api/vin",
     "/miniapp/api/vin/archive-photo",
     "/miniapp/api/dialogue",
@@ -434,9 +447,95 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         }
         if (
           mode === "vin" &&
-          (url.pathname === "/miniapp/api/car" || url.pathname === "/miniapp/api/dialogue")
+          (url.pathname === "/miniapp/api/car" ||
+            url.pathname === "/miniapp/api/dialogue" ||
+            url.pathname.startsWith("/miniapp/api/filter"))
         )
           throw new RequestError(404, "В этом боте доступна только проверка VIN и отчёты.");
+        if (url.pathname.startsWith("/miniapp/api/filter")) {
+          if (url.pathname === "/miniapp/api/filter/suggest") {
+            if (request.method !== "GET") {
+              response.setHeader("Allow", "GET");
+              throw new RequestError(405, "Подсказки доступны только через GET.");
+            }
+            const key = url.searchParams.get("key") ?? "";
+            const parent = url.searchParams.get("parent") ?? undefined;
+            if (
+              (key !== "make" && key !== "model") ||
+              (key === "model" ? !/^[1-9]\d{0,17}$/u.test(parent ?? "") : parent !== undefined)
+            )
+              throw new RequestError(400, "Недопустимый запрос справочника.");
+            try {
+              const items = await (options.catalog ?? vehicleCatalog).getOptions(
+                key as CatalogFieldKey,
+                parent,
+              );
+              respond(response, 200, { state: "ready", items });
+            } catch (error) {
+              if (error instanceof CatalogPendingError) {
+                response.setHeader("Retry-After", "3");
+                respond(response, 202, { state: "loading" });
+                return;
+              }
+              throw new RequestError(
+                503,
+                "Справочник временно недоступен. Задайте марку и модель текстом.",
+              );
+            }
+            return;
+          }
+          if (url.pathname === "/miniapp/api/filter/preview") {
+            if (request.method !== "POST") {
+              response.setHeader("Allow", "POST");
+              throw new RequestError(405, "Проверка условий доступна только через POST.");
+            }
+            if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
+            const body = await readFlatJson(request, 8192);
+            const parsed = parseFilterDraft(body);
+            if (!parsed.ok) throw new RequestError(400, parsed.message);
+            const previous = await options.store.getProfile(user.id);
+            const matches = await options.store.countMatches(
+              draftToProfile(user.id, parsed.draft, previous),
+            );
+            respond(response, 200, { matches });
+            return;
+          }
+          if (request.method === "GET") {
+            const profile = await options.store.getProfile(user.id);
+            respond(response, 200, {
+              privacy: privacyText(),
+              profile: profile ? filterProfileView(profile) : null,
+              ...filterChoices(),
+            });
+            return;
+          }
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "GET, POST");
+            throw new RequestError(405, "Условия поиска доступны через GET и POST.");
+          }
+          if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
+          const body = await readFlatJson(request, 8192);
+          if (body.consent !== true)
+            throw new RequestError(400, "Нужно согласие на хранение данных.");
+          const parsed = parseFilterDraft(body);
+          if (!parsed.ok) throw new RequestError(400, parsed.message);
+          const previous = await options.store.getProfile(user.id);
+          let saved: Awaited<ReturnType<typeof options.store.saveProfile>>;
+          try {
+            saved = await options.store.saveProfile(
+              draftToProfile(user.id, parsed.draft, previous),
+            );
+          } catch {
+            throw new RequestError(400, "Условия не сохранены: проверьте бюджет, год и пробег.");
+          }
+          const matches = await options.store.countMatches(saved);
+          respond(response, 200, {
+            revision: saved.revision,
+            monitoring: saved.monitoring,
+            matches,
+          });
+          return;
+        }
         if (url.pathname.startsWith("/miniapp/api/orders")) {
           if (reportBotUrl) {
             respond(response, 409, {
