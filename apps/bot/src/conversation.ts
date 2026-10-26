@@ -93,6 +93,16 @@ export function privacyText(): string {
     "Заказы и платёжная поддержка остаются в @autokgbot, отдельно от бесплатного поиска. В заказе сохраняются Telegram ID покупателя, продавец, исполнитель, состав, цена, принятые условия, идентификаторы и серверные подтверждения оплаты, а также заявки на возврат. /delete не удаляет эти финансовые записи. Для счёта Finik получает номер, описание и сумму заказа, но не Telegram ID, контакты или профиль поиска. Создание счёта не означает оплату; заявка на возврат не означает возврат денег. Условия и поддержка конкретного заказа — /orders."
   );
 }
+/** The search query as alternatives: "Toyota Camry, Kia K5". */
+export function queryLabel(query: string): string {
+  return query
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(", ");
+}
+
 export function profileText(profile: Profile): string {
   const budget =
     profile.budget_min_minor === 0
@@ -116,7 +126,7 @@ export function profileText(profile: Profile): string {
       ? `Цель (заметка): ${USE_CASES[profile.use_case as keyof typeof USE_CASES] ?? "не задана"}; дата покупки (заметка): ${profile.purchase_by ? escapeHtml(profile.purchase_by) : "не задана"}\n`
       : "";
   return (
-    `Рынок: <b>${MARKETS[profile.market as keyof typeof MARKETS]}</b>\nБюджет: <b>${budget}</b> · ${BUDGET_SCOPES[profile.budget_scope as keyof typeof BUDGET_SCOPES]}\nТекстовый запрос: ${profile.query ? escapeHtml(profile.query) : "не задан"}\n` +
+    `Рынок: <b>${MARKETS[profile.market as keyof typeof MARKETS]}</b>\nБюджет: <b>${budget}</b> · ${BUDGET_SCOPES[profile.budget_scope as keyof typeof BUDGET_SCOPES]}\nАвтомобиль: ${profile.query ? escapeHtml(queryLabel(profile.query)) : "не задан"}\n` +
     (profile.city ? `Город объявления: ${escapeHtml(profile.city)}\n` : "") +
     (profile.body_type
       ? `Кузов: ${BODY_TYPES[profile.body_type as keyof typeof BODY_TYPES]}\n`

@@ -251,6 +251,10 @@ function parseListing(item: ObjectValue, id: number, categoryMake: string): List
     transmission: attrs.get("коробка передач") ?? attrs.get("коробка") ?? "",
     body_type: attrs.get("тип кузова") ?? attrs.get("кузов") ?? "",
     city: text(item.city),
+    catalog_attributes: {
+      ...(make ? { make } : {}),
+      ...(model ? { model } : {}),
+    },
     availability: "Опубликовано",
     published_at: publishedAt,
     photo_url: photos[0] ?? null,

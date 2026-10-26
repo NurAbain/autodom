@@ -37,6 +37,20 @@ it("does not interpret empty alternatives or punctuation as match-all", () => {
   expect(matches({ ...profile, query: " \t " }, car)).toBe(true);
 });
 
+it("matches the make and model the marketplace states in the catalogue attributes", () => {
+  const selected = { ...profile, query: "toyota camry" };
+  const withoutMakeInTitle = {
+    ...car,
+    title: "Camry 2.0, автомат",
+    catalog_attributes: { make: "Toyota", model: "Camry" },
+  };
+  expect(matches(selected, withoutMakeInTitle)).toBe(true);
+  expect(matches(selected, { ...withoutMakeInTitle, catalog_attributes: { make: "Kia" } })).toBe(
+    false,
+  );
+  expect(matches(selected, { ...withoutMakeInTitle, catalog_attributes: {} })).toBe(false);
+});
+
 it.each<[string, number, boolean]>([
   ["", 0, false],
   ["0", 0, false],
