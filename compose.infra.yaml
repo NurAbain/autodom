@@ -40,8 +40,8 @@ networks:
 
 volumes:
   postgres-data:
-    name: ${AUTODOM_POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres-data}
+    name: ${AUTODOM_POSTGRES_VOLUME:-autodom_postgres_data}
     external: true
   redis-data:
-    name: ${AUTODOM_REDIS_VOLUME:-${COMPOSE_PROJECT_NAME}_redis-data}
+    name: ${AUTODOM_REDIS_VOLUME:-autodom_redis_data}
     external: true

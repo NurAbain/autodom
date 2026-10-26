@@ -86,5 +86,5 @@ networks:
 
 volumes:
   snapshots:
-    name: ${AUTODOM_SNAPSHOTS_VOLUME:-${COMPOSE_PROJECT_NAME}_snapshots}
+    name: ${AUTODOM_SNAPSHOTS_VOLUME:-autodom_snapshots}
     external: true
