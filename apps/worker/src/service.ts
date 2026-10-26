@@ -2,7 +2,7 @@ import type { Server } from "node:http";
 import type { ProxyRoute, Settings } from "@autodom/core";
 import { maintain } from "@autodom/runtime/maintenance";
 import { Metrics } from "@autodom/runtime/metrics";
-import { runtimeStatus } from "@autodom/runtime/status";
+import { runtimeHealth } from "@autodom/runtime/status";
 import { ProxyTransport } from "@autodom/sources";
 import type { Store } from "@autodom/storage";
 import type { Logger } from "pino";
@@ -56,7 +56,7 @@ export async function runWorkerService(
       : undefined;
     server = await metrics.serve(
       port,
-      async () => !abort.signal.aborted && (await runtimeStatus(store, settings, "worker")).healthy,
+      async () => !abort.signal.aborted && (await runtimeHealth(store, settings, "worker")),
       catalogRoute,
     );
     server.on("error", (error) => abort.abort(error));
