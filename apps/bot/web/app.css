@@ -256,6 +256,7 @@ details[open] > summary { margin-bottom: 14px; }
 .filter-privacy > summary { color: var(--muted); font-size: 13px; }
 .filter-privacy .reply-text { font-size: 13px; }
 .filter-suggest { margin-top: 12px; }
+.filter-suggest > .footnote { margin: 10px 0; }
 .filter-suggest-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 46vh; overflow-y: auto; }
 .filter-suggest-list > .button { min-width: 0; overflow-wrap: anywhere; text-align: left; }
 .filter-suggest-list > .back-link { grid-column: 1 / -1; }
