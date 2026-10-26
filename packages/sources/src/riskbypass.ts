@@ -25,7 +25,14 @@ const taskResultSchema = z.object({
     .trim()
     .toUpperCase(),
   result: z.unknown().optional(),
+  error: z.string().max(512).optional(),
 });
+// The provider asks for another exit when it refuses the current one; that exit
+// stays unusable, so the caller must switch routes instead of parking a cooldown.
+const PROXY_REJECTED = /change your proxy/iu;
+const MAX_CONSECUTIVE_POLL_ERRORS = 3;
+
+export type RiskBypassFailureReason = "proxy_rejected" | "solver_failed" | "declined" | "transport";
 const sessionSchema = z.object({
   cookies: z.record(z.string(), z.string()),
   user_agent: z.string().optional(),
@@ -38,9 +45,11 @@ export interface CloudflareSession {
 }
 
 export class RiskBypassError extends SourceError {
-  constructor(message: string) {
+  readonly reason: RiskBypassFailureReason | undefined;
+  constructor(message: string, reason?: RiskBypassFailureReason) {
     super(message);
     this.name = "RiskBypassError";
+    this.reason = reason;
   }
 }
 
@@ -122,17 +131,15 @@ function waitForPoll(signal: AbortSignal): Promise<void> {
 
 export class RiskBypass {
   readonly #apiKey: string;
-  readonly #dispatcher: Dispatcher;
+  readonly #dispatcher: Dispatcher | undefined;
 
-  constructor(options: { apiKey: string; dispatcher: Dispatcher }) {
-    if (
-      typeof options.apiKey !== "string" ||
-      !/^[\x21-\x7E]{1,4096}$/.test(options.apiKey) ||
-      !options.dispatcher
-    ) {
-      throw new RiskBypassError("RiskBypass requires an API key and dispatcher");
+  constructor(options: { apiKey: string; dispatcher?: Dispatcher }) {
+    if (typeof options.apiKey !== "string" || !/^[\x21-\x7E]{1,4096}$/.test(options.apiKey)) {
+      throw new RiskBypassError("RiskBypass requires an API key");
     }
     this.#apiKey = options.apiKey;
+    // The control plane talks to the provider directly. A dedicated ISP route is
+    // not a prerequisite for renewal, and a datacenter account answers 407 here.
     this.#dispatcher = options.dispatcher;
   }
 
@@ -143,7 +150,7 @@ export class RiskBypass {
     try {
       solveSignal.throwIfAborted();
       // A submission can already be chargeable even if its response is lost. Never retry it.
-      const submitted = submissionSchema.parse(
+      const submitted = submissionSchema.safeParse(
         await this.#request("/task/submit", solveSignal, {
           task_type: "cloudflare_waf",
           target_url: targetUrl.href,
@@ -152,10 +159,26 @@ export class RiskBypass {
           proxy: proxyUrl.href.replace(/\/$/, ""),
         }),
       );
+      if (!submitted.success)
+        throw new RiskBypassError("RiskBypass declined the task submission", "declined");
+      let pollErrors = 0;
       while (true) {
-        const data = taskResultSchema.parse(
-          await this.#request(`/task/result/${submitted.task_id}`, solveSignal),
-        );
+        let body: unknown;
+        try {
+          body = await this.#request(`/task/result/${submitted.data.task_id}`, solveSignal);
+        } catch {
+          solveSignal.throwIfAborted();
+          pollErrors++;
+          if (pollErrors >= MAX_CONSECUTIVE_POLL_ERRORS)
+            throw new RiskBypassError("RiskBypass polling failed repeatedly", "transport");
+          await waitForPoll(solveSignal);
+          continue;
+        }
+        pollErrors = 0;
+        const polled = taskResultSchema.safeParse(body);
+        if (!polled.success)
+          throw new RiskBypassError("RiskBypass returned an unreadable task status", "transport");
+        const data = polled.data;
         switch (data.status) {
           case "QUEUED":
           case "RUNNING":
@@ -164,20 +187,32 @@ export class RiskBypass {
           case "SUCCESS":
             return parseSession(data.result);
           case "FAILED":
-            throw new SourceError(
-              "RiskBypass could not establish a session on the configured proxy",
-            );
           case "NOT_FOUND":
-            throw new RiskBypassError("RiskBypass task failed");
+            if (PROXY_REJECTED.test(data.error ?? ""))
+              throw new RiskBypassError(
+                "RiskBypass refused the exit IP of the configured proxy",
+                "proxy_rejected",
+              );
+            throw new RiskBypassError(
+              "RiskBypass could not establish a session on the configured proxy",
+              "solver_failed",
+            );
           default:
-            throw new RiskBypassError("RiskBypass returned an unknown task status");
+            throw new RiskBypassError(
+              "RiskBypass returned an unknown task status",
+              "solver_failed",
+            );
         }
       }
     } catch (error) {
-      if (solveSignal.aborted) throw new RiskBypassError("RiskBypass solve was interrupted");
+      if (solveSignal.aborted)
+        throw new RiskBypassError("RiskBypass solve was interrupted", "transport");
       if (error instanceof SourceError) throw error;
       // Transport and abort errors can contain URLs, credentials or provider bodies.
-      throw new RiskBypassError("RiskBypass solve failed or was interrupted");
+      throw new RiskBypassError(
+        `RiskBypass solve failed or was interrupted (${error instanceof Error ? error.name : "Error"})`,
+        "transport",
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -202,13 +237,13 @@ export class RiskBypass {
             : { "Cache-Control": "no-cache" }),
         },
         ...(submission ? { body: JSON.stringify(submission) } : {}),
-        dispatcher: this.#dispatcher,
+        ...(this.#dispatcher ? { dispatcher: this.#dispatcher } : {}),
         redirect: "manual",
         signal: requestSignal,
       });
       if (!response.ok) {
         await response.body?.cancel().catch(() => undefined);
-        throw new RiskBypassError("RiskBypass API request failed");
+        throw new RiskBypassError("RiskBypass API request failed", "transport");
       }
       const data = await readJson(response);
       requestSignal.throwIfAborted();

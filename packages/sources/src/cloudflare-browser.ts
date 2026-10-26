@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIPv4 } from "node:net";
+import { setTimeout as delay } from "node:timers/promises";
 import { type ProxyRoute, SourceError } from "@autodom/core";
 import { Impit, type ImpitOptions, type ImpitResponse } from "impit";
 import { Cookie, CookieJar } from "tough-cookie";
@@ -44,6 +45,37 @@ function publicIPv4(address: string): boolean {
   );
 }
 
+const GATEWAY_DNS_TTL_MS = 5 * 60_000;
+const GATEWAY_DNS_ATTEMPTS = 3;
+const GATEWAY_DNS_RETRY_MS = 500;
+const gatewayCache = new Map<string, { expiresAt: number; addresses: string[] }>();
+
+// The gateway hostname resolves to several public addresses. A transient resolver
+// failure must not abort a whole session, so the lookup is retried and cached.
+async function gatewayAddresses(hostname: string): Promise<string[]> {
+  const cached = gatewayCache.get(hostname);
+  if (cached && cached.expiresAt > Date.now()) return cached.addresses;
+  let failure: unknown;
+  for (let attempt = 0; attempt < GATEWAY_DNS_ATTEMPTS; attempt++) {
+    try {
+      const addresses = [
+        ...new Set(
+          (await lookup(hostname, { family: 4, all: true }))
+            .map(({ address }) => address)
+            .filter(publicIPv4),
+        ),
+      ].sort();
+      if (!addresses.length) throw new Error("no public IPv4 gateway");
+      gatewayCache.set(hostname, { expiresAt: Date.now() + GATEWAY_DNS_TTL_MS, addresses });
+      return addresses;
+    } catch (error) {
+      failure = error;
+      if (attempt + 1 < GATEWAY_DNS_ATTEMPTS) await delay(GATEWAY_DNS_RETRY_MS);
+    }
+  }
+  throw failure instanceof Error ? failure : new Error("gateway lookup failed");
+}
+
 async function pinProxy(route: ProxyRoute, page: number, affinity?: string): Promise<URL> {
   try {
     const proxy = new URL(route.urlFor(page));
@@ -52,14 +84,7 @@ async function pinProxy(route: ProxyRoute, page: number, affinity?: string): Pro
     if (!route.authorization.startsWith("Basic ") || separator < 1) throw new Error();
     proxy.username = credentials.slice(0, separator);
     proxy.password = credentials.slice(separator + 1);
-    const addresses = [
-      ...new Set(
-        (await lookup(proxy.hostname, { family: 4, all: true }))
-          .map(({ address }) => address)
-          .filter(publicIPv4),
-      ),
-    ].sort();
-    if (!addresses.length) throw new Error();
+    const addresses = await gatewayAddresses(proxy.hostname);
     // This pins a gateway, not necessarily the provider's downstream exit IP.
     const selection = createHash("sha256")
       .update(affinity ?? proxy.href)
