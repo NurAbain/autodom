@@ -25,6 +25,11 @@ function safePhotoUrl(source: string, value: unknown): string | null {
   }
 }
 
+/** Content-Security-Policy image sources: exactly the hosts the photo allowlist accepts. */
+export function photoCspSources(): string[] {
+  return [...new Set(Object.values(PHOTO_HOSTS).flat())].map((host) => `https://${host}`);
+}
+
 export function listingPhotoUrls(listing: Listing): string[] {
   const photos: string[] = [];
   const cover = safePhotoUrl(listing.source, listing.photo_url);

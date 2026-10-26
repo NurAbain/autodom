@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 import { ProductAnalytics } from "./analytics.js";
 import {
   loadBotMode,
+  loadFullBotUsername,
   loadReportBotUrl,
   telegramIdentity,
   telegramRecipientKey,
@@ -127,6 +128,7 @@ export async function main(
     const publicUrl = miniAppUrl(env);
     const mode = loadBotMode(env);
     const reportBotUrl = loadReportBotUrl(env);
+    const fullBotUsername = loadFullBotUsername(env);
     if (env.AUTODOM_ANALYTICS_KEY)
       analytics = new ProductAnalytics(settings.database_url, env.AUTODOM_ANALYTICS_KEY, mode);
     const checkVin = createVinApiLookup(env, abort.signal);
@@ -162,6 +164,7 @@ export async function main(
         const bot = createTelegramBot(store, token, {
           conversation,
           mode,
+          ...(fullBotUsername ? { fullBotUsername } : {}),
           ...(analytics ? { analytics } : {}),
           ...(reportBotUrl ? { reportBotUrl } : {}),
           ...(payments ? { payments } : {}),

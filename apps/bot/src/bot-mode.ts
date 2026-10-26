@@ -8,6 +8,15 @@ export function loadBotMode(env: Environment = process.env): BotMode {
   return mode;
 }
 
+/** Telegram username of the full Autodom bot, used for hand-off links from the public site. */
+export function loadFullBotUsername(env: Environment = process.env): string | undefined {
+  const value = env.AUTODOM_FULL_BOT_USERNAME?.trim();
+  if (!value) return undefined;
+  if (!/^[A-Za-z][A-Za-z0-9_]{4,31}$/u.test(value))
+    throw new Error("AUTODOM_FULL_BOT_USERNAME must be a Telegram bot username");
+  return value;
+}
+
 export function loadReportBotUrl(env: Environment = process.env): string | undefined {
   const value = env.AUTODOM_REPORT_BOT_URL?.trim();
   if (!value) return undefined;

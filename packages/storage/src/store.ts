@@ -34,6 +34,7 @@ import {
   type CatalogVehicleKey,
   catalogFilterSchema,
 } from "@autodom/core/catalog-filter";
+import type { CatalogSort } from "@autodom/core/catalog-query";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
   and,
@@ -68,6 +69,15 @@ import {
 const LOCK_NAMESPACE = 0x4155544f;
 const FRESH_SECONDS = 48 * 3600;
 const nowSeconds = () => Date.now() / 1000;
+
+/** One observed price of a listing; a missing price stays missing instead of becoming zero. */
+export interface PricePoint {
+  observed_at: number;
+  price_usd_minor: number | null;
+  price_kgs_minor: number | null;
+  original_price_minor: number | null;
+  original_currency: string;
+}
 const lockId = (key: string) =>
   createHash("sha256").update(`autodom:postgres:v1:${key}`).digest().readInt32BE(0);
 type Session = {
@@ -732,6 +742,71 @@ export class Store {
       .from(listings)
       .where(this.searchWhere(profile));
     return row!.value;
+  }
+  /**
+   * Catalogue read with an explicit order. The public site needs price and mileage
+   * ordering; the bot keeps its own freshness-first cursor over `search`.
+   */
+  async searchCatalog(
+    profile: Profile,
+    options: { limit: number; offset: number; sort: CatalogSort },
+  ): Promise<Listing[]> {
+    if (options.limit <= 0) return [];
+    if (options.offset < 0) throw new Error("Offset must be nonnegative");
+    const price = profile.currency === "USD" ? listings.price_usd_minor : listings.price_kgs_minor;
+    const order: SQL[] =
+      options.sort === "price_asc"
+        ? [asc(price), desc(listings.last_seen), asc(listings.id)]
+        : options.sort === "price_desc"
+          ? [sql`${price} DESC NULLS LAST`, desc(listings.last_seen), asc(listings.id)]
+          : options.sort === "mileage_asc"
+            ? [
+                sql`${listings.mileage_km} ASC NULLS LAST`,
+                desc(listings.last_seen),
+                asc(listings.id),
+              ]
+            : [desc(listings.last_seen), desc(listings.first_seen), asc(listings.id)];
+    return (
+      await this.database
+        .select()
+        .from(listings)
+        .where(this.searchWhere(profile))
+        .orderBy(...order)
+        .limit(options.limit)
+        .offset(options.offset)
+    ).map(decodeListing);
+  }
+  /** Observed prices of one listing, oldest first; unknown prices stay unknown. */
+  async priceHistory(listingId: string, limit = 24): Promise<PricePoint[]> {
+    if (!listingId || limit <= 0) return [];
+    const rows = await this.database
+      .select({
+        observed_at: events.observed_at,
+        data: events.data,
+      })
+      .from(events)
+      .where(and(eq(events.listing_id, listingId), eq(events.kind, "price_change")))
+      .orderBy(desc(events.observed_at))
+      .limit(limit);
+    return rows.reverse().map((row) => ({
+      observed_at: row.observed_at,
+      price_usd_minor: row.data.price_usd_minor,
+      price_kgs_minor: row.data.price_kgs_minor,
+      original_price_minor: row.data.original_price_minor,
+      original_currency: row.data.original_currency || "",
+    }));
+  }
+  /** Makes of the same catalogue the public site shows, with the number of matching cars. */
+  async brandFacets(profile: Profile, limit = 24): Promise<{ value: string; count: number }[]> {
+    const make = sql`${listings.data}->'catalog_attributes'->>'make'`;
+    const rows = await this.database
+      .select({ value: sql<string>`${make}`, count: count() })
+      .from(listings)
+      .where(and(this.searchWhere(profile), sql`${make} <> ''`))
+      .groupBy(make)
+      .orderBy(desc(count()), asc(make))
+      .limit(limit);
+    return rows.map((row) => ({ value: row.value, count: row.count }));
   }
   async getDraft(userId: number): Promise<[string, Record<string, unknown>] | null> {
     const [row] = await this.database.select().from(drafts).where(eq(drafts.user_id, userId));

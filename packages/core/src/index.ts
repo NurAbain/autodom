@@ -1,4 +1,5 @@
 export * from "./budget.js";
+export * from "./catalog-query.js";
 export * from "./config.js";
 export * from "./matching.js";
 export * from "./models.js";

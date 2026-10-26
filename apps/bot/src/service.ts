@@ -23,6 +23,7 @@ import { PaymentAnalytics } from "./analytics-payments.js";
 import {
   type BotMode,
   loadFullBotUrl,
+  loadFullBotUsername,
   telegramIdentity,
   telegramRecipientKey,
 } from "./bot-mode.js";
@@ -31,6 +32,7 @@ import { startMiniAppServer } from "./miniapp-server.js";
 import { monitor } from "./monitor.js";
 import type { PaymentService } from "./payments.js";
 import { loadPaymentListenerSettings, startPaymentListener } from "./payments-http.js";
+import { startSiteServer } from "./site-server.js";
 import { type AutodomBot, configureTelegramBot, sendReplies } from "./telegram.js";
 import { WebReportAuth } from "./web-report-auth.js";
 
@@ -170,6 +172,39 @@ function miniAppListener(env: NodeJS.ProcessEnv) {
   return { host, port };
 }
 
+function siteListener(env: NodeJS.ProcessEnv) {
+  const rawPort = env.AUTODOM_SITE_PORT ?? "8082";
+  const port = Number(rawPort);
+  if (!/^\d+$/u.test(rawPort) || !Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("AUTODOM_SITE_PORT must be a valid TCP port");
+  const host = env.AUTODOM_SITE_HOST?.trim() ?? "127.0.0.1";
+  if (!host || /[\s/?#@]/u.test(host))
+    throw new Error("AUTODOM_SITE_HOST must be a hostname or IP address");
+  return { host, port };
+}
+
+/** The public site is optional: without a public URL the catalogue stays bot-only. */
+function sitePublicUrl(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.AUTODOM_SITE_URL?.trim();
+  if (!raw) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("AUTODOM_SITE_URL must be a public HTTPS origin");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    (url.pathname !== "/" && url.pathname !== "")
+  )
+    throw new Error("AUTODOM_SITE_URL must be a public HTTPS origin without a path");
+  return url.origin;
+}
+
 async function closeServer(server: Server | undefined): Promise<void> {
   if (!server?.listening) return;
   const drain = setTimeout(() => server.closeAllConnections(), 5_000);
@@ -195,6 +230,10 @@ export async function runBotService(
   const listener = miniAppUrl ? miniAppListener(env) : undefined;
   const paymentListener = reportBotUrl ? undefined : loadPaymentListenerSettings(env);
   const fullBotUrl = loadFullBotUrl(env);
+  // The public catalogue belongs to the full bot; the VIN bot stays a report channel.
+  const siteUrl = mode === "full" ? sitePublicUrl(env) : undefined;
+  const site = siteUrl ? siteListener(env) : undefined;
+  const fullBotUsername = loadFullBotUsername(env);
   if (paymentListener && !context.payments)
     throw new Error("Payment callback listener requires the payment service");
   const abort = new AbortController();
@@ -212,6 +251,7 @@ export async function runBotService(
   let metricsServer: Server | undefined;
   let miniAppServer: Server | undefined;
   let paymentServer: Server | undefined;
+  let siteServer: Server | undefined;
   let failure: unknown;
   let failed = false;
   const tasks: Promise<void>[] = [];
@@ -326,6 +366,21 @@ export async function runBotService(
       watchServer(miniAppServer, "Mini App");
       abort.signal.throwIfAborted();
     }
+    if (siteUrl && site) {
+      siteServer = await startSiteServer({
+        store,
+        publicUrl: siteUrl,
+        ...(fullBotUsername ? { botUsername: fullBotUsername } : {}),
+        ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
+        onRequest: (observation) => metrics.recordHttpRequest(observation),
+      });
+      const { promise, resolve, reject } = Promise.withResolvers<void>();
+      siteServer!.once("error", reject);
+      siteServer!.listen(site.port, site.host, resolve);
+      await promise;
+      watchServer(siteServer, "Public site");
+      abort.signal.throwIfAborted();
+    }
     if (paymentListener && context.payments) {
       paymentServer = await startPaymentListener(context.payments, paymentListener);
       watchServer(paymentServer, "Payment events");
@@ -337,6 +392,7 @@ export async function runBotService(
         !abort.signal.aborted &&
         !!runner?.isRunning() &&
         (!listener || !!miniAppServer?.listening) &&
+        (!site || !!siteServer?.listening) &&
         (!paymentListener || !!paymentServer?.listening) &&
         (await ready()),
     );
@@ -426,6 +482,7 @@ export async function runBotService(
       const drains = await Promise.allSettled([
         runner?.stop(),
         closeServer(miniAppServer),
+        closeServer(siteServer),
         closeServer(paymentServer),
         closeServer(metricsServer),
         Promise.allSettled(tasks),

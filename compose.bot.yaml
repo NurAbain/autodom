@@ -4,6 +4,8 @@
 # Route the Mini App HTTPS domain to bot:8080, preserving /miniapp/ paths.
 # Alternatively, Cloudflare Tunnel can reach the dedicated host listener below.
 # Set AUTODOM_MINI_APP_PUBLISH to the server's LAN IP:port; never publish metrics.
+# AUTODOM_SITE_PUBLISH exposes the public catalogue site; it serves the same listings
+# as the bot and Mini App and needs no separate parser or database.
 # A Telegram poller is singleton: stop the old bot at the initial cutover, never scale it.
 # Reuse the existing snapshots volume explicitly; external:true rejects a missing volume.
 services:
@@ -40,6 +42,10 @@ services:
       AUTODOM_MINI_APP_URL: ${AUTODOM_MINI_APP_URL:-}
       AUTODOM_MINI_APP_HOST: "0.0.0.0"
       AUTODOM_MINI_APP_PORT: "8080"
+      AUTODOM_SITE_URL: ${AUTODOM_SITE_URL:-}
+      AUTODOM_SITE_HOST: "0.0.0.0"
+      AUTODOM_SITE_PORT: "8082"
+      AUTODOM_FULL_BOT_USERNAME: ${AUTODOM_FULL_BOT_USERNAME:-}
       AUTODOM_APPROVED_SOURCES: ${AUTODOM_APPROVED_SOURCES:-mashina.kg}
       AUTODOM_VIN_API_URL: ${AUTODOM_VIN_API_URL:-}
       AUTODOM_VIN_API_TOKEN: ${AUTODOM_VIN_API_TOKEN:-}
@@ -56,8 +62,10 @@ services:
       AUTODOM_PAYMENTS_CALLBACK_TOKEN: ${AUTODOM_PAYMENTS_CALLBACK_TOKEN:-}
       AUTODOM_PAYMENTS_CALLBACK_HOST: "0.0.0.0"
       AUTODOM_PAYMENTS_CALLBACK_PORT: "8081"
-    expose: ["8080", "8081", "9901"]
-    ports: ["${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"]
+    expose: ["8080", "8081", "8082", "9901"]
+    ports:
+      - "${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"
+      - "${AUTODOM_SITE_PUBLISH:-127.0.0.1:18082}:8082"
     networks:
       default: {}
       proxy:

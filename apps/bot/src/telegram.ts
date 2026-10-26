@@ -34,7 +34,13 @@ import {
 } from "./analytics-contract.js";
 import type { BotMode } from "./bot-mode.js";
 import { CARFAX_REPORT_EXAMPLE_PDF } from "./carfax-report-example.js";
-import { type Buttons, Conversation, packReplies, type Reply } from "./conversation.js";
+import {
+  type Buttons,
+  Conversation,
+  listingReplies,
+  packReplies,
+  type Reply,
+} from "./conversation.js";
 import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import {
@@ -213,6 +219,8 @@ export interface TelegramBotOptions {
   analytics?: AnalyticsRecorder;
   mode?: BotMode;
   reportBotUrl?: string;
+  /** Telegram username of the full bot, used to hand car requests over from the VIN bot. */
+  fullBotUsername?: string;
   onPrivateInteraction?: (userId: number) => Promise<void>;
   apiRoot?: string;
   miniAppUrl?: string;
@@ -985,6 +993,39 @@ export function createTelegramBot(
           await record(context.from!.id, { event: "goal_selected", flow: "report", step: "vin" });
         if (vin) await checkVin(context.chat.id, vin);
         else await vinHelp(context.from!.id, context.chat.id);
+      });
+      return;
+    }
+    if (context.match.startsWith("car_")) {
+      if (vinOnly) {
+        await context.reply(
+          options.fullBotUsername
+            ? `Подбор автомобилей ведёт @${options.fullBotUsername} — отдельный бот с каталогом, фильтрами и бесплатным мониторингом.`
+            : "Подбор автомобилей ведёт отдельный бот с каталогом, фильтрами и бесплатным мониторингом.",
+        );
+        return;
+      }
+      const listingId = context.match.slice(4);
+      await store.withLock(`autodom:user:${context.from!.id}`, async () => {
+        const listing = await store.getListing(listingId);
+        if (!listing) {
+          await context.reply(
+            "Это объявление больше недоступно: его сняли или переписали. Откройте каталог, чтобы посмотреть актуальные машины.",
+          );
+          return;
+        }
+        const profile = await store.getProfile(context.from!.id);
+        const navigation: Buttons = [[["Ещё варианты", "/search"]]];
+        await sendReplies(
+          bot,
+          context.chat.id,
+          listingReplies(
+            listing,
+            profile?.currency === "USD" ? "USD" : "KGS",
+            navigation,
+            "Объявление из каталога",
+          ),
+        );
       });
       return;
     }

@@ -20,6 +20,7 @@ export default defineConfig({
     await Promise.all([
       copyFile("apps/bot/web/index.html", "apps/bot/dist/public/index.html"),
       copyFile("apps/bot/web/app.css", "apps/bot/dist/public/app.css"),
+      copyFile("apps/bot/web/site.css", "apps/bot/dist/public/site.css"),
       copyFile(
         "apps/bot/src/report-site/index.html",
         "apps/bot/dist/public/report-site/index.html",
