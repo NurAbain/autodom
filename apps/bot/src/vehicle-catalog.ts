@@ -40,11 +40,20 @@ export const vehicleCatalog: CatalogLookup = {
       url.searchParams.set("model", scope.modelId);
       url.searchParams.set("generation", scope.generation);
     }
-    const response = await fetch(url, {
-      headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
-      redirect: "error",
-      signal: AbortSignal.timeout(10_000),
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (error) {
+      // A slow taxonomy is still being prepared; the caller retries instead of
+      // telling the user that the catalogue is unavailable.
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError"))
+        throw new CatalogPendingError();
+      throw new Error(UNAVAILABLE);
+    }
     if (response.status === 202) {
       await response.body?.cancel();
       throw new CatalogPendingError();
