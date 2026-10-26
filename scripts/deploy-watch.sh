@@ -13,7 +13,7 @@
 set -euo pipefail
 
 config=${DEPLOY_CONFIG:-/etc/autodom/deploy.env}
-apps=${DEPLOY_APPS:-/etc/autodom/deploy-apps}
+apps=${1:-${DEPLOY_APPS:-/etc/autodom/deploy-apps}}
 repository=${DEPLOY_REPOSITORY:-https://github.com/NurAbain/autodom}
 
 if [ -r "$config" ]; then
