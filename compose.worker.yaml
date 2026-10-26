@@ -75,5 +75,5 @@ networks:
 
 volumes:
   crawler-data:
-    name: ${AUTODOM_CRAWLER_VOLUME:-${COMPOSE_PROJECT_NAME}_crawler-data}
+    name: ${AUTODOM_CRAWLER_VOLUME:-autodom_crawler_data}
     external: true
