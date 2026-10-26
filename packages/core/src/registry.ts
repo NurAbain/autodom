@@ -44,6 +44,16 @@ export function enabledSources(): readonly SourceSpec[] {
 export function enabledMarkets(): readonly string[] {
   return [...new Set(enabledSources().map((source) => source.market))];
 }
+/** True when the enabled catalogue offers more than one market to choose from. */
+export function marketChoiceOffered(): boolean {
+  return enabledMarkets().length > 1;
+}
+
+/** True when the enabled catalogue contains offers from outside Kyrgyzstan. */
+export function foreignOffersEnabled(): boolean {
+  return enabledMarkets().some((market) => market !== "KG");
+}
+
 export function listingUrlAllowed(sourceId: string, url: string): boolean {
   if (url.length > 600) return false;
   try {

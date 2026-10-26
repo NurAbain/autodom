@@ -5,10 +5,12 @@ import {
   BUDGET_SCOPES,
   enabledMarkets,
   enabledSources,
+  foreignOffersEnabled,
   type Listing,
   listingPrice,
   MARKETS,
   makeProfile,
+  marketChoiceOffered,
   money,
   normalize,
   normalizeCity,
@@ -114,6 +116,18 @@ const FIELD_LABELS: Record<string, string> = {
   allow_import: "Готовность ждать импорт",
   purchase_by: "Планируемая дата покупки",
 };
+
+/**
+ * Editable buyer fields. A country choice needs more than one market, and the import
+ * readiness and the landed budget only mean something when foreign offers exist.
+ */
+function offeredFields(): readonly string[] {
+  return Object.keys(FIELD_LABELS).filter((field) => {
+    if (field === "market") return marketChoiceOffered();
+    if (field === "allow_import" || field === "budget_scope") return foreignOffersEnabled();
+    return true;
+  });
+}
 const CHOICES: Record<string, Readonly<Record<string, string>>> = {
   budget_scope: BUDGET_SCOPES,
   body_type: BODY_TYPES,
@@ -470,6 +484,8 @@ export class Conversation {
     return this.prompt(userId, profile ? "review" : "currency", data);
   }
   private draftProfile(userId: number, data: Draft, profile: Profile | null): Profile {
+    const fields = offeredFields();
+    const markets = enabledMarkets();
     return makeProfile({
       user_id: userId,
       chat_id: userId,
@@ -477,8 +493,10 @@ export class Conversation {
       budget_min_minor: data.minimum as number,
       budget_max_minor: data.maximum as number,
       query: data.query as string,
-      market: (data.market ?? "KG") as Profile["market"],
-      budget_scope: (data.budget_scope ?? "car") as Profile["budget_scope"],
+      market: (fields.includes("market") ? data.market : (markets[0] ?? "KG")) as Profile["market"],
+      budget_scope: (fields.includes("budget_scope")
+        ? data.budget_scope
+        : "car") as Profile["budget_scope"],
       quiet_start_minute: profile?.quiet_start_minute ?? null,
       quiet_end_minute: profile?.quiet_end_minute ?? null,
       city: (data.city ?? "") as string,
@@ -487,7 +505,7 @@ export class Conversation {
       mileage_max_km: (data.mileage_max_km ?? null) as number | null,
       transmission: (data.transmission ?? "") as Profile["transmission"],
       use_case: (data.use_case ?? "") as Profile["use_case"],
-      allow_import: (data.allow_import ?? null) as boolean | null,
+      allow_import: (fields.includes("allow_import") ? data.allow_import : null) as boolean | null,
       purchase_by: (data.purchase_by ?? "") as string,
       catalog_filter: (data.catalog_filter as CatalogFilter | undefined) ?? emptyCatalogFilter(),
     });
@@ -814,7 +832,7 @@ export class Conversation {
           "catalog",
           "limitations",
           "back",
-          ...Object.keys(FIELD_LABELS).map((field) => `edit.${field}`),
+          ...offeredFields().map((field) => `edit.${field}`),
           ...Object.keys((draft[1].cat_actions as Record<string, unknown> | undefined) ?? {}),
         ];
       else if (state === "limitations") allowed = ["back"];

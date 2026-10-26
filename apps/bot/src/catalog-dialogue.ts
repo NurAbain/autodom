@@ -1,4 +1,13 @@
-import { BODY_TYPES, BUDGET_SCOPES, MARKETS, money, TRANSMISSIONS, USE_CASES } from "@autodom/core";
+import {
+  BODY_TYPES,
+  BUDGET_SCOPES,
+  foreignOffersEnabled,
+  MARKETS,
+  marketChoiceOffered,
+  money,
+  TRANSMISSIONS,
+  USE_CASES,
+} from "@autodom/core";
 import type { CatalogLookup } from "@autodom/core/catalog-filter";
 import {
   CATALOG_OPTION_LABELS,
@@ -148,17 +157,19 @@ export function renderFilterOverview(
     { kind: "field", key: "budget" },
   );
   field(basic, "Валюта", String(data.currency), { kind: "field", key: "currency" });
-  field(
-    basic,
-    "Что входит в бюджет",
-    BUDGET_SCOPES[data.budget_scope as keyof typeof BUDGET_SCOPES] ?? BUDGET_SCOPES.car,
-    { kind: "field", key: "budget_scope" },
-  );
-  const location = section("Рынок и место объявления");
-  field(location, "Рынок", MARKETS[data.market as keyof typeof MARKETS] ?? String(data.market), {
-    kind: "field",
-    key: "market",
-  });
+  if (foreignOffersEnabled())
+    field(
+      basic,
+      "Что входит в бюджет",
+      BUDGET_SCOPES[data.budget_scope as keyof typeof BUDGET_SCOPES] ?? BUDGET_SCOPES.car,
+      { kind: "field", key: "budget_scope" },
+    );
+  const location = section(marketChoiceOffered() ? "Рынок и место объявления" : "Место объявления");
+  if (marketChoiceOffered())
+    field(location, "Рынок", MARKETS[data.market as keyof typeof MARKETS] ?? String(data.market), {
+      kind: "field",
+      key: "market",
+    });
   const common = section("Основные характеристики");
   const more = section("Другие характеристики");
   const legacyValues: Partial<Record<CatalogOptionKey | CatalogRangeKey, string>> = {
@@ -250,12 +261,20 @@ export function renderFilterOverview(
   }
   const optional: [string, string, string, unknown][] = [
     ["query", "Текстовый запрос", String(data.query ?? ""), ""],
-    [
-      "allow_import",
-      "Готовность ждать импорт",
-      data.allow_import === true ? "готов ждать" : data.allow_import === false ? "без импорта" : "",
-      null,
-    ],
+    ...(foreignOffersEnabled()
+      ? ([
+          [
+            "allow_import",
+            "Готовность ждать импорт",
+            data.allow_import === true
+              ? "готов ждать"
+              : data.allow_import === false
+                ? "без импорта"
+                : "",
+            null,
+          ],
+        ] as [string, string, string, unknown][])
+      : []),
     [
       "use_case",
       "Для чего автомобиль (заметка)",

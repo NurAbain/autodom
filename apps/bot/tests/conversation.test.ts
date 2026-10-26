@@ -817,6 +817,20 @@ describe("search and safe rendering", () => {
     expect((await store.getProfile(1))?.market).toBe("KR");
     expect((await store.getProfile(1))?.monitoring).toBe(false);
   });
+  it("offers no country, import or landed-budget choice when only Kyrgyz sources are enabled", async () => {
+    vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg,lalafo.kg");
+    store.listings = [car("local", "Hyundai")];
+    const current = await review(conversation, "Hyundai");
+    const labels = current.flatMap((reply) => reply.buttons.flat().map(([label]) => label));
+    expect(labels.some((label) => label.startsWith("Рынок"))).toBe(false);
+    expect(labels.some((label) => label.startsWith("Готовность ждать импорт"))).toBe(false);
+    expect(labels.some((label) => label.startsWith("Что входит в бюджет"))).toBe(false);
+    await conversation.handle(1, 1, button(current, "Сохранить"));
+    const profile = await store.getProfile(1);
+    expect(profile?.market).toBe("KG");
+    expect(profile?.allow_import).toBeNull();
+    expect(profile?.budget_scope).toBe("car");
+  });
   it("browses one vehicle and its photos in both directions and rejects stale pagination", async () => {
     store.listings = Array.from({ length: 7 }, (_, i) =>
       car(String(i), i < 3 ? "Toyota Camry" : "Honda Accord", {
