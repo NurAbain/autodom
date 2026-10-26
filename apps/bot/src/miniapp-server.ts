@@ -38,7 +38,9 @@ import {
   draftToProfile,
   filterChoices,
   filterProfileView,
+  listingMatchesModel,
   parseFilterDraft,
+  parseModelRequest,
 } from "./miniapp-filter.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
 import {
@@ -138,7 +140,7 @@ function carView(listing: Listing, currency: string): MiniAppCar {
 }
 
 export interface MiniAppServerOptions {
-  store: Pick<Store, "getProfile" | "getListing" | "saveProfile" | "countMatches">;
+  store: Pick<Store, "getProfile" | "getListing" | "saveProfile" | "countMatches" | "search">;
   token: string;
   publicUrl: string;
   host: string;
@@ -213,6 +215,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/car",
     "/miniapp/api/filter",
     "/miniapp/api/filter/suggest",
+    "/miniapp/api/filter/models",
     "/miniapp/api/filter/preview",
     "/miniapp/api/vin",
     "/miniapp/api/vin/archive-photo",
@@ -493,6 +496,39 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               }
             }
             respond(response, 200, { state: "ready", items });
+            return;
+          }
+          if (url.pathname === "/miniapp/api/filter/models") {
+            if (request.method !== "POST") {
+              response.setHeader("Allow", "POST");
+              throw new RequestError(405, "Подбор моделей доступен только через POST.");
+            }
+            if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
+            const body = await readFlatJson(request, 8192);
+            const requested = parseModelRequest(body);
+            if (!requested.ok) throw new RequestError(400, requested.message);
+            const catalogue = options.catalog ?? vehicleCatalog;
+            const previous = await options.store.getProfile(user.id);
+            const profile = draftToProfile(
+              user.id,
+              { ...requested.request.draft, query: requested.request.make.value },
+              previous,
+            );
+            const listings = await options.store.search(profile, 2000);
+            const items = await catalogue.getOptions("model", requested.request.make.id);
+            const matching = items
+              .map((item) => ({
+                id: item.id,
+                value: item.value,
+                label: item.label,
+                matches: listings.filter((listing) => listingMatchesModel(listing, item)).length,
+              }))
+              .filter((item) => item.matches > 0)
+              .sort(
+                (left, right) =>
+                  right.matches - left.matches || left.label.localeCompare(right.label, "ru"),
+              );
+            respond(response, 200, { items: matching });
             return;
           }
           if (url.pathname === "/miniapp/api/filter/preview") {

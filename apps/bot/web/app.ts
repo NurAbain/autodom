@@ -703,6 +703,8 @@ function showCarfaxExample(): void {
   );
 }
 
+type FilterChoice = { id: string; value: string; label: string };
+
 type FilterDraft = {
   currency: "USD" | "KGS";
   budgetMin: number;
@@ -714,6 +716,8 @@ type FilterDraft = {
   yearMin: number | null;
   yearMax: number | null;
   mileageMax: number | null;
+  make: FilterChoice | null;
+  model: FilterChoice | null;
 };
 
 const emptyFilterDraft = (): FilterDraft => ({
@@ -727,6 +731,8 @@ const emptyFilterDraft = (): FilterDraft => ({
   yearMin: null,
   yearMax: null,
   mileageMax: null,
+  make: null,
+  model: null,
 });
 
 const moneyLabel = (value: number, currency: string): string =>
@@ -739,6 +745,15 @@ const listingsLabel = (count: number): string => {
   if (mod10 === 1 && mod100 !== 11) return `${count} объявление`;
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} объявления`;
   return `${count} объявлений`;
+};
+
+/** Russian plural for a counted noun: 1 объявление, 2 объявления, 5 объявлений. */
+const plural = (count: number, one: string, few: string, many: string): string => {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
 };
 
 /** The chip shows what the user reads; the query keeps the catalogue spelling. */
@@ -791,6 +806,8 @@ async function showFilters(): Promise<void> {
         yearMin: saved.year_min,
         yearMax: saved.year_max,
         mileageMax: saved.mileage_max_km,
+        make: null,
+        model: null,
       }
     : emptyFilterDraft();
   const bodyLabels = new Map(state.bodyTypes.map((option) => [option.value, option.label]));
@@ -862,20 +879,27 @@ async function showFilters(): Promise<void> {
     schedulePreview();
   });
   const suggestionHost = element("div", "filter-suggest");
-  const suggestButton = button(
-    "Подсказки справочника",
-    () => void openSuggestions(null),
+  const makeButton = button(
+    draft.make ? `Марка: ${draft.make.label}` : "Выбрать марку",
+    () => void openMakes(),
     "button button-quiet",
   );
+  const modelButton = button(
+    draft.model ? `Модель: ${draft.model.label}` : "Выбрать модель",
+    () => void openModels(),
+    "button button-quiet",
+  );
+  modelButton.disabled = !draft.make;
+  const choiceRow = element("div", "button-row");
+  choiceRow.append(makeButton, modelButton);
   vehicle.append(
     element("h2", "", "Автомобиль"),
+    choiceRow,
     field(
-      "Марка, модель",
+      "Марка, модель — текстом",
       queryInput,
       "До пяти альтернатив через запятую: все слова внутри варианта обязательны.",
     ),
-    element("div", "button-row", ""),
-    suggestButton,
     suggestionHost,
   );
 
@@ -1025,12 +1049,18 @@ async function showFilters(): Promise<void> {
   const selected = element("section", "panel");
   selected.append(element("h2", "", "Выбранные условия"), chipsHost);
 
-  main.replaceChildren(selected, vehicle, budget, place, traits, consentPanel, status, bar);
+  main.replaceChildren(selected, budget, vehicle, place, traits, consentPanel, status, bar);
 
   function renderCurrency(): void {
     for (const [index, value] of (["USD", "KGS"] as const).entries()) {
       currencyButtons[index]?.setAttribute("aria-pressed", String(draft.currency === value));
     }
+  }
+
+  function renderChoices(): void {
+    makeButton.textContent = draft.make ? `Марка: ${draft.make.label}` : "Выбрать марку";
+    modelButton.textContent = draft.model ? `Модель: ${draft.model.label}` : "Выбрать модель";
+    modelButton.disabled = !draft.make;
   }
 
   function renderChips(): void {
@@ -1144,14 +1174,46 @@ async function showFilters(): Promise<void> {
     }
   }
 
-  async function openSuggestions(
-    parent: { id: string; value: string; label: string } | null,
-  ): Promise<void> {
-    suggestionHost.replaceChildren(element("p", "footnote", "Загружаем справочник…"));
+  /** Renders a pick list with a search field and a counter. */
+  function pickList(
+    items: readonly { label: string; hint?: string }[],
+    placeholder: string,
+    onPick: (index: number) => void,
+    back?: HTMLElement,
+  ): HTMLElement {
+    const list = element("div", "filter-suggest-list");
+    const search = element("input", "text-input");
+    search.type = "search";
+    search.placeholder = placeholder;
+    search.autocomplete = "off";
+    const counter = element("p", "footnote");
+    const render = () => {
+      const needle = search.value.trim().toLowerCase();
+      const visible = items
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => !needle || item.label.toLowerCase().includes(needle));
+      list.replaceChildren();
+      if (back) list.append(back);
+      for (const { item, index } of visible) {
+        const control = button(item.label, () => onPick(index), "button button-quiet");
+        if (item.hint) control.append(element("span", "filter-suggest-hint", item.hint));
+        list.append(control);
+      }
+      if (!visible.length) list.append(element("p", "footnote", "Ничего не найдено."));
+      counter.textContent = `Вариантов: ${visible.length} из ${items.length}`;
+    };
+    search.addEventListener("input", render);
+    render();
+    const host = element("div", "filter-suggest-body");
+    host.append(search, counter, list);
+    return host;
+  }
+
+  async function openMakes(): Promise<void> {
+    suggestionHost.replaceChildren(element("p", "footnote", "Загружаем марки…"));
     try {
-      const query = parent ? `?key=model&parent=${encodeURIComponent(parent.id)}` : "?key=make";
       const result = await request<MiniAppSuggestions | { state: "loading" }>(
-        `/miniapp/api/filter/suggest${query}`,
+        "/miniapp/api/filter/suggest?key=make",
       );
       if (started !== generation) return;
       if (result.state !== "ready") {
@@ -1160,59 +1222,75 @@ async function showFilters(): Promise<void> {
         );
         return;
       }
-      const list = element("div", "filter-suggest-list");
-      const search = element("input", "text-input");
-      search.type = "search";
-      search.placeholder = parent ? "Поиск модели" : "Поиск марки";
-      search.autocomplete = "off";
-      const counter = element("p", "footnote");
-      const render = () => {
-        const needle = search.value.trim().toLowerCase();
-        const visible = result.items.filter(
-          (item) => !needle || item.label.toLowerCase().includes(needle),
+      const items = result.items.map((item) => ({ label: item.label }));
+      suggestionHost.replaceChildren(
+        pickList(items, "Поиск марки", (index) => {
+          const chosen = result.items[index];
+          if (!chosen) return;
+          draft.make = { id: chosen.id, value: chosen.value, label: chosen.label };
+          draft.model = null;
+          draft.query = chosen.value;
+          queryInput.value = draft.query;
+          renderChoices();
+          renderChips();
+          schedulePreview();
+          void openModels();
+        }),
+      );
+    } catch (error) {
+      if (started === generation)
+        suggestionHost.replaceChildren(element("p", "footnote", errorText(error)));
+    }
+  }
+
+  /** Only the models that have ads under the current conditions. */
+  async function openModels(): Promise<void> {
+    const make = draft.make;
+    if (!make) return;
+    suggestionHost.replaceChildren(element("p", "footnote", "Ищем модели под ваш поиск…"));
+    try {
+      const result = await request<{
+        items: { id: string; value: string; label: string; matches: number }[];
+      }>("/miniapp/api/filter/models", {
+        ...draftBody(),
+        make_id: make.id,
+        make_value: make.value,
+        make_label: make.label,
+      });
+      if (started !== generation) return;
+      if (!result.items.length) {
+        suggestionHost.replaceChildren(
+          element(
+            "p",
+            "footnote",
+            "Под текущие условия моделей не нашлось. Увеличьте бюджет или снимите условие — либо впишите модель текстом.",
+          ),
+          button("← Марки", () => void openMakes(), "back-link"),
         );
-        list.replaceChildren();
-        if (parent) {
-          list.append(
-            button("← Марки", () => void openSuggestions(null), "back-link"),
-            button(
-              `Только ${parent.label}`,
-              () => {
-                draft.query = parent.value;
-                queryInput.value = draft.query;
-                suggestionHost.replaceChildren();
-                renderChips();
-                schedulePreview();
-              },
-              "button button-quiet",
-            ),
-          );
-        }
-        for (const item of visible) {
-          list.append(
-            button(
-              item.label,
-              () => {
-                if (!parent) {
-                  void openSuggestions({ id: item.id, value: item.value, label: item.label });
-                  return;
-                }
-                draft.query = `${parent.value} ${item.value}`;
-                queryInput.value = draft.query;
-                suggestionHost.replaceChildren();
-                renderChips();
-                schedulePreview();
-              },
-              "button button-quiet",
-            ),
-          );
-        }
-        if (!visible.length) list.append(element("p", "footnote", "Ничего не найдено."));
-        counter.textContent = `Вариантов: ${visible.length} из ${result.items.length}`;
-      };
-      search.addEventListener("input", render);
-      render();
-      suggestionHost.replaceChildren(search, counter, list);
+        return;
+      }
+      const items = result.items.map((item) => ({
+        label: item.label,
+        hint: `${item.matches} ${plural(item.matches, "объявление", "объявления", "объявлений")}`,
+      }));
+      suggestionHost.replaceChildren(
+        pickList(
+          items,
+          "Поиск модели",
+          (index) => {
+            const chosen = result.items[index];
+            if (!chosen) return;
+            draft.model = { id: chosen.id, value: chosen.value, label: chosen.label };
+            draft.query = `${make.value} ${chosen.value}`;
+            queryInput.value = draft.query;
+            suggestionHost.replaceChildren();
+            renderChoices();
+            renderChips();
+            schedulePreview();
+          },
+          button("← Марки", () => void openMakes(), "back-link"),
+        ),
+      );
     } catch (error) {
       if (started === generation)
         suggestionHost.replaceChildren(element("p", "footnote", errorText(error)));
@@ -1262,6 +1340,7 @@ async function showFilters(): Promise<void> {
   }
 
   renderCurrency();
+  renderChoices();
   renderChips();
   renderSaveState();
   void refreshMatches();

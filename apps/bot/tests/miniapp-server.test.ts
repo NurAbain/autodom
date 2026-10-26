@@ -203,6 +203,15 @@ beforeAll(async () => {
           words.every((word) => item.title.toLowerCase().includes(word)),
         ).length;
       },
+      async search(input, limit = 5, offset = 0) {
+        const words = input.query
+          .split(",")
+          .map((part) => part.trim().toLowerCase())
+          .filter(Boolean);
+        return [listing, lalafoListing]
+          .filter((item) => words.every((word) => item.title.toLowerCase().includes(word)))
+          .slice(offset, offset + limit);
+      },
       async getListing(id, freshOnly) {
         if (id === "storage-error") throw storageError;
         if (id === listing.id) return listing;
@@ -549,6 +558,7 @@ it("creates the requested report from recent actor evidence without another VIN 
     getListing: async () => null,
     saveProfile: async () => profile,
     countMatches: async () => 0,
+    search: async () => [],
     withLock: async <T>(_key: string, action: () => Promise<T>) => action(),
   };
   const payments = new PaymentService(store as unknown as Store);
@@ -732,6 +742,7 @@ it("reports an unconfigured VIN service without fabricating observations", async
       getListing: async () => null,
       saveProfile: async () => profile,
       countMatches: async () => 0,
+      search: async () => [],
     },
   });
   try {
@@ -840,6 +851,7 @@ it("reports refused dialogue admission as retryable without confusing an empty s
       getListing: async () => null,
       saveProfile: async () => profile,
       countMatches: async () => 0,
+      search: async () => [],
     },
     dialogue: async () => (busy ? null : []),
   });
@@ -1140,6 +1152,7 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
       getListing: async () => null,
       saveProfile: async () => profile,
       countMatches: async () => 0,
+      search: async () => [],
     },
     analytics: {
       async record(event) {
@@ -1429,6 +1442,7 @@ describe("buyer filter editor", () => {
         getListing: async () => null,
         saveProfile: async () => profile,
         countMatches: async () => 0,
+        search: async () => [],
       },
     });
     try {
@@ -1452,6 +1466,91 @@ describe("buyer filter editor", () => {
     }
   });
 
+  it("shows only the models that fit the current conditions", async () => {
+    const camry = makeListing({
+      id: "mashina:camry",
+      title: "Toyota Camry 2019",
+      url: "https://mashina.kg/details/camry",
+      price_usd_minor: 1_200_000,
+      price_kgs_minor: 100_000_000,
+      availability: "В наличии",
+      catalog_attributes: { make: "Toyota", model: "Camry" },
+    });
+    const corolla = makeListing({
+      id: "mashina:corolla",
+      title: "Toyota Corolla 2015",
+      url: "https://mashina.kg/details/corolla",
+      price_usd_minor: 1_100_000,
+      price_kgs_minor: 92_000_000,
+      availability: "В наличии",
+      catalog_attributes: { make: "Toyota", model: "Corolla" },
+    });
+    const modelsServer = await startMiniAppServer({
+      token: TOKEN,
+      publicUrl: PUBLIC_URL,
+      host: "127.0.0.1",
+      port: 0,
+      assetsDirectory: directory,
+      ready: async () => true,
+      catalog: {
+        async getOptions(key, parentId) {
+          if (key === "make") return [{ id: "1", value: "toyota", label: "Toyota" }];
+          if (key === "model" && parentId === "1")
+            return [
+              { id: "2", value: "Camry", label: "Camry" },
+              { id: "3", value: "Corolla", label: "Corolla" },
+              { id: "4", value: "Land Cruiser", label: "Land Cruiser" },
+            ];
+          throw new Error("Unknown catalogue key");
+        },
+      },
+      store: {
+        getProfile: async () => null,
+        getListing: async () => null,
+        saveProfile: async () => profile,
+        countMatches: async () => 2,
+        async search(input) {
+          return input.budget_max_minor >= 1_200_000 ? [camry, corolla] : [];
+        },
+      },
+    });
+    try {
+      const address = modelsServer.address();
+      if (!address || typeof address === "string") throw new Error("No listening address");
+      const endpoint = `http://127.0.0.1:${address.port}/miniapp/api/filter/models`;
+      const body = { ...draft, make_id: "1", make_value: "toyota", make_label: "Toyota" };
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: authorization(), "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        items: [
+          { id: "2", value: "Camry", label: "Camry", matches: 1 },
+          { id: "3", value: "Corolla", label: "Corolla", matches: 1 },
+        ],
+      });
+      const narrow = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: authorization(), "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, budget_max_minor: 500_000 }),
+      });
+      expect(await narrow.json()).toEqual({ items: [] });
+      const withoutMake = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: authorization(), "Content-Type": "application/json" },
+        body: JSON.stringify({ ...draft }),
+      });
+      expect(withoutMake.status).toBe(400);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        modelsServer.close((error) => (error ? reject(error) : resolve()));
+        modelsServer.closeAllConnections();
+      });
+    }
+  });
+
   it("keeps the buyer filter out of the VIN bot", async () => {
     const vinServer = await startMiniAppServer({
       token: TOKEN,
@@ -1466,6 +1565,7 @@ describe("buyer filter editor", () => {
         getListing: async () => null,
         saveProfile: async () => profile,
         countMatches: async () => 0,
+        search: async () => [],
       },
     });
     try {
