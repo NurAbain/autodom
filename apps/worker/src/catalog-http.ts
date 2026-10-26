@@ -7,6 +7,9 @@ import {
   type CatalogLookup,
 } from "@autodom/core/catalog-filter";
 
+/** How long a cold catalogue request may take before the caller is told to retry. */
+const READY_BUDGET_MS = 9_000;
+
 /** Extends the parser's private listener; credentials never go to a source or browser. */
 export function createCatalogRoute(catalog: CatalogLookup, token: string) {
   if (token.length < 32 || token.length > 256 || /\s/u.test(token))
@@ -78,7 +81,9 @@ export function createCatalogRoute(catalog: CatalogLookup, token: string) {
       const result = await Promise.race([
         pending,
         new Promise<{ state: "loading" }>((resolve) => {
-          timer = setTimeout(() => resolve({ state: "loading" }), 1500);
+          // The mashina taxonomy needs about two seconds for a cold make or model
+          // list. A shorter budget turned every first suggestion into "loading".
+          timer = setTimeout(() => resolve({ state: "loading" }), READY_BUDGET_MS);
         }),
       ]);
       if (result.state === "ready") send(200, result.items);
