@@ -62,10 +62,10 @@ services:
       AUTODOM_PAYMENTS_CALLBACK_TOKEN: ${AUTODOM_PAYMENTS_CALLBACK_TOKEN:-}
       AUTODOM_PAYMENTS_CALLBACK_HOST: "0.0.0.0"
       AUTODOM_PAYMENTS_CALLBACK_PORT: "8081"
+    # The public catalogue site is reached through the proxy on the container port;
+    # it publishes no host port, so the two bot identities never fight for one.
     expose: ["8080", "8081", "8082", "9901"]
-    ports:
-      - "${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"
-      - "${AUTODOM_SITE_PUBLISH:-127.0.0.1:18082}:8082"
+    ports: ["${AUTODOM_MINI_APP_PUBLISH:-127.0.0.1:18080}:8080"]
     networks:
       default: {}
       proxy:
