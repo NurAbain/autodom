@@ -158,3 +158,15 @@ it("retains the last complete observation on failure and recovers only after a n
     observed,
   );
 });
+
+it("answers a failing health probe with a readable verdict", async () => {
+  const metrics = new Metrics("worker", { getMeta: async () => null }, { monitor_seconds: 300 });
+  const server = await metrics.serve(0, async () => {
+    throw new Error("probe failed");
+  });
+  servers.push(server);
+  const port = (server.address() as { port: number }).port;
+  const response = await fetch(`http://127.0.0.1:${port}/health`);
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ healthy: false });
+});

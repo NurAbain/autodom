@@ -38,7 +38,8 @@ export async function runtimeHealth(
     const redis = new Redis(settings.redis_url, {
       lazyConnect: true,
       maxRetriesPerRequest: 1,
-      connectTimeout: 2000,
+      // The probe answers within a second and a half; a slower connect must fail fast.
+      connectTimeout: 1000,
       retryStrategy: () => null,
     });
     redis.on("error", () => undefined);

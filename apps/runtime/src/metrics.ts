@@ -298,8 +298,10 @@ export class Metrics {
           response.writeHead(404).end();
         }
       })().catch(() => {
-        if (!response.headersSent) response.writeHead(503);
-        response.end();
+        // A probe must always read a verdict, never an empty body it cannot parse.
+        if (!response.headersSent)
+          response.writeHead(503, { "Content-Type": "application/json; charset=utf-8" });
+        response.end(JSON.stringify({ healthy: false }));
       });
     });
     const { promise, resolve, reject } = Promise.withResolvers<void>();
