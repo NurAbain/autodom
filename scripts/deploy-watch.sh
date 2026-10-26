@@ -21,7 +21,8 @@ if [ -r "$config" ]; then
   . "$config"
 fi
 : "${COOLIFY_API_TOKEN:?COOLIFY_API_TOKEN is required}"
-api_url=${COOLIFY_API_URL:-http://127.0.0.1:8000}
+# Coolify refuses API calls that arrive on its loopback address.
+api_url=${COOLIFY_API_URL:-http://192.168.0.2:8000}
 
 [ -r "$apps" ] || { echo "no application list at $apps" >&2; exit 0; }
 
