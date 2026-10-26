@@ -10,20 +10,21 @@ export interface RuntimeStatus extends StoreStats {
   last_backup_at: string | null;
 }
 
-export async function runtimeStatus(
+/**
+ * Liveness of the service. It reads only the heartbeats and the queue connection, so
+ * it stays fast enough for a health probe: the catalogue scans below count every
+ * listing and take seconds once the catalogue grows.
+ */
+export async function runtimeHealth(
   store: Store,
   settings: Pick<Settings, "monitor_seconds"> & { redis_url?: string },
   role: RuntimeRole = "run",
-): Promise<RuntimeStatus> {
+): Promise<boolean> {
   const now = Date.now() / 1000;
-  const [bot, worker, monitor, telegramError, lastBackup, stats, sources] = await Promise.all([
+  const [bot, worker, monitor] = await Promise.all([
     store.getMeta("bot_heartbeat", "0"),
     store.getMeta("worker_heartbeat", "0"),
     store.getMeta("last_monitor_at", "0"),
-    store.getMeta("telegram_error", ""),
-    store.getMeta("last_backup_at"),
-    store.stats(),
-    sourceStatus(store),
   ]);
   const botFresh = 0 <= now - Number(bot) && now - Number(bot) <= 120;
   const workerFresh = 0 <= now - Number(worker) && now - Number(worker) <= 120;
@@ -50,11 +51,26 @@ export async function runtimeStatus(
       redis.disconnect();
     }
   }
+  return (
+    (role === "worker" || (botFresh && monitorFresh)) &&
+    (role === "bot" || (workerFresh && redisReady))
+  );
+}
+
+export async function runtimeStatus(
+  store: Store,
+  settings: Pick<Settings, "monitor_seconds"> & { redis_url?: string },
+  role: RuntimeRole = "run",
+): Promise<RuntimeStatus> {
+  const [telegramError, lastBackup, stats, sources] = await Promise.all([
+    store.getMeta("telegram_error", ""),
+    store.getMeta("last_backup_at"),
+    store.stats(),
+    sourceStatus(store),
+  ]);
   return {
     ...stats,
-    healthy:
-      (role === "worker" || (botFresh && monitorFresh)) &&
-      (role === "bot" || (workerFresh && redisReady)),
+    healthy: await runtimeHealth(store, settings, role),
     sources,
     telegram_error: telegramError,
     last_backup_at: lastBackup,
