@@ -8,11 +8,12 @@
   },
   "packageManager": "pnpm@10.34.5",
   "scripts": {
-    "build": "pnpm build:runtime && pnpm build:bot && pnpm build:worker && pnpm build:vin",
+    "build": "pnpm build:runtime && pnpm build:bot && pnpm build:worker && pnpm build:vin && pnpm build:outreach",
     "build:runtime": "tsup --config tsup.config.ts",
     "build:bot": "tsup --config apps/bot/tsup.config.ts",
     "build:worker": "tsup --config apps/worker/tsup.config.ts",
     "build:vin": "tsup --config apps/vin/tsup.config.ts",
+    "build:outreach": "tsup --config apps/outreach/tsup.config.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
@@ -20,7 +21,8 @@
     "autodom": "node apps/runtime/dist/cli.js",
     "bot": "node apps/bot/dist/cli.js",
     "worker": "node apps/worker/dist/cli.js",
-    "vin": "node apps/vin/dist/cli.js"
+    "vin": "node apps/vin/dist/cli.js",
+    "outreach": "node apps/outreach/dist/cli.js"
   },
   "dependencies": {
     "@crawlee/basic": "3.18.1",

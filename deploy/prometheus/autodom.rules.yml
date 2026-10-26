@@ -2,7 +2,7 @@ groups:
   - name: autodom
     rules:
       - alert: AutodomTargetDown
-        expr: up{application="autodom",job=~"autodom-bot|autodom-worker|autodom-vin"} == 0
+        expr: up{application="autodom",job=~"autodom-bot|autodom-worker|autodom-vin|autodom-outreach"} == 0
         for: 2m
         labels: {severity: critical}
         annotations:
@@ -80,6 +80,36 @@ groups:
           summary: Autodom VIN scrape job has no target series
           description: Check the additive autodom-vin scrape job and private autodom-vin-api:8080 network alias. Keep check/archive/photo authentication enabled.
           runbook_url: docs/monitoring.md#target-health
+      - alert: AutodomOutreachTargetMissing
+        expr: absent(up{application="autodom",job="autodom-outreach"})
+        for: 2m
+        labels: {application: autodom, severity: critical, role: outreach, job: autodom-outreach}
+        annotations:
+          summary: Autodom outreach scrape job has no target series
+          description: Prometheus cannot see the private autodom-outreach metrics target. Check the production service, private network alias, and /metrics endpoint.
+          runbook_url: docs/monitoring.md#outreach
+      - alert: AutodomOutreachQueueTickFailed
+        expr: autodom_outreach_queue_tick_success{application="autodom",job="autodom-outreach",role="outreach"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom outreach queue processing is failing
+          description: The latest outreach queue tick failed for at least two minutes. Automatic retries are intentionally disabled for uncertain external writes; inspect service logs and campaign state.
+          runbook_url: docs/monitoring.md#outreach
+      - alert: AutodomOutreachPausedWithError
+        expr: autodom_outreach_entities{application="autodom",job="autodom-outreach",role="outreach",status="paused",error="true"} > 0
+        labels: {severity: warning}
+        annotations:
+          summary: Autodom outreach workflow paused after an error
+          description: A marketing workflow is paused with a recorded service or delivery error. Review it in the private command center before resuming.
+          runbook_url: docs/monitoring.md#outreach
+      - alert: AutodomOutreachUnknownDelivery
+        expr: autodom_outreach_deliveries{application="autodom",job="autodom-outreach",role="outreach",status="unknown"} > 0
+        labels: {severity: critical}
+        annotations:
+          summary: Autodom outreach has an unknown external delivery result
+          description: At least one external write has an unknown result and will not be retried automatically. Reconcile it manually to avoid duplicate messages or comments.
+          runbook_url: docs/monitoring.md#outreach
       - alert: AutodomHttpServerErrors
         expr: |
           (
@@ -142,7 +172,7 @@ groups:
           description: More than 100 waiting jobs for 15 minutes in a healthy, fresh snapshot. Inspect job durations and failures; delayed and paused jobs are not counted. Do not increase source quotas automatically.
           runbook_url: docs/monitoring.md#queue-backlog
       - alert: AutodomEventLoopLag
-        expr: autodom_nodejs_eventloop_lag_p99_seconds{application="autodom",role=~"bot|worker|vin"} > 0.5
+        expr: autodom_nodejs_eventloop_lag_p99_seconds{application="autodom",role=~"bot|worker|vin|outreach"} > 0.5
         for: 10m
         labels: {application: autodom, severity: warning}
         annotations:

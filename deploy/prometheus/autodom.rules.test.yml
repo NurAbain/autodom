@@ -411,3 +411,57 @@ tests:
       - eval_time: 20m
         alertname: AutodomNotificationErrors
         exp_alerts: []
+  - name: Outreach missing target crosses the pending boundary
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AutodomOutreachTargetMissing
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomOutreachTargetMissing
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "outreach", "job": "autodom-outreach", "severity": "critical"}
+            exp_annotations:
+              summary: "Autodom outreach scrape job has no target series"
+              description: "Prometheus cannot see the private autodom-outreach metrics target. Check the production service, private network alias, and /metrics endpoint."
+              runbook_url: "docs/monitoring.md#outreach"
+  - name: Outreach queue failure and operator intervention states alert
+    interval: 1m
+    input_series:
+      - series: 'up{application="autodom",role="outreach",job="autodom-outreach",instance="autodom-outreach:8092"}'
+        values: '1+0x5'
+      - series: 'autodom_outreach_queue_tick_success{application="autodom",role="outreach",job="autodom-outreach",instance="autodom-outreach:8092",component="instagram_watch"}'
+        values: '0+0x5'
+      - series: 'autodom_outreach_entities{application="autodom",role="outreach",job="autodom-outreach",instance="autodom-outreach:8092",kind="instagram_watch",status="paused",error="true"}'
+        values: '1+0x5'
+      - series: 'autodom_outreach_deliveries{application="autodom",role="outreach",job="autodom-outreach",instance="autodom-outreach:8092",kind="instagram_watch",status="unknown"}'
+        values: '1+0x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: AutodomOutreachQueueTickFailed
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: AutodomOutreachQueueTickFailed
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "outreach", "job": "autodom-outreach", "instance": "autodom-outreach:8092", "component": "instagram_watch", "severity": "critical"}
+            exp_annotations:
+              summary: "Autodom outreach queue processing is failing"
+              description: "The latest outreach queue tick failed for at least two minutes. Automatic retries are intentionally disabled for uncertain external writes; inspect service logs and campaign state."
+              runbook_url: "docs/monitoring.md#outreach"
+      - eval_time: 1m
+        alertname: AutodomOutreachPausedWithError
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "outreach", "job": "autodom-outreach", "instance": "autodom-outreach:8092", "kind": "instagram_watch", "status": "paused", "error": "true", "severity": "warning"}
+            exp_annotations:
+              summary: "Autodom outreach workflow paused after an error"
+              description: "A marketing workflow is paused with a recorded service or delivery error. Review it in the private command center before resuming."
+              runbook_url: "docs/monitoring.md#outreach"
+      - eval_time: 1m
+        alertname: AutodomOutreachUnknownDelivery
+        exp_alerts:
+          - exp_labels: {"application": "autodom", "role": "outreach", "job": "autodom-outreach", "instance": "autodom-outreach:8092", "kind": "instagram_watch", "status": "unknown", "severity": "critical"}
+            exp_annotations:
+              summary: "Autodom outreach has an unknown external delivery result"
+              description: "At least one external write has an unknown result and will not be retried automatically. Reconcile it manually to avoid duplicate messages or comments."
+              runbook_url: "docs/monitoring.md#outreach"
