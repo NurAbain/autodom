@@ -456,6 +456,36 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         )
           throw new RequestError(404, "В этом боте доступна только проверка VIN и отчёты.");
         if (url.pathname.startsWith("/miniapp/api/filter")) {
+          /**
+           * A cold catalogue call can outlast the client timeout; the worker warms up
+           * in the background, so one more try usually lands the list.
+           */
+          const loadCatalogue = async (
+            key: CatalogFieldKey,
+            parentId?: string,
+          ): Promise<readonly CatalogChoice[] | null> => {
+            const catalogue = options.catalog ?? vehicleCatalog;
+            const load = () => catalogue.getOptions(key, parentId);
+            try {
+              return await load();
+            } catch (error) {
+              if (!(error instanceof CatalogPendingError))
+                throw new RequestError(
+                  503,
+                  "Справочник временно недоступен. Задайте марку и модель текстом.",
+                );
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+              try {
+                return await load();
+              } catch (retry) {
+                if (retry instanceof CatalogPendingError) return null;
+                throw new RequestError(
+                  503,
+                  "Справочник временно недоступен. Задайте марку и модель текстом.",
+                );
+              }
+            }
+          };
           if (url.pathname === "/miniapp/api/filter/suggest") {
             if (request.method !== "GET") {
               response.setHeader("Allow", "GET");
@@ -468,32 +498,11 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               (key === "model" ? !/^[1-9]\d{0,17}$/u.test(parent ?? "") : parent !== undefined)
             )
               throw new RequestError(400, "Недопустимый запрос справочника.");
-            const catalogue = options.catalog ?? vehicleCatalog;
-            const load = () => catalogue.getOptions(key as CatalogFieldKey, parent);
-            let items: readonly CatalogChoice[];
-            try {
-              items = await load();
-            } catch (error) {
-              if (!(error instanceof CatalogPendingError))
-                throw new RequestError(
-                  503,
-                  "Справочник временно недоступен. Задайте марку и модель текстом.",
-                );
-              // The catalogue warms up in the background; a second try usually lands the list.
-              await new Promise((resolve) => setTimeout(resolve, 1500));
-              try {
-                items = await load();
-              } catch (retry) {
-                if (retry instanceof CatalogPendingError) {
-                  response.setHeader("Retry-After", "3");
-                  respond(response, 202, { state: "loading" });
-                  return;
-                }
-                throw new RequestError(
-                  503,
-                  "Справочник временно недоступен. Задайте марку и модель текстом.",
-                );
-              }
+            const items = await loadCatalogue(key as CatalogFieldKey, parent);
+            if (!items) {
+              response.setHeader("Retry-After", "3");
+              respond(response, 202, { state: "loading" });
+              return;
             }
             respond(response, 200, { state: "ready", items });
             return;
@@ -507,7 +516,6 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             const body = await readFlatJson(request, 8192);
             const requested = parseModelRequest(body);
             if (!requested.ok) throw new RequestError(400, requested.message);
-            const catalogue = options.catalog ?? vehicleCatalog;
             const previous = await options.store.getProfile(user.id);
             const profile = draftToProfile(
               user.id,
@@ -515,7 +523,12 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               previous,
             );
             const listings = await options.store.search(profile, 2000);
-            const items = await catalogue.getOptions("model", requested.request.make.id);
+            const items = await loadCatalogue("model", requested.request.make.id);
+            if (!items) {
+              response.setHeader("Retry-After", "3");
+              respond(response, 202, { state: "loading" });
+              return;
+            }
             const matching = items
               .map((item) => ({
                 id: item.id,
