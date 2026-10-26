@@ -137,7 +137,11 @@ export async function sendReplies(
       replyKeyboard(
         reply.buttons,
         detailUrl,
-        reply.miniAppView ? "Открыть в приложении" : undefined,
+        reply.miniAppView
+          ? reply.miniAppView === "filters"
+            ? "Настроить поиск"
+            : "Открыть в приложении"
+          : undefined,
         filtersUrl,
       );
     const hasKeyboard =

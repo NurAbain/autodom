@@ -28,28 +28,8 @@ export interface Reply {
   photos?: readonly string[];
   listingId?: string;
   richHtml?: string;
-  miniAppView?: "vin" | "buy" | "sell" | "report-example" | "orders";
+  miniAppView?: "vin" | "filters" | "orders";
   input?: { label: string; placeholder: string; mode: "text" | "numeric" | "decimal" };
-  filterEditor?: {
-    applyCommand?: string;
-    description: string;
-    sections: {
-      title: string;
-      fields: { label: string; value: string; command: string }[];
-    }[];
-    chips: { label: string; command: string }[];
-  };
-  picker?: {
-    title: string;
-    subtitle?: string;
-    page: number;
-    pages: number;
-    selected: number;
-    searchable: boolean;
-    options: { command: string; selected: boolean }[];
-    applyCommand?: string;
-    search: string;
-  };
 }
 export type ConversationStore = Pick<
   Store,

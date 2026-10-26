@@ -19,7 +19,13 @@ import { type BotMode, loadReportBotUrl } from "../src/bot-mode.js";
 import { CARFAX_REPORT_EXAMPLE_PDF } from "../src/carfax-report-example.js";
 import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
-import type { MiniAppCar, MiniAppFinikMethods, MiniAppVinResult } from "../src/miniapp-contract.js";
+import type {
+  MiniAppCar,
+  MiniAppFilterState,
+  MiniAppFinikMethods,
+  MiniAppSuggestions,
+  MiniAppVinResult,
+} from "../src/miniapp-contract.js";
 import {
   PAYMENT_PRIVACY_NOTICE,
   paymentAmountText,
@@ -55,7 +61,7 @@ type View =
   | "home"
   | "vin"
   | "checkout"
-  | "buy"
+  | "filters"
   | "sell"
   | "report-example"
   | "carfax-example"
@@ -512,7 +518,12 @@ function showHome(): void {
       "Продать или обменять авто",
       "Продажа, обмен на недвижимость или первый взнос автомобилем.",
     ],
-    ["buy", "03", "Купить авто", "Простой подбор по бюджету и вашим пожеланиям."],
+    [
+      "filters",
+      "03",
+      "Купить авто",
+      "Настройте условия: автомобиль, бюджет, город и характеристики.",
+    ],
   ] as const) {
     const goal = button("", () => navigate(view), "goal");
     const copy = element("span", "goal-copy");
@@ -692,18 +703,564 @@ function showCarfaxExample(): void {
   );
 }
 
-function showDialogue(view: "buy" | "sell"): void {
+type FilterDraft = {
+  currency: "USD" | "KGS";
+  budgetMin: number;
+  budgetMax: number;
+  query: string;
+  city: string;
+  bodyType: string;
+  transmission: string;
+  yearMin: number | null;
+  yearMax: number | null;
+  mileageMax: number | null;
+};
+
+const emptyFilterDraft = (): FilterDraft => ({
+  currency: "USD",
+  budgetMin: 0,
+  budgetMax: 0,
+  query: "",
+  city: "",
+  bodyType: "",
+  transmission: "",
+  yearMin: null,
+  yearMax: null,
+  mileageMax: null,
+});
+
+const moneyLabel = (value: number, currency: string): string =>
+  `${new Intl.NumberFormat("ru-RU").format(value)} ${currency}`;
+
+/** Russian plural for the match counter: 1 объявление, 2 объявления, 5 объявлений. */
+const listingsLabel = (count: number): string => {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${count} объявление`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${count} объявления`;
+  return `${count} объявлений`;
+};
+
+/** The chip shows what the user reads; the query keeps the catalogue spelling. */
+const queryLabel = (query: string): string =>
+  query
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(", ");
+
+async function showFilters(): Promise<void> {
   const main = shell();
   const started = generation;
   main.append(
-    element("p", "eyebrow", view === "buy" ? "Подбор автомобиля" : "Ваш автомобиль"),
-    element("h1", "", view === "buy" ? "Купить авто" : "Продать или обменять"),
+    element("p", "eyebrow", "Подбор автомобиля"),
+    element("h1", "", "Настроить поиск"),
     element(
       "p",
       "muted",
-      view === "buy"
-        ? "Настройте условия и проверьте подбор перед сохранением. В приложении и чате — один поиск."
-        : "Расскажите об авто и цели. Анкета продажи отделена от поиска автомобиля.",
+      "Один набор условий для всех площадок Кыргызстана. Сохранение условий и уведомления — разные кнопки.",
+    ),
+  );
+  const loading = element("div", "state");
+  loading.append(element("p", "", "Загружаем сохранённые условия…"));
+  main.append(loading);
+  let state: MiniAppFilterState;
+  try {
+    state = await request<MiniAppFilterState>("/miniapp/api/filter");
+  } catch (error) {
+    if (started === generation) {
+      loading.replaceChildren(
+        element("p", "", errorText(error)),
+        button("Повторить загрузку", () => void load(), "button button-quiet"),
+      );
+    }
+    return;
+  }
+  if (started !== generation) return;
+  const saved = state.profile;
+  const draft: FilterDraft = saved
+    ? {
+        currency: saved.currency,
+        budgetMin: Math.floor(saved.budget_min_minor / 100),
+        budgetMax: Math.floor(saved.budget_max_minor / 100),
+        query: saved.query,
+        city: saved.city,
+        bodyType: saved.body_type,
+        transmission: saved.transmission,
+        yearMin: saved.year_min,
+        yearMax: saved.year_max,
+        mileageMax: saved.mileage_max_km,
+      }
+    : emptyFilterDraft();
+  const bodyLabels = new Map(state.bodyTypes.map((option) => [option.value, option.label]));
+  const transmissionLabels = new Map(
+    state.transmissions.map((option) => [option.value, option.label]),
+  );
+  let consent = false;
+  let saving = false;
+  let previewTimer: number | undefined;
+  const chipsHost = element("div", "filter-chips");
+  const counter = element("p", "filter-counter", "Считаем совпадения…");
+  const status = element("p", "footnote filter-status");
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+
+  const draftBody = (): Record<string, unknown> => ({
+    currency: draft.currency,
+    budget_min_minor: Math.round(draft.budgetMin * 100),
+    budget_max_minor: Math.round(draft.budgetMax * 100),
+    query: draft.query.trim(),
+    city: draft.city.trim(),
+    body_type: draft.bodyType,
+    transmission: draft.transmission,
+    year_min: draft.yearMin,
+    year_max: draft.yearMax,
+    mileage_max_km: draft.mileageMax,
+  });
+
+  const numberInput = (
+    value: number | null,
+    placeholder: string,
+    onInput: (value: number | null) => void,
+  ): HTMLInputElement => {
+    const input = element("input", "text-input");
+    input.type = "number";
+    input.inputMode = "numeric";
+    input.min = "0";
+    input.step = "1";
+    input.placeholder = placeholder;
+    input.value = value === null ? "" : String(value);
+    input.addEventListener("input", () => {
+      const raw = input.value.trim();
+      onInput(raw === "" ? null : Number(raw));
+    });
+    return input;
+  };
+
+  const field = (labelText: string, control: HTMLElement, hint?: string): HTMLElement => {
+    const block = element("div", "filter-block");
+    const label = element("label", "filter-label", labelText);
+    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+      label.htmlFor = control.id;
+    }
+    block.append(label, control);
+    if (hint) block.append(element("p", "footnote", hint));
+    return block;
+  };
+
+  const vehicle = element("section", "panel");
+  const queryInput = element("input", "text-input");
+  queryInput.id = "filter-query";
+  queryInput.type = "text";
+  queryInput.maxLength = 160;
+  queryInput.placeholder = "Toyota Camry";
+  queryInput.value = draft.query;
+  queryInput.addEventListener("input", () => {
+    draft.query = queryInput.value;
+    renderChips();
+    schedulePreview();
+  });
+  const suggestionHost = element("div", "filter-suggest");
+  const suggestButton = button(
+    "Подсказки справочника",
+    () => void openSuggestions(null),
+    "button button-quiet",
+  );
+  vehicle.append(
+    element("h2", "", "Автомобиль"),
+    field(
+      "Марка, модель",
+      queryInput,
+      "До пяти альтернатив через запятую: все слова внутри варианта обязательны.",
+    ),
+    element("div", "button-row", ""),
+    suggestButton,
+    suggestionHost,
+  );
+
+  const budget = element("section", "panel");
+  const currencyRow = element("div", "button-row");
+  const currencyButtons: HTMLButtonElement[] = [];
+  for (const [value, label] of [
+    ["USD", "Доллары США · USD"],
+    ["KGS", "Сомы · KGS"],
+  ] as const) {
+    const control = button(
+      label,
+      () => {
+        if (draft.currency === value) return;
+        draft.currency = value;
+        draft.budgetMin = 0;
+        draft.budgetMax = 0;
+        minimumInput.value = "";
+        maximumInput.value = "";
+        renderCurrency();
+        renderChips();
+        schedulePreview();
+      },
+      "button button-quiet",
+    );
+    currencyButtons.push(control);
+    currencyRow.append(control);
+  }
+  const minimumInput = numberInput(draft.budgetMin || null, "7000", (value) => {
+    draft.budgetMin = value ?? 0;
+    renderChips();
+    schedulePreview();
+  });
+  const maximumInput = numberInput(draft.budgetMax || null, "12000", (value) => {
+    draft.budgetMax = value ?? 0;
+    renderChips();
+    schedulePreview();
+  });
+  budget.append(
+    element("h2", "", "Бюджет"),
+    currencyRow,
+    field("От", minimumInput),
+    field("До", maximumInput, "Цена объявления. Полная стоимость ввоза пока не рассчитывается."),
+  );
+
+  const place = element("section", "panel");
+  const cityInput = element("input", "text-input");
+  cityInput.id = "filter-city";
+  cityInput.type = "text";
+  cityInput.maxLength = 80;
+  cityInput.placeholder = "Бишкек";
+  cityInput.value = draft.city;
+  cityInput.addEventListener("input", () => {
+    draft.city = cityInput.value;
+    renderChips();
+    schedulePreview();
+  });
+  place.append(
+    element("h2", "", "Место"),
+    field("Город объявления", cityInput, "Место автомобиля в источнике, не адрес доставки."),
+  );
+
+  const traits = element("section", "panel");
+  const bodySelect = element("select", "text-input");
+  bodySelect.id = "filter-body";
+  bodySelect.append(element("option", "", "Любой кузов"));
+  for (const option of state.bodyTypes) {
+    const item = element("option", "", option.label);
+    item.value = option.value;
+    bodySelect.append(item);
+  }
+  bodySelect.value = draft.bodyType;
+  bodySelect.addEventListener("change", () => {
+    draft.bodyType = bodySelect.value;
+    renderChips();
+    schedulePreview();
+  });
+  const transmissionSelect = element("select", "text-input");
+  transmissionSelect.id = "filter-transmission";
+  transmissionSelect.append(element("option", "", "Любая коробка"));
+  for (const option of state.transmissions) {
+    const item = element("option", "", option.label);
+    item.value = option.value;
+    transmissionSelect.append(item);
+  }
+  transmissionSelect.value = draft.transmission;
+  transmissionSelect.addEventListener("change", () => {
+    draft.transmission = transmissionSelect.value;
+    renderChips();
+    schedulePreview();
+  });
+  const yearMinInput = numberInput(draft.yearMin, "2018", (value) => {
+    draft.yearMin = value;
+    renderChips();
+    schedulePreview();
+  });
+  const yearMaxInput = numberInput(draft.yearMax, "2024", (value) => {
+    draft.yearMax = value;
+    renderChips();
+    schedulePreview();
+  });
+  const mileageInput = numberInput(draft.mileageMax, "150000", (value) => {
+    draft.mileageMax = value;
+    renderChips();
+    schedulePreview();
+  });
+  traits.append(
+    element("h2", "", "Характеристики"),
+    field("Кузов", bodySelect),
+    field("Коробка передач", transmissionSelect),
+    element("div", "filter-row", ""),
+    field("Год от", yearMinInput),
+    field("Год до", yearMaxInput),
+    field(
+      "Пробег до, км",
+      mileageInput,
+      "Неизвестный год или пробег выбранный фильтр не проходит.",
+    ),
+  );
+
+  const consentPanel = element("section", "panel");
+  const privacy = element("details", "filter-privacy");
+  privacy.append(element("summary", "", "Данные и согласие"));
+  const privacyText = element("div", "reply-text");
+  privacyText.append(richText(state.privacy, null));
+  privacy.append(privacyText);
+  const consentBox = element("input", "filter-consent-box");
+  consentBox.type = "checkbox";
+  consentBox.id = "filter-consent";
+  const consentLabel = element("label", "filter-consent", "Согласен на хранение данных");
+  consentLabel.htmlFor = consentBox.id;
+  consentBox.addEventListener("change", () => {
+    consent = consentBox.checked;
+    renderSaveState();
+  });
+  consentPanel.append(privacy, element("div", "filter-consent", ""), consentBox, consentLabel);
+
+  const bar = element("div", "filter-bar");
+  const saveMonitor = button("Сохранить и включить мониторинг", () => void save(true), "button");
+  const saveSilent = button(
+    "Сохранить без уведомлений",
+    () => void save(false),
+    "button button-quiet",
+  );
+  bar.append(counter, saveMonitor, saveSilent);
+
+  const selected = element("section", "panel");
+  selected.append(element("h2", "", "Выбранные условия"), chipsHost);
+
+  main.replaceChildren(selected, vehicle, budget, place, traits, consentPanel, status, bar);
+
+  function renderCurrency(): void {
+    for (const [index, value] of (["USD", "KGS"] as const).entries()) {
+      currencyButtons[index]?.setAttribute("aria-pressed", String(draft.currency === value));
+    }
+  }
+
+  function renderChips(): void {
+    const chips: { label: string; clear: () => void }[] = [];
+    if (draft.query.trim())
+      chips.push({
+        label: queryLabel(draft.query),
+        clear: () => {
+          draft.query = "";
+          queryInput.value = "";
+        },
+      });
+    if (draft.budgetMax > 0)
+      chips.push({
+        label:
+          draft.budgetMin > 0
+            ? `${moneyLabel(draft.budgetMin, draft.currency)} — ${moneyLabel(draft.budgetMax, draft.currency)}`
+            : `до ${moneyLabel(draft.budgetMax, draft.currency)}`,
+        clear: () => {
+          draft.budgetMin = 0;
+          draft.budgetMax = 0;
+          minimumInput.value = "";
+          maximumInput.value = "";
+        },
+      });
+    if (draft.city.trim())
+      chips.push({
+        label: draft.city.trim(),
+        clear: () => {
+          draft.city = "";
+          cityInput.value = "";
+        },
+      });
+    if (draft.bodyType)
+      chips.push({
+        label: bodyLabels.get(draft.bodyType) ?? draft.bodyType,
+        clear: () => {
+          draft.bodyType = "";
+          bodySelect.value = "";
+        },
+      });
+    if (draft.transmission)
+      chips.push({
+        label: transmissionLabels.get(draft.transmission) ?? draft.transmission,
+        clear: () => {
+          draft.transmission = "";
+          transmissionSelect.value = "";
+        },
+      });
+    if (draft.yearMin !== null || draft.yearMax !== null)
+      chips.push({
+        label:
+          draft.yearMin !== null && draft.yearMax !== null
+            ? `${draft.yearMin} — ${draft.yearMax}`
+            : draft.yearMin !== null
+              ? `от ${draft.yearMin}`
+              : `до ${draft.yearMax}`,
+        clear: () => {
+          draft.yearMin = null;
+          draft.yearMax = null;
+          yearMinInput.value = "";
+          yearMaxInput.value = "";
+        },
+      });
+    if (draft.mileageMax !== null)
+      chips.push({
+        label: `до ${new Intl.NumberFormat("ru-RU").format(draft.mileageMax)} км`,
+        clear: () => {
+          draft.mileageMax = null;
+          mileageInput.value = "";
+        },
+      });
+    chipsHost.replaceChildren(
+      ...chips.map((chip) => {
+        const control = button(
+          "",
+          () => {
+            chip.clear();
+            renderChips();
+            schedulePreview();
+          },
+          "button button-quiet filter-chip",
+        );
+        control.setAttribute("aria-label", `Убрать условие: ${chip.label}`);
+        const remove = element("span", "filter-chip-remove", "×");
+        remove.setAttribute("aria-hidden", "true");
+        control.append(element("span", "", chip.label), remove);
+        return control;
+      }),
+    );
+  }
+
+  function renderSaveState(): void {
+    saveMonitor.disabled = !consent || saving;
+    saveSilent.disabled = !consent || saving;
+  }
+
+  function schedulePreview(): void {
+    window.clearTimeout(previewTimer);
+    previewTimer = window.setTimeout(() => void refreshMatches(), 400);
+  }
+
+  async function refreshMatches(): Promise<void> {
+    counter.textContent = "Считаем совпадения…";
+    try {
+      const result = await request<{ matches: number }>("/miniapp/api/filter/preview", draftBody());
+      if (started !== generation) return;
+      counter.textContent = `Подходит ${listingsLabel(result.matches)}`;
+    } catch {
+      if (started === generation) counter.textContent = "Число совпадений временно недоступно";
+    }
+  }
+
+  async function openSuggestions(
+    parent: { id: string; value: string; label: string } | null,
+  ): Promise<void> {
+    suggestionHost.replaceChildren(element("p", "footnote", "Загружаем справочник…"));
+    try {
+      const query = parent ? `?key=model&parent=${encodeURIComponent(parent.id)}` : "?key=make";
+      const result = await request<MiniAppSuggestions | { state: "loading" }>(
+        `/miniapp/api/filter/suggest${query}`,
+      );
+      if (started !== generation) return;
+      if (result.state !== "ready") {
+        suggestionHost.replaceChildren(
+          element("p", "footnote", "Готовим справочник. Повторите через несколько секунд."),
+        );
+        return;
+      }
+      const list = element("div", "filter-suggest-list");
+      if (parent) {
+        list.append(
+          button("← Марки", () => void openSuggestions(null), "back-link"),
+          button(
+            `Только ${parent.label}`,
+            () => {
+              draft.query = parent.value;
+              queryInput.value = draft.query;
+              suggestionHost.replaceChildren();
+              renderChips();
+              schedulePreview();
+            },
+            "button button-quiet",
+          ),
+        );
+      }
+      for (const item of result.items) {
+        list.append(
+          button(
+            item.label,
+            () => {
+              if (!parent) {
+                void openSuggestions({ id: item.id, value: item.value, label: item.label });
+                return;
+              }
+              draft.query = `${parent.value} ${item.value}`;
+              queryInput.value = draft.query;
+              suggestionHost.replaceChildren();
+              renderChips();
+              schedulePreview();
+            },
+            "button button-quiet",
+          ),
+        );
+      }
+      suggestionHost.replaceChildren(list);
+    } catch (error) {
+      if (started === generation)
+        suggestionHost.replaceChildren(element("p", "footnote", errorText(error)));
+    }
+  }
+
+  async function save(monitoring: boolean): Promise<void> {
+    if (saving) return;
+    if (!consent) {
+      status.textContent = "Отметьте согласие на хранение данных.";
+      return;
+    }
+    saving = true;
+    renderSaveState();
+    status.textContent = "Сохраняем условия…";
+    try {
+      const result = await request<{ revision: string; monitoring: boolean; matches: number }>(
+        "/miniapp/api/filter",
+        { ...draftBody(), monitoring, consent: true },
+      );
+      if (started !== generation) return;
+      const section = element("section", "panel");
+      section.append(
+        element("h2", "", "Условия сохранены"),
+        element(
+          "p",
+          "",
+          result.monitoring
+            ? "Бесплатные уведомления о новых совпадениях и снижении цены включены. /pause — остановить."
+            : "Уведомления не включены. /resume — включить бесплатный мониторинг.",
+        ),
+        element("p", "muted", `Подходит ${listingsLabel(result.matches)}.`),
+      );
+      const actions = element("div", "button-row");
+      actions.append(
+        button("Открыть подбор в чате", closeCard, "button"),
+        button("Изменить условия", () => void load(), "button button-quiet"),
+      );
+      section.append(actions);
+      main.replaceChildren(section);
+    } catch (error) {
+      if (started === generation) status.textContent = errorText(error);
+    } finally {
+      saving = false;
+      if (started === generation) renderSaveState();
+    }
+  }
+
+  renderCurrency();
+  renderChips();
+  renderSaveState();
+  void refreshMatches();
+}
+
+function showDialogue(view: "sell"): void {
+  const main = shell();
+  const started = generation;
+  main.append(
+    element("p", "eyebrow", "Ваш автомобиль"),
+    element("h1", "", "Продать или обменять"),
+    element(
+      "p",
+      "muted",
+      "Расскажите об авто и цели. Анкета продажи отделена от поиска автомобиля.",
     ),
   );
   const content = element("div", "dialogue-content");
@@ -730,14 +1287,13 @@ function showDialogue(view: "buy" | "sell"): void {
   main.append(content, status, cancel);
   let busy = false;
   let inputContext = "";
-  const expandedFilters = new Map<string, boolean>();
 
   function runAction(command: string): void {
     if (busy) return;
     if (command === "vin-report-example") samplePdfLink().click();
     else if (command === "/vin") navigate("vin");
     else if (command === "/start") navigate("home");
-    else if (command === "/buy" && view !== "buy") navigate("buy");
+    else if (command === "/filters") navigate("filters");
     else if ((command === "/sell" || command === "/mycar") && view !== "sell") navigate("sell");
     else void send(command);
   }
@@ -745,104 +1301,9 @@ function showDialogue(view: "buy" | "sell"): void {
   function renderReply(reply: Reply): HTMLElement {
     const section = element("section", "panel dialogue-reply");
     section.tabIndex = -1;
-    const editor = view === "buy" ? reply.filterEditor : undefined;
-    const representedCommands = new Set<string>();
-    if (reply.picker) {
-      section.classList.add("dialogue-picker");
-      const heading = element("header", "picker-heading");
-      if (reply.picker.subtitle)
-        heading.append(element("p", "picker-breadcrumb", reply.picker.subtitle));
-      heading.append(element("h2", "", reply.picker.title));
-      const meta = element("div", "picker-meta");
-      meta.append(
-        element("span", "badge", `Выбрано: ${reply.picker.selected}`),
-        element("span", "footnote", `Страница ${reply.picker.page} из ${reply.picker.pages}`),
-      );
-      heading.append(meta);
-      section.append(heading);
-      section.setAttribute("aria-label", reply.picker.title);
-    }
     const text = element("div", "reply-text");
     text.append(richText(reply.text, null));
-    const repeatedTitle = text.firstChild;
-    if (
-      reply.picker &&
-      repeatedTitle instanceof HTMLElement &&
-      (repeatedTitle.tagName === "B" || repeatedTitle.tagName === "STRONG") &&
-      repeatedTitle.textContent === reply.picker.title
-    ) {
-      repeatedTitle.remove();
-      const firstLine = text.firstChild;
-      const prefix = `\n${reply.picker.subtitle ?? ""}\n`;
-      if (firstLine?.nodeType === Node.TEXT_NODE && firstLine.textContent?.startsWith(prefix))
-        firstLine.textContent = firstLine.textContent.slice(prefix.length);
-    }
-    if (editor) {
-      section.classList.add("dialogue-filter-editor");
-      section.setAttribute("aria-label", "Условия поиска");
-      section.append(element("h2", "", "Условия поиска"));
-      if (editor.description)
-        section.append(element("p", "filter-description", editor.description));
-      if (editor.chips.length) {
-        const selected = element("div", "filter-selected");
-        selected.append(element("h3", "", "Выбранные условия"));
-        const chips = element("div", "filter-chips");
-        for (const chip of editor.chips) {
-          representedCommands.add(chip.command);
-          const control = button(
-            "",
-            () => runAction(chip.command),
-            "button button-quiet filter-chip",
-          );
-          control.setAttribute("aria-label", `Убрать условие: ${chip.label}`);
-          control.dataset.focusLabel = `chip:${chip.label}`;
-          const remove = element("span", "filter-chip-remove", "×");
-          remove.setAttribute("aria-hidden", "true");
-          control.append(element("span", "", chip.label), remove);
-          chips.append(control);
-        }
-        selected.append(chips);
-        section.append(selected);
-      }
-      for (const [index, group] of editor.sections.entries()) {
-        const fields = element("div", "filter-fields");
-        for (const field of group.fields) {
-          representedCommands.add(field.command);
-          const control = button(
-            "",
-            () => runAction(field.command),
-            "button button-quiet filter-field",
-          );
-          control.dataset.focusLabel = `field:${group.title}:${field.label}`;
-          const edit = element("span", "filter-field-edit", "Изменить");
-          edit.setAttribute("aria-hidden", "true");
-          control.append(
-            element("span", "filter-field-label", field.label),
-            element("span", "filter-field-value", field.value),
-            edit,
-          );
-          fields.append(control);
-        }
-        if (index === 0) {
-          const primary = element("fieldset", "filter-group");
-          primary.append(element("legend", "", group.title), fields);
-          section.append(primary);
-        } else {
-          const secondary = element("details", "filter-group filter-secondary");
-          secondary.open = expandedFilters.get(group.title) ?? index < 3;
-          secondary.addEventListener("toggle", () => {
-            if (secondary.isConnected) expandedFilters.set(group.title, secondary.open);
-          });
-          secondary.append(element("summary", "", group.title), fields);
-          section.append(secondary);
-        }
-      }
-      const summary = element("details", "filter-summary");
-      summary.append(element("summary", "", "Сводка и пояснения"), text);
-      section.append(summary);
-    } else {
-      section.append(text);
-    }
+    section.append(text);
     if (reply.listingId) {
       section.append(
         button(
@@ -852,31 +1313,20 @@ function showDialogue(view: "buy" | "sell"): void {
         ),
       );
     }
-    if (reply.miniAppView && reply.miniAppView !== view) {
+    if (reply.miniAppView) {
       const target = reply.miniAppView;
       section.append(
         button(
-          target === "report-example"
-            ? "Разобрать пример на русском"
-            : target === "vin"
-              ? "Открыть проверку VIN"
-              : "Открыть",
+          target === "vin" ? "Открыть проверку VIN" : "Открыть",
           () => navigate(target),
           "button button-quiet",
         ),
       );
     }
     const actions = element("div", "dialogue-actions");
-    const options = element("div", "picker-options");
-    const pickerOptions = new Map(reply.picker?.options.map((option) => [option.command, option]));
-    if (reply.picker) {
-      options.setAttribute("role", "group");
-      options.setAttribute("aria-label", `Варианты: ${reply.picker.title}`);
-    }
     for (const row of reply.buttons) {
       const group = element("div", "button-row");
       for (const [label, command] of row) {
-        if (representedCommands.has(command)) continue;
         const url = safeUrl(command);
         let control: HTMLButtonElement | HTMLAnchorElement;
         if (command === "vin-report-example") {
@@ -888,36 +1338,11 @@ function showDialogue(view: "buy" | "sell"): void {
           control = button(label, () => runAction(command), "button button-quiet");
         }
         control.dataset.focusLabel = label.replace(/^✓\s*/, "");
-        const option = pickerOptions.get(command);
-        if (option) {
-          control.classList.add("picker-option");
-          control.setAttribute("aria-pressed", String(option.selected));
-          options.append(control);
-        } else {
-          if (reply.picker?.applyCommand === command) {
-            control.classList.remove("button-quiet");
-            control.classList.add("picker-apply");
-          }
-          if (editor?.applyCommand === command) {
-            control.classList.remove("button-quiet");
-            control.classList.add("filter-save");
-            group.classList.add("filter-save-row");
-          }
-          group.append(control);
-        }
+        group.append(control);
       }
       if (group.childElementCount) actions.append(group);
     }
-    if (options.childElementCount) section.append(options);
     section.append(actions);
-    if (editor?.applyCommand)
-      section.append(
-        element(
-          "p",
-          "filter-save-note",
-          "Уведомления включатся только при выборе сохранения с мониторингом.",
-        ),
-      );
     return section;
   }
 
@@ -929,29 +1354,18 @@ function showDialogue(view: "buy" | "sell"): void {
       form.remove();
       return;
     }
-    const searching = reply.picker?.searchable === true;
-    const context =
-      searching || reply.input
-        ? JSON.stringify([reply.picker?.title, reply.picker?.subtitle, reply.input])
-        : "";
-    if (searching) input.value = reply.picker!.search;
-    else if (!context || context !== inputContext) input.value = "";
+    const context = reply.input ? JSON.stringify(reply.input) : "";
+    if (!context || context !== inputContext) input.value = "";
     inputContext = context;
-    form.hidden = !reply.input && (view === "buy" || !!reply.picker) && !searching;
-    label.textContent = reply.input?.label ?? (searching ? "Поиск по справочнику" : "Ваш ответ");
-    input.placeholder =
-      reply.input?.placeholder ?? (searching ? "Введите название…" : "Напишите ответ…");
-    input.type = searching ? "search" : "text";
+    form.hidden = !reply.input;
+    label.textContent = reply.input?.label ?? "Ваш ответ";
+    input.placeholder = reply.input?.placeholder ?? "Напишите ответ…";
+    input.type = "text";
     input.inputMode = reply.input?.mode ?? "text";
-    input.enterKeyHint = searching ? "search" : "send";
-    input.spellcheck = !reply.picker && input.inputMode === "text";
-    submit.textContent = searching ? "Найти" : reply.input ? "Применить" : "Отправить";
-    form.classList.toggle("dialogue-search", searching);
-    const searchPosition = searching ? section.querySelector(".picker-heading")?.nextSibling : null;
-    section.insertBefore(
-      form,
-      searchPosition ?? section.querySelector(".picker-options, .dialogue-actions"),
-    );
+    input.enterKeyHint = "send";
+    input.spellcheck = input.inputMode === "text";
+    submit.textContent = reply.input ? "Применить" : "Отправить";
+    section.insertBefore(form, section.querySelector(".dialogue-actions"));
   }
 
   async function send(text: string): Promise<void> {
@@ -978,23 +1392,20 @@ function showDialogue(view: "buy" | "sell"): void {
         content.append(
           element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
         );
-      const picker = result.replies.at(-1)?.picker;
-      status.textContent = picker
-        ? `${picker.title}. Выбрано: ${picker.selected}. Страница ${picker.page} из ${picker.pages}.`
-        : "Шаг обновлён.";
+      status.textContent = "Шаг обновлён.";
       input.disabled = false;
       const matching = focusLabel
         ? Array.from(content.querySelectorAll<HTMLElement>("[data-focus-label]")).find(
             (node) => node.dataset.focusLabel === focusLabel,
           )
         : undefined;
-      if (!form.hidden && form.isConnected && (restoreInput || (view === "buy" && !matching))) {
+      if (!form.hidden && form.isConnected && restoreInput) {
         input.focus({ preventScroll: true });
       } else if (focusLabel) {
         if (matching instanceof HTMLButtonElement) matching.disabled = false;
         (matching ?? sections.at(-1))?.focus({ preventScroll: true });
       }
-      if (!picker || (!focusLabel && !restoreInput)) {
+      if (!focusLabel && !restoreInput) {
         content.scrollIntoView({
           block: "start",
           behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -1028,7 +1439,7 @@ function showDialogue(view: "buy" | "sell"): void {
     event.preventDefault();
     runAction(input.value.trim());
   });
-  void send(view === "buy" ? "/buy" : "/sell");
+  void send("/sell");
 }
 
 function gallery(
@@ -2163,7 +2574,7 @@ async function load(): Promise<void> {
     view === "vin" ||
     view === "checkout" ||
     view === "carfax-example" ||
-    view === "buy" ||
+    view === "filters" ||
     view === "sell" ||
     view === "report-example" ||
     view === "orders" ||
@@ -2218,8 +2629,12 @@ async function load(): Promise<void> {
     showExample();
     return;
   }
-  if (currentView === "buy" || currentView === "sell") {
-    showDialogue(currentView);
+  if (currentView === "filters") {
+    await showFilters();
+    return;
+  }
+  if (currentView === "sell") {
+    showDialogue("sell");
     return;
   }
   if (!id || id.length > 200 || params.getAll("car").length !== 1) {
