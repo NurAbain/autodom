@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { catalogFilterSchema, emptyCatalogFilter } from "./catalog-filter.js";
 
 export const MARKETS = {
   KG: "Кыргызстан",
@@ -106,10 +105,10 @@ export const profileSchema = z
     budget_scope: z.string().default("car"),
     body_type: text,
     year_min: optionalInteger,
+    year_max: optionalInteger,
     mileage_max_km: optionalInteger,
     transmission: text,
     use_case: text,
-    catalog_filter: catalogFilterSchema.default(emptyCatalogFilter),
     allow_import: z.boolean().nullable().default(null),
     purchase_by: text,
   })

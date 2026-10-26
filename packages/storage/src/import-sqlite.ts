@@ -14,6 +14,13 @@ const SOURCE_METADATA: Record<string, true> = {
   full_scan_completed_at: true,
 };
 type LegacyRow = Record<string, string | number | bigint | null | Uint8Array>;
+/** Shape the removed catalogue criteria keep in the database for an older bot. */
+const LEGACY_CATALOG_FILTER = {
+  vehicles: [] as unknown[],
+  options: {} as Record<string, unknown>,
+  ranges: {} as Record<string, unknown>,
+  below_market_percent: null as number | null,
+};
 function number(value: unknown): number {
   if (
     !(typeof value === "bigint" || typeof value === "number") ||
@@ -164,7 +171,11 @@ export async function importSqlite(path: string, store: Store): Promise<Record<s
                     : typeof value === "bigint"
                       ? number(value)
                       : value;
-            values = { ...makeProfile(fields as Parameters<typeof makeProfile>[0]) };
+            values = {
+              ...makeProfile(fields as Parameters<typeof makeProfile>[0]),
+              // The catalogue criteria are gone; the column keeps its shape for an older bot.
+              catalog_filter: LEGACY_CATALOG_FILTER,
+            };
           } else if (table === "drafts") {
             values = {
               user_id: number(row.user_id),

@@ -1,5 +1,3 @@
-import type { CatalogChoice, CatalogFilter, CatalogVehicle } from "./catalog-filter.js";
-import { emptyCatalogFilter } from "./catalog-filter.js";
 import type { Profile } from "./models.js";
 
 /** Sort options offered by the public catalogue; `new` is the freshness default. */
@@ -12,7 +10,7 @@ export const CATALOG_PAGE_SIZE = 24;
 export interface CatalogQuery {
   /** Free-text request; empty means no text restriction. */
   q: string;
-  /** Market filter: `KG`, `ALL`, or another market from the shared registry. */
+  /** Market filter; the catalogue serves the local market only. */
   market: string;
   currency: "USD" | "KGS";
   /** Budget bounds in minor units of `currency`; null means unbounded. */
@@ -62,10 +60,6 @@ function money(value: string | null): number | null {
   return parsed;
 }
 
-function catalogChoice(value: string): CatalogChoice {
-  return { id: value, value, label: value };
-}
-
 /**
  * Reads the public catalogue query from a URL. Unknown parameters are ignored so that
  * campaign links keep working, but every recognised parameter is validated strictly:
@@ -86,7 +80,7 @@ export function parseCatalogQuery(input: string | URLSearchParams): CatalogQuery
   const budgetMax = money(params.get("budget_max"));
   return {
     q: text(params.get("q")),
-    market: text(params.get("market")) || "ALL",
+    market: "KG",
     currency,
     budget_min_minor: budgetMin,
     budget_max_minor: budgetMax,
@@ -113,7 +107,6 @@ export function parseCatalogQuery(input: string | URLSearchParams): CatalogQuery
 export function catalogQueryParams(query: CatalogQuery): URLSearchParams {
   const params = new URLSearchParams();
   if (query.q) params.set("q", query.q);
-  if (query.market !== "ALL") params.set("market", query.market);
   if (query.currency !== "KGS") params.set("currency", query.currency);
   if (query.budget_min_minor !== null)
     params.set("budget_min", String(query.budget_min_minor / 100));
@@ -137,17 +130,17 @@ export function catalogQueryIsPlain(query: CatalogQuery): boolean {
   return catalogQueryParams(query).toString() === "";
 }
 
-/** Translates the catalogue query into the shared filter used by the bot and the Mini App. */
-export function catalogQueryToFilter(query: CatalogQuery): CatalogFilter {
-  const filter = emptyCatalogFilter();
-  if (query.make) {
-    const vehicle: CatalogVehicle = { make: catalogChoice(query.make) };
-    if (query.model) vehicle.model = catalogChoice(query.model);
-    filter.vehicles = [vehicle];
-  }
-  if (query.body_type) filter.options.body_type = [catalogChoice(query.body_type)];
-  if (query.year_max !== null) filter.ranges.year = { min: null, max: query.year_max };
-  return filter;
+/**
+ * Make, model and free text describe one car, so they narrow each other: every word
+ * has to be present. The catalogue cannot use source attributes, because only one
+ * marketplace fills them in.
+ */
+export function catalogQueryText(query: CatalogQuery): string {
+  const words = [query.make, query.model, query.q]
+    .flatMap((part) => part.split(/[,;]/u))
+    .flatMap((part) => part.split(/\s+/u))
+    .filter(Boolean);
+  return words.join(" ");
 }
 
 /**
@@ -161,7 +154,7 @@ export function catalogQueryToProfile(query: CatalogQuery): Profile {
     currency: query.currency,
     budget_min_minor: query.budget_min_minor ?? 0,
     budget_max_minor: query.budget_max_minor ?? Number.MAX_SAFE_INTEGER,
-    query: query.q,
+    query: catalogQueryText(query),
     monitoring: false,
     revision: "0",
     cursor: 0,
@@ -172,10 +165,10 @@ export function catalogQueryToProfile(query: CatalogQuery): Profile {
     budget_scope: "car",
     body_type: query.body_type,
     year_min: query.year_min,
+    year_max: query.year_max,
     mileage_max_km: query.mileage_max_km,
     transmission: query.transmission,
     use_case: "",
-    catalog_filter: catalogQueryToFilter(query),
     allow_import: true,
     purchase_by: "",
   };
