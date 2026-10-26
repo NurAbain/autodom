@@ -1,0 +1,10 @@
+[Unit]
+Description=Autodom release watcher (deploys Coolify apps when a release branch moves)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/autodom-deploy-watch
+User=root
+Group=root
