@@ -199,6 +199,7 @@ export class ProxyTransport implements DocumentTransport {
   readonly #limit: LimitFunction;
   #riskBypass: RiskBypass | undefined;
   #lalafoSession: LalafoSession | undefined;
+  #lalafoAffinity: string | undefined;
   #lalafoRefresh: { promise: Promise<LalafoSession>; abort: AbortController } | undefined;
   readonly #lalafoUnavailable = new Map<number, number>();
   #lalafoRetryAt = 0;
@@ -488,13 +489,18 @@ export class ProxyTransport implements DocumentTransport {
     let rejected = false;
     for (let attempt = 0; attempt < LALAFO_CAPTURE_ATTEMPTS; attempt++) {
       signal.throwIfAborted();
-      const affinity = randomUUID().slice(0, 8);
+      // The affinity token selects one static ISP port and one pinned gateway.
+      // A route that worked stays in use until it fails, so a renewal does not
+      // pay for a solve on an exit the provider may refuse.
+      const affinity =
+        attempt === 0 && this.#lalafoAffinity ? this.#lalafoAffinity : randomUUID().slice(0, 8);
+      const reuse = attempt === 0 && this.#lalafoAffinity !== undefined;
       const first = Number.parseInt(affinity, 16) % count;
       let page: number | undefined;
       for (let offset = 0; offset < count; offset++) {
         const candidate = ((first + offset) % count) + 1;
         if (
-          (count === 1 || candidate !== this.#lalafoSession?.page) &&
+          (count === 1 || reuse || candidate !== this.#lalafoSession?.page) &&
           (this.#lalafoUnavailable.get(candidate) ?? 0) <= Date.now()
         ) {
           page = candidate;
@@ -520,6 +526,7 @@ export class ProxyTransport implements DocumentTransport {
         signal.throwIfAborted();
         const session = { client, page, expiresAt: Date.now() + LALAFO_SESSION_TTL_MS };
         this.#lalafoSession = session;
+        this.#lalafoAffinity = affinity;
         this.#lalafoRetryAt = 0;
         return session;
       } catch (error) {

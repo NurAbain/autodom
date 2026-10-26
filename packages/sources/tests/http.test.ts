@@ -441,7 +441,9 @@ describe("mandatory proxy document transport", () => {
       items: [{ id: 42 }],
     });
     expect(staleRequests).toBe(0);
-    expect(ports.size).toBe(2);
+    // The verified exit stays in use until the provider refuses it, so a renewal
+    // does not pay for a solve on an exit that may be blocked.
+    expect(ports.size).toBe(1);
   });
 
   it("replaces a revoked Lalafo session once for concurrent readers", async () => {
@@ -566,6 +568,49 @@ describe("mandatory proxy document transport", () => {
         source: "lalafo.kg",
       }),
     ).resolves.toEqual({ items: [{ id: 42 }] });
+    expect(pages.size).toBe(2);
+  });
+
+  it("falls back to another static port when the verified route is refused", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const started = Date.now();
+    const pages = new Set<number>();
+    let created = 0;
+    const transport = await lalafoTransport((_route, page) => {
+      pages.add(page);
+      const refused = created === 0;
+      created++;
+      let cleared = false;
+      return {
+        refresh: async () => {
+          if (refused)
+            throw new RiskBypassError(
+              "RiskBypass refused the exit IP of the configured proxy",
+              "proxy_rejected",
+            );
+          cleared = true;
+        },
+        fetch: async () => {
+          if (!cleared)
+            return new Response("Challenge", {
+              status: 403,
+              headers: { "cf-mitigated": "challenge" },
+            });
+          return new Response('{"items":[{"id":42}]}');
+        },
+      };
+    });
+    const url = "https://lalafo.kg/api/search/v3/feed/search";
+    await expect(transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" })).resolves.toEqual({
+      items: [{ id: 42 }],
+    });
+    // The refused exit is abandoned for another static port.
+    expect(pages.size).toBe(2);
+    // The replacement route is the one that gets reused on the next renewal.
+    vi.setSystemTime(started + 121 * 60_000);
+    await expect(transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" })).resolves.toEqual({
+      items: [{ id: 42 }],
+    });
     expect(pages.size).toBe(2);
   });
 
