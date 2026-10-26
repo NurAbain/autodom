@@ -11,7 +11,7 @@ import {
   MARKETS,
   money,
 } from "@autodom/core";
-import type { CatalogFieldKey, CatalogLookup } from "@autodom/core/catalog-filter";
+import type { CatalogChoice, CatalogFieldKey, CatalogLookup } from "@autodom/core/catalog-filter";
 import { normalizeVin, VIN_PROVIDERS, type VinLookup } from "@autodom/core/vin";
 import { VIN_ARCHIVE_PHOTO_MAX_BYTES, type VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import {
@@ -465,23 +465,34 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               (key === "model" ? !/^[1-9]\d{0,17}$/u.test(parent ?? "") : parent !== undefined)
             )
               throw new RequestError(400, "Недопустимый запрос справочника.");
+            const catalogue = options.catalog ?? vehicleCatalog;
+            const load = () => catalogue.getOptions(key as CatalogFieldKey, parent);
+            let items: readonly CatalogChoice[];
             try {
-              const items = await (options.catalog ?? vehicleCatalog).getOptions(
-                key as CatalogFieldKey,
-                parent,
-              );
-              respond(response, 200, { state: "ready", items });
+              items = await load();
             } catch (error) {
-              if (error instanceof CatalogPendingError) {
-                response.setHeader("Retry-After", "3");
-                respond(response, 202, { state: "loading" });
-                return;
+              if (!(error instanceof CatalogPendingError))
+                throw new RequestError(
+                  503,
+                  "Справочник временно недоступен. Задайте марку и модель текстом.",
+                );
+              // The catalogue warms up in the background; a second try usually lands the list.
+              await new Promise((resolve) => setTimeout(resolve, 1500));
+              try {
+                items = await load();
+              } catch (retry) {
+                if (retry instanceof CatalogPendingError) {
+                  response.setHeader("Retry-After", "3");
+                  respond(response, 202, { state: "loading" });
+                  return;
+                }
+                throw new RequestError(
+                  503,
+                  "Справочник временно недоступен. Задайте марку и модель текстом.",
+                );
               }
-              throw new RequestError(
-                503,
-                "Справочник временно недоступен. Задайте марку и модель текстом.",
-              );
             }
+            respond(response, 200, { state: "ready", items });
             return;
           }
           if (url.pathname === "/miniapp/api/filter/preview") {

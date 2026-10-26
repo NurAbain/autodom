@@ -17,6 +17,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { AnalyticsEvent } from "../src/analytics-contract.js";
 import { startMiniAppServer } from "../src/miniapp-server.js";
 import { PaymentService } from "../src/payments.js";
+import { CatalogPendingError } from "../src/vehicle-catalog.js";
 
 const TOKEN = "12345:detail-server-fixture";
 const PUBLIC_URL = "https://cars.example/miniapp/";
@@ -1405,6 +1406,50 @@ describe("buyer filter editor", () => {
           })
         ).status,
       ).toBe(400);
+  });
+
+  it("retries a catalogue that is still warming up and returns the list", async () => {
+    let calls = 0;
+    const retryingServer = await startMiniAppServer({
+      token: TOKEN,
+      publicUrl: PUBLIC_URL,
+      host: "127.0.0.1",
+      port: 0,
+      assetsDirectory: directory,
+      ready: async () => true,
+      catalog: {
+        async getOptions() {
+          calls += 1;
+          if (calls === 1) throw new CatalogPendingError();
+          return [{ id: "1", value: "toyota", label: "Toyota" }];
+        },
+      },
+      store: {
+        getProfile: async () => null,
+        getListing: async () => null,
+        saveProfile: async () => profile,
+        countMatches: async () => 0,
+      },
+    });
+    try {
+      const address = retryingServer.address();
+      if (!address || typeof address === "string") throw new Error("No listening address");
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/miniapp/api/filter/suggest?key=make`,
+        { headers: { Authorization: authorization() } },
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        state: "ready",
+        items: [{ id: "1", value: "toyota", label: "Toyota" }],
+      });
+      expect(calls).toBe(2);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        retryingServer.close((error) => (error ? reject(error) : resolve()));
+        retryingServer.closeAllConnections();
+      });
+    }
   });
 
   it("keeps the buyer filter out of the VIN bot", async () => {

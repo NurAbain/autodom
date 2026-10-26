@@ -1161,42 +1161,58 @@ async function showFilters(): Promise<void> {
         return;
       }
       const list = element("div", "filter-suggest-list");
-      if (parent) {
-        list.append(
-          button("← Марки", () => void openSuggestions(null), "back-link"),
-          button(
-            `Только ${parent.label}`,
-            () => {
-              draft.query = parent.value;
-              queryInput.value = draft.query;
-              suggestionHost.replaceChildren();
-              renderChips();
-              schedulePreview();
-            },
-            "button button-quiet",
-          ),
+      const search = element("input", "text-input");
+      search.type = "search";
+      search.placeholder = parent ? "Поиск модели" : "Поиск марки";
+      search.autocomplete = "off";
+      const counter = element("p", "footnote");
+      const render = () => {
+        const needle = search.value.trim().toLowerCase();
+        const visible = result.items.filter(
+          (item) => !needle || item.label.toLowerCase().includes(needle),
         );
-      }
-      for (const item of result.items) {
-        list.append(
-          button(
-            item.label,
-            () => {
-              if (!parent) {
-                void openSuggestions({ id: item.id, value: item.value, label: item.label });
-                return;
-              }
-              draft.query = `${parent.value} ${item.value}`;
-              queryInput.value = draft.query;
-              suggestionHost.replaceChildren();
-              renderChips();
-              schedulePreview();
-            },
-            "button button-quiet",
-          ),
-        );
-      }
-      suggestionHost.replaceChildren(list);
+        list.replaceChildren();
+        if (parent) {
+          list.append(
+            button("← Марки", () => void openSuggestions(null), "back-link"),
+            button(
+              `Только ${parent.label}`,
+              () => {
+                draft.query = parent.value;
+                queryInput.value = draft.query;
+                suggestionHost.replaceChildren();
+                renderChips();
+                schedulePreview();
+              },
+              "button button-quiet",
+            ),
+          );
+        }
+        for (const item of visible) {
+          list.append(
+            button(
+              item.label,
+              () => {
+                if (!parent) {
+                  void openSuggestions({ id: item.id, value: item.value, label: item.label });
+                  return;
+                }
+                draft.query = `${parent.value} ${item.value}`;
+                queryInput.value = draft.query;
+                suggestionHost.replaceChildren();
+                renderChips();
+                schedulePreview();
+              },
+              "button button-quiet",
+            ),
+          );
+        }
+        if (!visible.length) list.append(element("p", "footnote", "Ничего не найдено."));
+        counter.textContent = `Вариантов: ${visible.length} из ${result.items.length}`;
+      };
+      search.addEventListener("input", render);
+      render();
+      suggestionHost.replaceChildren(search, counter, list);
     } catch (error) {
       if (started === generation)
         suggestionHost.replaceChildren(element("p", "footnote", errorText(error)));
