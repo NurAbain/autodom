@@ -37,6 +37,7 @@ import { CARFAX_REPORT_EXAMPLE_PDF } from "./carfax-report-example.js";
 import {
   type Buttons,
   Conversation,
+  FILTERS_ACTION,
   listingReplies,
   packReplies,
   type Reply,
@@ -72,11 +73,16 @@ function replyKeyboard(
   buttons: Buttons,
   detailUrl?: string,
   detailLabel = "Подробнее об автомобиле и VIN",
+  filtersUrl?: string,
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const [index, row] of buttons.entries()) {
     if (index) keyboard.row();
-    for (const [label, action] of row) keyboard.text(label, action);
+    for (const [label, action] of row) {
+      // The conditions live in the Mini App; the chat button opens the editor.
+      if (action === FILTERS_ACTION && filtersUrl) keyboard.webApp(label, filtersUrl);
+      else keyboard.text(label, action);
+    }
   }
   if (detailUrl) {
     if (buttons.length) keyboard.row();
@@ -123,12 +129,20 @@ export async function sendReplies(
         : reply.miniAppView && options.miniAppUrl
           ? new URL(`?view=${encodeURIComponent(reply.miniAppView)}`, options.miniAppUrl).href
           : undefined;
+    const filtersUrl = options.miniAppUrl
+      ? new URL("?view=filters", options.miniAppUrl).href
+      : undefined;
     const keyboard =
       options.fallbackReplyMarkup ??
       replyKeyboard(
         reply.buttons,
         detailUrl,
-        reply.miniAppView ? "Открыть в приложении" : undefined,
+        reply.miniAppView
+          ? reply.miniAppView === "filters"
+            ? "Настроить поиск"
+            : "Открыть в приложении"
+          : undefined,
+        filtersUrl,
       );
     const hasKeyboard =
       options.fallbackReplyMarkup !== undefined ||

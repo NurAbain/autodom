@@ -3,7 +3,6 @@ import { createReadStream, type ReadStream } from "node:fs";
 import { mkdir, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { MARKETS, makeListing, makeProfile, normalize } from "@autodom/core";
-import { emptyCatalogFilter } from "@autodom/core/catalog-filter";
 import { type OwnerVehicle, validateOwnerVehicle } from "@autodom/core/owner-vehicle";
 import {
   finikPaymentId,
@@ -32,7 +31,14 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
+/** Shape the old catalogue filter keeps after the criteria are dropped. */
+const LEGACY_CATALOG_FILTER = {
+  vehicles: [] as unknown[],
+  options: {} as Record<string, unknown>,
+  ranges: {} as Record<string, unknown>,
+  below_market_percent: null as number | null,
+};
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -103,7 +109,6 @@ export async function insertSnapshotRow(
       } as Parameters<typeof makeProfile>[0]),
     );
     validateQuietHours(p.quiet_start_minute, p.quiet_end_minute);
-    row.catalog_filter = p.catalog_filter;
   }
   if (table === "owner_vehicles") {
     const card = { ...row };
@@ -313,7 +318,9 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, SCHEMA_VERSION].includes(header.schema_version as number) ||
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION].includes(
+        header.schema_version as number,
+      ) ||
       JSON.stringify(header.tables) !==
         JSON.stringify(
           (header.schema_version as number) >= 8
@@ -414,7 +421,12 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         if ((header.schema_version as number) < 6 && table === "profiles") {
           if (Object.hasOwn(row, "catalog_filter"))
             throw new Error("Unexpected catalog filter in historical snapshot");
-          row = { ...row, catalog_filter: emptyCatalogFilter() };
+          row = { ...row, catalog_filter: LEGACY_CATALOG_FILTER };
+        }
+        if ((header.schema_version as number) < 12 && table === "profiles") {
+          if (Object.hasOwn(row, "year_max"))
+            throw new Error("Unexpected year range in historical snapshot");
+          row = { ...row, year_max: null };
         }
         if ((header.schema_version as number) < 6 && table === "listings") {
           if (Object.hasOwn(row, "normalized_title"))

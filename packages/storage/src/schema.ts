@@ -1,5 +1,4 @@
 import type { Listing } from "@autodom/core";
-import type { CatalogFilter } from "@autodom/core/catalog-filter";
 import type { OwnerCurrency, OwnerPurpose, PropertyType } from "@autodom/core/owner-vehicle";
 import type { PaymentEvent, PaymentOrder, PaymentRefund } from "@autodom/core/payments";
 import { sql } from "drizzle-orm";
@@ -91,13 +90,16 @@ export const profiles = pgTable(
     budget_scope: text("budget_scope").notNull().default("car"),
     body_type: text("body_type").notNull().default(""),
     year_min: integer("year_min"),
+    year_max: integer("year_max"),
     mileage_max_km: integer("mileage_max_km"),
     transmission: text("transmission").notNull().default(""),
     use_case: text("use_case").notNull().default(""),
     allow_import: boolean("allow_import"),
     purchase_by: text("purchase_by").notNull().default(""),
+    // Legacy catalogue criteria stay in the database so an older bot can still read
+    // profiles after a rollback; the current contract does not use them.
     catalog_filter: jsonb("catalog_filter")
-      .$type<CatalogFilter>()
+      .$type<Record<string, unknown>>()
       .notNull()
       .default(sql`'{"vehicles":[],"options":{},"ranges":{},"below_market_percent":null}'::jsonb`),
   },
@@ -110,6 +112,10 @@ export const profiles = pgTable(
     check("profiles_market", sql`${table.market} IN ('KG','KR','US','AE','ALL')`),
     check("profiles_budget_scope", sql`${table.budget_scope} IN ('car','total')`),
     check("profiles_catalog_filter", sql`jsonb_typeof(${table.catalog_filter}) = 'object'`),
+    check(
+      "profiles_year_range",
+      sql`(${table.year_min} IS NULL OR ${table.year_min} >= 1900) AND (${table.year_max} IS NULL OR ${table.year_max} >= 1900) AND (${table.year_min} IS NULL OR ${table.year_max} IS NULL OR ${table.year_max} >= ${table.year_min})`,
+    ),
     check(
       "profiles_quiet_hours",
       sql`(${table.quiet_start_minute} IS NULL AND ${table.quiet_end_minute} IS NULL) OR (${table.quiet_start_minute} IS NOT NULL AND ${table.quiet_end_minute} IS NOT NULL AND ${table.quiet_start_minute} BETWEEN 0 AND 1439 AND ${table.quiet_end_minute} BETWEEN 0 AND 1439 AND ${table.quiet_start_minute} != ${table.quiet_end_minute})`,

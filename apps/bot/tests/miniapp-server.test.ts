@@ -13,7 +13,7 @@ import type {
 } from "@autodom/core/vin-archive";
 import type { Store } from "@autodom/storage";
 import { Api } from "grammy";
-import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnalyticsEvent } from "../src/analytics-contract.js";
 import { startMiniAppServer } from "../src/miniapp-server.js";
 import { PaymentService } from "../src/payments.js";
@@ -29,6 +29,7 @@ let readinessError: Error | null = null;
 const storageError = new Error("database password=private-connection-secret");
 const analyticsEvents: AnalyticsEvent[] = [];
 let rejectAnalytics = false;
+const savedProfiles = new Map<number, ReturnType<typeof makeProfile>>();
 const profile = makeProfile({
   user_id: 42,
   chat_id: 42,
@@ -119,6 +120,7 @@ const paidPhotoAccess = vi.fn<PaymentService["hasPhotoAccess"]>(
 );
 beforeEach(() => {
   vi.spyOn(photoPayments, "hasPhotoAccess").mockImplementation(paidPhotoAccess);
+  savedProfiles.clear();
 });
 
 function authorization(userId = 42): string {
@@ -172,11 +174,33 @@ beforeAll(async () => {
       if (readinessError) throw readinessError;
       return databaseReady;
     },
+    catalog: {
+      async getOptions(key, parentId) {
+        if (key === "make") return [{ id: "1", value: "toyota", label: "Toyota" }];
+        if (key === "model" && parentId === "1")
+          return [{ id: "2", value: "Camry", label: "Camry" }];
+        throw new Error("Unknown catalogue key");
+      },
+    },
     store: {
       async getProfile(id) {
         if (id === 42) return profile;
         if (id === 43) return { ...profile, user_id: 43, chat_id: -100 };
-        return null;
+        return savedProfiles.get(id) ?? null;
+      },
+      async saveProfile(input) {
+        const saved = { ...input, revision: String(Number(input.revision || "0") + 1) };
+        savedProfiles.set(input.user_id, saved);
+        return saved;
+      },
+      async countMatches(input) {
+        const words = input.query
+          .split(",")
+          .map((part) => part.trim().toLowerCase())
+          .filter(Boolean);
+        return [listing, lalafoListing].filter((item) =>
+          words.every((word) => item.title.toLowerCase().includes(word)),
+        ).length;
       },
       async getListing(id, freshOnly) {
         if (id === "storage-error") throw storageError;
@@ -522,6 +546,8 @@ it("creates the requested report from recent actor evidence without another VIN 
   const store = {
     getProfile: async () => null,
     getListing: async () => null,
+    saveProfile: async () => profile,
+    countMatches: async () => 0,
     withLock: async <T>(_key: string, action: () => Promise<T>) => action(),
   };
   const payments = new PaymentService(store as unknown as Store);
@@ -700,7 +726,12 @@ it("reports an unconfigured VIN service without fabricating observations", async
     port: 0,
     assetsDirectory: directory,
     ready: async () => true,
-    store: { getProfile: async () => null, getListing: async () => null },
+    store: {
+      getProfile: async () => null,
+      getListing: async () => null,
+      saveProfile: async () => profile,
+      countMatches: async () => 0,
+    },
   });
   try {
     const address = disabled.address();
@@ -803,7 +834,12 @@ it("reports refused dialogue admission as retryable without confusing an empty s
     port: 0,
     assetsDirectory: directory,
     ready: async () => true,
-    store: { getProfile: async () => null, getListing: async () => null },
+    store: {
+      getProfile: async () => null,
+      getListing: async () => null,
+      saveProfile: async () => profile,
+      countMatches: async () => 0,
+    },
     dialogue: async () => (busy ? null : []),
   });
   try {
@@ -1098,7 +1134,12 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
     assetsDirectory: directory,
     ready: async () => true,
     payments,
-    store: { getProfile: async () => null, getListing: async () => null },
+    store: {
+      getProfile: async () => null,
+      getListing: async () => null,
+      saveProfile: async () => profile,
+      countMatches: async () => 0,
+    },
     analytics: {
       async record(event) {
         analyticsEvents.push(event);
@@ -1228,4 +1269,172 @@ it("keeps known vehicle facts public but withholds both Korean and archive image
     expect(paid.photoAccess.granted).toBe(true);
     expect(JSON.stringify(paid)).toContain(result.encar ? koreanPhoto : photoRequest.photo_url);
   }
+});
+
+describe("buyer filter editor", () => {
+  const draft = {
+    currency: "USD",
+    budget_min_minor: 0,
+    budget_max_minor: 1_500_000,
+    query: "Toyota Camry",
+    city: "Бишкек",
+    body_type: "sedan",
+    transmission: "automatic",
+    year_min: 2015,
+    year_max: 2024,
+    mileage_max_km: 150_000,
+  };
+  const post = async (body: unknown, userId = 42) =>
+    fetch(`${base}/miniapp/api/filter`, {
+      method: "POST",
+      headers: { Authorization: authorization(userId), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("serves the saved conditions, the consent text and the characteristic choices", async () => {
+    const response = await fetch(`${base}/miniapp/api/filter`, {
+      headers: { Authorization: authorization() },
+    });
+    expect(response.status).toBe(200);
+    const state = await response.json();
+    expect(state.profile).toMatchObject({
+      currency: "USD",
+      query: "Honda Fit",
+      budget_max_minor: 100,
+    });
+    expect(state.privacy).toContain("После вашего согласия на хранение");
+    expect(state.bodyTypes).toContainEqual({ value: "sedan", label: "Седан" });
+    expect(state.transmissions).toContainEqual({ value: "automatic", label: "Автомат" });
+  });
+
+  it("requires the Telegram session, the own origin and a known method", async () => {
+    expect((await fetch(`${base}/miniapp/api/filter`)).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/miniapp/api/filter`, {
+          headers: { Authorization: authorization(), Origin: "https://other.example" },
+        })
+      ).status,
+    ).toBe(403);
+    const response = await fetch(`${base}/miniapp/api/filter`, {
+      method: "PUT",
+      headers: { Authorization: authorization() },
+    });
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET, POST");
+  });
+
+  it("saves the conditions without notifications and with notifications as separate choices", async () => {
+    const silent = await post({ ...draft, monitoring: false, consent: true });
+    expect(silent.status).toBe(200);
+    const silentBody = await silent.json();
+    expect(silentBody.monitoring).toBe(false);
+    expect(silentBody.matches).toBe(2);
+    const saved = savedProfiles.get(42);
+    expect(saved).toMatchObject({
+      query: "Toyota Camry",
+      city: "Бишкек",
+      body_type: "sedan",
+      transmission: "automatic",
+      year_min: 2015,
+      year_max: 2024,
+      mileage_max_km: 150_000,
+      monitoring: false,
+      market: "KG",
+    });
+    const loud = await post({ ...draft, monitoring: true, consent: true });
+    expect(loud.status).toBe(200);
+    expect(await loud.json()).toMatchObject({ monitoring: true });
+    expect(savedProfiles.get(42)?.monitoring).toBe(true);
+  });
+
+  it("refuses to save without the storage consent or with unusable conditions", async () => {
+    const withoutConsent = await post({ ...draft, monitoring: false });
+    expect(withoutConsent.status).toBe(400);
+    expect((await withoutConsent.json()).error).toContain("согласие");
+    for (const invalid of [
+      { ...draft, consent: true, body_type: "spaceship" },
+      { ...draft, consent: true, budget_min_minor: 2_000_000 },
+      { ...draft, consent: true, year_max: 2000 },
+      { ...draft, consent: true, query: "a, b, c, d, e, f" },
+      { ...draft, consent: true, city: "123" },
+    ]) {
+      const response = await post(invalid);
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBeTruthy();
+    }
+    expect(savedProfiles.get(42)).toBeUndefined();
+  });
+
+  it("counts matches for a draft without storing it", async () => {
+    const response = await fetch(`${base}/miniapp/api/filter/preview`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ matches: 2 });
+    const empty = await fetch(`${base}/miniapp/api/filter/preview`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ...draft, query: "Kia Rio" }),
+    });
+    expect(await empty.json()).toEqual({ matches: 0 });
+    expect(savedProfiles.get(42)).toBeUndefined();
+  });
+
+  it("suggests makes and models from the catalogue and refuses unknown requests", async () => {
+    const makes = await fetch(`${base}/miniapp/api/filter/suggest?key=make`, {
+      headers: { Authorization: authorization() },
+    });
+    expect(makes.status).toBe(200);
+    expect(await makes.json()).toEqual({
+      state: "ready",
+      items: [{ id: "1", value: "toyota", label: "Toyota" }],
+    });
+    const models = await fetch(`${base}/miniapp/api/filter/suggest?key=model&parent=1`, {
+      headers: { Authorization: authorization() },
+    });
+    expect(models.status).toBe(200);
+    expect(await models.json()).toMatchObject({ state: "ready" });
+    for (const query of ["?key=color", "?key=model", "?key=model&parent=abc", "?key=make&parent=1"])
+      expect(
+        (
+          await fetch(`${base}/miniapp/api/filter/suggest${query}`, {
+            headers: { Authorization: authorization() },
+          })
+        ).status,
+      ).toBe(400);
+  });
+
+  it("keeps the buyer filter out of the VIN bot", async () => {
+    const vinServer = await startMiniAppServer({
+      token: TOKEN,
+      publicUrl: PUBLIC_URL,
+      host: "127.0.0.1",
+      port: 0,
+      assetsDirectory: directory,
+      mode: "vin",
+      ready: async () => true,
+      store: {
+        getProfile: async () => null,
+        getListing: async () => null,
+        saveProfile: async () => profile,
+        countMatches: async () => 0,
+      },
+    });
+    try {
+      const address = vinServer.address();
+      if (!address || typeof address === "string") throw new Error("No listening address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/miniapp/api/filter`, {
+        headers: { Authorization: authorization() },
+      });
+      expect(response.status).toBe(404);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        vinServer.close((error) => (error ? reject(error) : resolve()));
+        vinServer.closeAllConnections();
+      });
+    }
+  });
 });

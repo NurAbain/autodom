@@ -80,6 +80,15 @@ it("requires exact known hard fields but does not filter advisory preferences", 
   expect(normalizeMileageKm("999999999999999999999999 km")).toBeNull();
 });
 
+it("keeps the year range closed and rejects an unknown year", () => {
+  const selected = { ...profile, year_min: 2018, year_max: 2021 };
+  expect(matches(selected, { ...car, year: 2018 })).toBe(true);
+  expect(matches(selected, { ...car, year: 2021 })).toBe(true);
+  expect(matches(selected, { ...car, year: 2017 })).toBe(false);
+  expect(matches(selected, { ...car, year: 2022 })).toBe(false);
+  expect(matches(selected, { ...car, year: null })).toBe(false);
+});
+
 it("gates all-market searches by operator permissions and excludes foreign total budgets", () => {
   const foreign = {
     ...car,
