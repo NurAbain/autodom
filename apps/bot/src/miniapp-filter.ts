@@ -1,4 +1,11 @@
-import { BODY_TYPES, makeProfile, type Profile, TRANSMISSIONS } from "@autodom/core";
+import {
+  BODY_TYPES,
+  type Listing,
+  makeProfile,
+  normalize,
+  type Profile,
+  TRANSMISSIONS,
+} from "@autodom/core";
 import { z } from "zod";
 import type { MiniAppFilterDraft, MiniAppFilterProfile } from "./miniapp-contract.js";
 
@@ -97,6 +104,58 @@ export function filterChoices(): {
     bodyTypes: Object.entries(BODY_TYPES).map(([value, label]) => ({ value, label })),
     transmissions: Object.entries(TRANSMISSIONS).map(([value, label]) => ({ value, label })),
   };
+}
+
+export interface MiniAppModelChoice {
+  id: string;
+  value: string;
+  label: string;
+  /** How many collected ads match the current conditions for this model. */
+  matches: number;
+}
+
+export interface ModelRequest {
+  make: { id: string; value: string; label: string };
+  draft: MiniAppFilterDraft;
+}
+
+const makeRequestSchema = z.object({
+  make_id: z.string().trim().min(1).max(128),
+  make_value: plainText(120),
+  make_label: plainText(120),
+});
+
+export type ModelRequestResult =
+  | { ok: true; request: ModelRequest }
+  | { ok: false; message: string };
+
+/** Reads the make the user picked together with the conditions of the search. */
+export function parseModelRequest(body: Record<string, unknown>): ModelRequestResult {
+  const draft = parseFilterDraft(body);
+  if (!draft.ok) return { ok: false, message: draft.message };
+  const make = makeRequestSchema.safeParse(body);
+  if (!make.success)
+    return { ok: false, message: "Сначала выберите марку: подсказки приходят из справочника." };
+  return {
+    ok: true,
+    request: {
+      make: { id: make.data.make_id, value: make.data.make_value, label: make.data.make_label },
+      draft: draft.draft,
+    },
+  };
+}
+
+/**
+ * True when the ad belongs to the model. Mashina names the model in its attributes;
+ * the other marketplaces only carry it in the title, so both are checked.
+ */
+export function listingMatchesModel(listing: Listing, model: { value: string }): boolean {
+  const attribute = listing.catalog_attributes.model;
+  if (attribute && normalize(attribute) === normalize(model.value)) return true;
+  const words = normalize(model.value).split(" ").filter(Boolean);
+  if (!words.length) return false;
+  const title = ` ${normalize(listing.title)} `;
+  return words.every((word) => title.includes(` ${word} `));
 }
 
 export function filterProfileView(profile: Profile): MiniAppFilterProfile {
