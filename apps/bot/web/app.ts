@@ -1250,7 +1250,8 @@ async function showFilters(): Promise<void> {
     suggestionHost.replaceChildren(element("p", "footnote", "Ищем модели под ваш поиск…"));
     try {
       const result = await request<{
-        items: { id: string; value: string; label: string; matches: number }[];
+        state?: "ready" | "loading";
+        items?: { id: string; value: string; label: string; matches: number }[];
       }>("/miniapp/api/filter/models", {
         ...draftBody(),
         make_id: make.id,
@@ -1258,7 +1259,19 @@ async function showFilters(): Promise<void> {
         make_label: make.label,
       });
       if (started !== generation) return;
-      if (!result.items.length) {
+      if (result.state === "loading" || !result.items) {
+        suggestionHost.replaceChildren(
+          element(
+            "p",
+            "footnote",
+            "Справочник готовится. Повторите выбор модели через несколько секунд.",
+          ),
+          button("← Марки", () => void openMakes(), "back-link"),
+        );
+        return;
+      }
+      const matching = result.items ?? [];
+      if (!matching.length) {
         suggestionHost.replaceChildren(
           element(
             "p",
@@ -1269,7 +1282,7 @@ async function showFilters(): Promise<void> {
         );
         return;
       }
-      const items = result.items.map((item) => ({
+      const items = matching.map((item) => ({
         label: item.label,
         hint: `${item.matches} ${plural(item.matches, "объявление", "объявления", "объявлений")}`,
       }));
@@ -1278,7 +1291,7 @@ async function showFilters(): Promise<void> {
           items,
           "Поиск модели",
           (index) => {
-            const chosen = result.items[index];
+            const chosen = matching[index];
             if (!chosen) return;
             draft.model = { id: chosen.id, value: chosen.value, label: chosen.label };
             draft.query = `${make.value} ${chosen.value}`;
