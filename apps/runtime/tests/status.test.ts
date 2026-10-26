@@ -1,5 +1,5 @@
-import type { Store } from "@autodom/storage";
 import { expect, it } from "vitest";
+import type { Store } from "@autodom/storage";
 import { runtimeHealth } from "../src/status.js";
 
 const now = Date.now() / 1000;
@@ -38,10 +38,6 @@ it("reports the bot unhealthy when its heartbeat is stale", async () => {
 
 it("reports the worker unhealthy without a queue connection", async () => {
   expect(
-    await runtimeHealth(
-      store({ worker_heartbeat: String(now) }),
-      { monitor_seconds: 30 },
-      "worker",
-    ),
+    await runtimeHealth(store({ worker_heartbeat: String(now) }), { monitor_seconds: 30 }, "worker"),
   ).toBe(false);
 });

@@ -38,12 +38,22 @@ const ORIGINS: Readonly<Record<string, string>> = {
 const LALAFO_CLEARANCE_URL = "https://lalafo.kg/kyrgyzstan/nedvizhimost";
 const LALAFO_SESSION_TTL_MS = 120 * 60_000;
 const LALAFO_SESSION_MARGIN_MS = 5 * 60_000;
+// A refused exit IP is unusable, so another static port is the remedy and the
+// route must not park the client in the long degraded-source cooldown.
+const LALAFO_ROUTE_REJECTION_COOLDOWN_MS = 60_000;
+const LALAFO_CAPTURE_ATTEMPTS = 3;
 const LALAFO_SESSION_PROBE: DocumentRequest<unknown> = {
   url: "https://lalafo.kg/api/search/v3/feed/search",
   options: {
     source: "lalafo.kg",
     params: { category_id: 1502, page: 1, "per-page": 1 },
-    headers: { Device: "pc", Language: "ru_RU", "Country-Id": "12" },
+    headers: {
+      Accept: "application/json, text/plain, */*",
+      Device: "pc",
+      Language: "ru_RU",
+      "Country-Id": "12",
+      "x-cache-bypass": "yes",
+    },
   },
   parse: (text) => {
     const data: unknown = JSON.parse(text);
@@ -57,6 +67,17 @@ interface LalafoSession {
   readonly client: BrowserClient;
   readonly page: number;
   readonly expiresAt: number;
+}
+
+// A refused exit IP needs another static port, not a long degraded-source
+// cooldown, so the capture reports how long the next attempt must wait.
+class LalafoCaptureError extends SourceError {
+  readonly cooldownMs: number;
+  constructor(message: string, cooldownMs: number) {
+    super(message);
+    this.name = "LalafoCaptureError";
+    this.cooldownMs = cooldownMs;
+  }
 }
 
 class LalafoSessionRejected extends SourceError {}
@@ -178,6 +199,7 @@ export class ProxyTransport implements DocumentTransport {
   readonly #limit: LimitFunction;
   #riskBypass: RiskBypass | undefined;
   #lalafoSession: LalafoSession | undefined;
+  #lalafoAffinity: string | undefined;
   #lalafoRefresh: { promise: Promise<LalafoSession>; abort: AbortController } | undefined;
   readonly #lalafoUnavailable = new Map<number, number>();
   #lalafoRetryAt = 0;
@@ -237,14 +259,11 @@ export class ProxyTransport implements DocumentTransport {
     return dispatcher;
   }
 
-  private solver(fallback: ProxyRoute): RiskBypass {
+  private solver(): RiskBypass {
     if (!this.#riskBypass) {
-      const route =
-        this.#options.routes.find((candidate) => candidate.tier === "datacenter") ?? fallback;
-      this.#riskBypass = new RiskBypass({
-        apiKey: process.env.RISKBYPASS_API_KEY ?? "",
-        dispatcher: this.dispatcher(route, 1, this.#options.routes.indexOf(route)),
-      });
+      // The provider control plane is reached directly. A dedicated ISP route is
+      // not a prerequisite for renewal and the datacenter account answers 407.
+      this.#riskBypass = new RiskBypass({ apiKey: process.env.RISKBYPASS_API_KEY ?? "" });
     }
     return this.#riskBypass;
   }
@@ -270,7 +289,7 @@ export class ProxyTransport implements DocumentTransport {
     const client =
       this.#options.browserClientFactory?.(route, page, index) ??
       new CloudflareBrowser(route, page, {
-        solve: (url, proxy, signal) => this.solver(route).solve(url, proxy, signal),
+        solve: (url, proxy, signal) => this.solver().solve(url, proxy, signal),
       });
     clients.set(page, client);
     // A rotating tier must not evict another tier's established sessions.
@@ -467,15 +486,21 @@ export class ProxyTransport implements DocumentTransport {
     if (!route) throw new SourceError("Lalafo requires its dedicated ISP route");
     const index = this.#options.routes.indexOf(route);
     const count = Math.max(1, route.port_count);
-    for (let attempt = 0; attempt < 3; attempt++) {
+    let rejected = false;
+    for (let attempt = 0; attempt < LALAFO_CAPTURE_ATTEMPTS; attempt++) {
       signal.throwIfAborted();
-      const affinity = randomUUID().slice(0, 8);
+      // The affinity token selects one static ISP port and one pinned gateway.
+      // A route that worked stays in use until it fails, so a renewal does not
+      // pay for a solve on an exit the provider may refuse.
+      const affinity =
+        attempt === 0 && this.#lalafoAffinity ? this.#lalafoAffinity : randomUUID().slice(0, 8);
+      const reuse = attempt === 0 && this.#lalafoAffinity !== undefined;
       const first = Number.parseInt(affinity, 16) % count;
       let page: number | undefined;
       for (let offset = 0; offset < count; offset++) {
         const candidate = ((first + offset) % count) + 1;
         if (
-          (count === 1 || candidate !== this.#lalafoSession?.page) &&
+          (count === 1 || reuse || candidate !== this.#lalafoSession?.page) &&
           (this.#lalafoUnavailable.get(candidate) ?? 0) <= Date.now()
         ) {
           page = candidate;
@@ -488,27 +513,77 @@ export class ProxyTransport implements DocumentTransport {
         new CloudflareBrowser(
           route,
           page,
-          { solve: (url, proxy, signal) => this.solver(route).solve(url, proxy, signal) },
+          { solve: (url, proxy, signal) => this.solver().solve(url, proxy, signal) },
           affinity,
         );
       try {
         if (!client.refresh) throw new RiskBypassError("Lalafo requires a clearance solver");
-        await client.refresh(new URL(LALAFO_CLEARANCE_URL), client.generation ?? 0, signal);
+        // The API sometimes answers without an interactive challenge; the paid
+        // solver stays the fallback so a calm site never costs a solve.
+        if (!(await this.lalafoClearanceFree(client, signal)))
+          await client.refresh(new URL(LALAFO_CLEARANCE_URL), client.generation ?? 0, signal);
         await this.requestLalafo(client, LALAFO_SESSION_PROBE, signal);
         signal.throwIfAborted();
         const session = { client, page, expiresAt: Date.now() + LALAFO_SESSION_TTL_MS };
         this.#lalafoSession = session;
+        this.#lalafoAffinity = affinity;
         this.#lalafoRetryAt = 0;
         return session;
       } catch (error) {
         signal.throwIfAborted();
-        if (error instanceof RiskBypassError || error instanceof SourceRateLimited) throw error;
-        this.#lalafoUnavailable.set(page, Date.now() + REFRESH_COOLDOWN_MS);
+        if (error instanceof SourceRateLimited) throw error;
+        // A refused exit stays unusable: switch to another static port instead of
+        // parking the rejected route for the long cooldown.
+        const refused = error instanceof RiskBypassError && error.reason === "proxy_rejected";
+        rejected = rejected || refused;
+        this.#lalafoUnavailable.set(
+          page,
+          Date.now() + (refused ? LALAFO_ROUTE_REJECTION_COOLDOWN_MS : REFRESH_COOLDOWN_MS),
+        );
+        if (error instanceof RiskBypassError && !refused) {
+          this.#lalafoRetryAt = Date.now() + REFRESH_COOLDOWN_MS;
+          throw error;
+        }
       }
     }
+    if (rejected)
+      throw new LalafoCaptureError(
+        "Lalafo routes were refused by the clearance provider",
+        LALAFO_ROUTE_REJECTION_COOLDOWN_MS,
+      );
     throw new SourceError(
-      "Lalafo could not establish a verified session within three ISP attempts",
+      `Lalafo could not establish a verified session within ${LALAFO_CAPTURE_ATTEMPTS} ISP attempts`,
     );
+  }
+
+  // Answers whether the API serves this route without clearance. The probe uses
+  // the same pinned gateway as the solver would, so a positive answer proves the
+  // route itself is usable.
+  private async lalafoClearanceFree(client: BrowserClient, signal: AbortSignal): Promise<boolean> {
+    const request = LALAFO_SESSION_PROBE;
+    const url = requestUrl(request.url, request.options);
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), 40_000).unref();
+    const requestSignal = AbortSignal.any([signal, deadline.signal]);
+    try {
+      const response = await client.fetch(url, {
+        method: request.options.method ?? "GET",
+        headers: { ...request.options.headers },
+        redirect: "manual",
+        signal: requestSignal,
+      });
+      if (response.status !== 200 || response.headers.get("cf-mitigated") === "challenge") {
+        await response.body?.cancel().catch(() => undefined);
+        return false;
+      }
+      request.parse(await readBody(response));
+      return true;
+    } catch {
+      signal.throwIfAborted();
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async lalafoSession(signal: AbortSignal): Promise<LalafoSession> {
@@ -524,7 +599,9 @@ export class ProxyTransport implements DocumentTransport {
       const abort = new AbortController();
       const promise = this.captureLalafoSession(abort.signal)
         .catch((error: unknown) => {
-          this.#lalafoRetryAt = Date.now() + REFRESH_COOLDOWN_MS;
+          this.#lalafoRetryAt =
+            Date.now() +
+            (error instanceof LalafoCaptureError ? error.cooldownMs : REFRESH_COOLDOWN_MS);
           throw error;
         })
         .finally(() => {

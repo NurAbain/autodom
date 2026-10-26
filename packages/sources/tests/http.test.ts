@@ -441,7 +441,9 @@ describe("mandatory proxy document transport", () => {
       items: [{ id: 42 }],
     });
     expect(staleRequests).toBe(0);
-    expect(ports.size).toBe(2);
+    // The verified exit stays in use until the provider refuses it, so a renewal
+    // does not pay for a solve on an exit that may be blocked.
+    expect(ports.size).toBe(1);
   });
 
   it("replaces a revoked Lalafo session once for concurrent readers", async () => {
@@ -505,7 +507,9 @@ describe("mandatory proxy document transport", () => {
   it("rejects an unusable Lalafo capture before admitting catalog requests", async () => {
     let captures = 0;
     let unverifiedDocuments = 0;
-    const transport = await lalafoTransport(() => {
+    const pages = new Set<number>();
+    const transport = await lalafoTransport((_route, page) => {
+      pages.add(page);
       const unusable = captures === 0;
       return {
         refresh: async () => {
@@ -526,7 +530,104 @@ describe("mandatory proxy document transport", () => {
       }),
     ).resolves.toEqual({ items: [{ id: 42 }] });
     expect(unverifiedDocuments).toBe(0);
-    expect(captures).toBe(2);
+    // The unusable route is abandoned for another static port, and the route that
+    // answers without clearance costs no paid solve.
+    expect(pages.size).toBe(2);
+    expect(captures).toBe(1);
+  });
+
+  it("switches to another static port when the provider refuses the exit IP", async () => {
+    const pages = new Set<number>();
+    let created = 0;
+    const transport = await lalafoTransport((_route, page) => {
+      pages.add(page);
+      const refused = created === 0;
+      created++;
+      let cleared = false;
+      return {
+        refresh: async () => {
+          if (refused)
+            throw new RiskBypassError(
+              "RiskBypass refused the exit IP of the configured proxy",
+              "proxy_rejected",
+            );
+          cleared = true;
+        },
+        fetch: async () => {
+          if (!cleared)
+            return new Response("Challenge", {
+              status: 403,
+              headers: { "cf-mitigated": "challenge" },
+            });
+          return new Response('{"items":[{"id":42}]}');
+        },
+      };
+    });
+    await expect(
+      transport.fetchDocument("https://lalafo.kg/api/search/v3/feed/search", JSON.parse, {
+        source: "lalafo.kg",
+      }),
+    ).resolves.toEqual({ items: [{ id: 42 }] });
+    expect(pages.size).toBe(2);
+  });
+
+  it("falls back to another static port when the verified route is refused", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const started = Date.now();
+    const pages = new Set<number>();
+    let created = 0;
+    const transport = await lalafoTransport((_route, page) => {
+      pages.add(page);
+      const refused = created === 0;
+      created++;
+      let cleared = false;
+      return {
+        refresh: async () => {
+          if (refused)
+            throw new RiskBypassError(
+              "RiskBypass refused the exit IP of the configured proxy",
+              "proxy_rejected",
+            );
+          cleared = true;
+        },
+        fetch: async () => {
+          if (!cleared)
+            return new Response("Challenge", {
+              status: 403,
+              headers: { "cf-mitigated": "challenge" },
+            });
+          return new Response('{"items":[{"id":42}]}');
+        },
+      };
+    });
+    const url = "https://lalafo.kg/api/search/v3/feed/search";
+    await expect(transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" })).resolves.toEqual({
+      items: [{ id: 42 }],
+    });
+    // The refused exit is abandoned for another static port.
+    expect(pages.size).toBe(2);
+    // The replacement route is the one that gets reused on the next renewal.
+    vi.setSystemTime(started + 121 * 60_000);
+    await expect(transport.fetchDocument(url, JSON.parse, { source: "lalafo.kg" })).resolves.toEqual({
+      items: [{ id: 42 }],
+    });
+    expect(pages.size).toBe(2);
+  });
+
+  it("uses the API without a paid solve when the route answers without clearance", async () => {
+    let solves = 0;
+    const transport = await lalafoTransport(() => ({
+      refresh: async () => {
+        solves++;
+      },
+      fetch: async () => new Response('{"items":[{"id":42}]}'),
+    }));
+    await expect(
+      transport.fetchDocument("https://lalafo.kg/api/search/v3/feed/search", JSON.parse, {
+        source: "lalafo.kg",
+      }),
+    ).resolves.toEqual({ items: [{ id: 42 }] });
+    expect(solves).toBe(0);
   });
 
   it("bounds failed Lalafo captures and cools down before purchasing more solves", async () => {
@@ -555,19 +656,26 @@ describe("mandatory proxy document transport", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     let captures = 0;
     let limited = false;
+    let cleared = false;
     let requests = 0;
     const transport = await lalafoTransport(() => ({
       refresh: async () => {
         captures++;
+        cleared = true;
       },
       fetch: async () => {
         requests++;
-        return limited
-          ? new Response("Slow down", {
-              status: 429,
-              headers: { "cf-mitigated": "challenge", "retry-after": "120" },
-            })
-          : new Response('{"items":[{"id":42}]}');
+        if (limited)
+          return new Response("Slow down", {
+            status: 429,
+            headers: { "cf-mitigated": "challenge", "retry-after": "120" },
+          });
+        if (!cleared)
+          return new Response("Challenge", {
+            status: 403,
+            headers: { "cf-mitigated": "challenge" },
+          });
+        return new Response('{"items":[{"id":42}]}');
       },
     }));
     const url = "https://lalafo.kg/api/search/v3/feed/search";

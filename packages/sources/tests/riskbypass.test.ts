@@ -1,6 +1,6 @@
 import { setImmediate } from "node:timers/promises";
 import { SourceError } from "@autodom/core";
-import { MockAgent } from "undici";
+import { getGlobalDispatcher, MockAgent, setGlobalDispatcher } from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RiskBypass, RiskBypassError } from "../src/riskbypass.js";
 
@@ -97,11 +97,67 @@ describe("RiskBypass paid-task lifecycle", () => {
       .solve(target, proxy, new AbortController().signal)
       .catch((error: unknown) => error);
     expect(result).toBeInstanceOf(SourceError);
-    expect(result).not.toBeInstanceOf(RiskBypassError);
+    expect((result as RiskBypassError).reason).toBe("solver_failed");
     expect(String(result)).not.toContain("private-api-key");
     expect(submit).toHaveBeenCalledTimes(1);
     agent.assertNoPendingInterceptors();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("accepts a successful task that carries a null error field", async () => {
+    const { pool, solver } = fixture();
+    pool
+      .intercept({ path: "/task/submit", method: "POST" })
+      .reply(200, { ok: true, task_id: "task-4" })
+      .persist();
+    pool
+      .intercept({ path: "/task/result/task-4", method: "GET" })
+      .reply(200, { status: "SUCCESS", result: session, error: null, completed_at: 1792998000 });
+    await expect(solver.solve(target, proxy, new AbortController().signal)).resolves.toEqual({
+      cookies: { cf_clearance: "clearance-token" },
+      userAgent: session.user_agent,
+    });
+  });
+
+  it("marks a refused exit IP so the caller switches to another static port", async () => {
+    const { pool, solver } = fixture();
+    pool
+      .intercept({ path: "/task/submit", method: "POST" })
+      .reply(200, { ok: true, task_id: "task-2" })
+      .persist();
+    pool
+      .intercept({ path: "/task/result/task-2", method: "GET" })
+      .reply(200, { status: "FAILED", error: "Failed, please change your proxy and try again." });
+    const result = await solver
+      .solve(target, proxy, new AbortController().signal)
+      .catch((error: unknown) => error);
+    expect((result as RiskBypassError).reason).toBe("proxy_rejected");
+    expect(String(result)).not.toContain("change your proxy");
+  });
+
+  it("reaches the provider without a proxy dispatcher of its own", async () => {
+    const agent = new MockAgent();
+    agent.disableNetConnect();
+    agents.push(agent);
+    const previous = getGlobalDispatcher();
+    setGlobalDispatcher(agent);
+    try {
+      const pool = agent.get("https://riskbypass.com");
+      pool
+        .intercept({ path: "/task/submit", method: "POST" })
+        .reply(200, { ok: true, task_id: "task-3" })
+        .persist();
+      pool
+        .intercept({ path: "/task/result/task-3", method: "GET" })
+        .reply(200, { status: "SUCCESS", result: session });
+      const solver = new RiskBypass({ apiKey: "private-api-key" });
+      await expect(solver.solve(target, proxy, new AbortController().signal)).resolves.toEqual({
+        cookies: { cf_clearance: "clearance-token" },
+        userAgent: session.user_agent,
+      });
+    } finally {
+      setGlobalDispatcher(previous);
+    }
   });
 
   it("does not retry an ambiguous submission failure or expose its body", async () => {
