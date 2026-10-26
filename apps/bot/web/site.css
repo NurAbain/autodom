@@ -5,8 +5,8 @@
   --text: #16191d;
   --muted: #5d6570;
   --border: #dfe3e8;
-  --accent: #14507d;
-  --radius: 14px;
+  --accent: #195c54;
+  --radius: 18px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -16,7 +16,7 @@
     --text: #eef1f4;
     --muted: #a3acb6;
     --border: #2b3138;
-    --accent: #6fb2e0;
+    --accent: #88cbbb;
   }
 }
 
@@ -85,13 +85,24 @@ a:hover {
 
 .filters {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   align-items: end;
   padding: 16px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+.filters__pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  grid-column: 1 / -1;
+}
+
+.filters > .field--wide {
+  grid-column: 1 / -1;
 }
 
 .field {
@@ -421,5 +432,9 @@ a:hover {
 
   .cars {
     grid-template-columns: 1fr;
+  }
+
+  .filters {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
