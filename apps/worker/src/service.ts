@@ -51,9 +51,9 @@ export async function runWorkerService(
       metrics,
     );
     const catalogToken = process.env.AUTODOM_CATALOG_API_TOKEN?.trim();
-    const catalogRoute = catalogToken
-      ? createCatalogRoute(new VehicleCatalog(transport), catalogToken)
-      : undefined;
+    const catalog = catalogToken ? new VehicleCatalog(transport, settings.data_dir) : undefined;
+    const catalogRoute =
+      catalog && catalogToken ? createCatalogRoute(catalog, catalogToken) : undefined;
     server = await metrics.serve(
       port,
       async () => !abort.signal.aborted && (await runtimeHealth(store, settings, "worker")),
@@ -62,6 +62,12 @@ export async function runWorkerService(
     server.on("error", (error) => abort.abort(error));
     tasks.push(maintain(store, settings, "worker", abort.signal));
     logger.info({ role: "worker", metrics_port: port }, "Autodom service ready");
+    // The taxonomy of every make is kept warm in the background, so the editor
+    // never waits for the source after a restart.
+    if (catalog)
+      void catalog.warmMakes().catch((error: unknown) => {
+        logger.warn({ err: error }, "Autodom catalogue warm-up failed");
+      });
     const { promise: aborted, resolve: onAbort } = Promise.withResolvers<void>();
     if (abort.signal.aborted) onAbort();
     else abort.signal.addEventListener("abort", () => onAbort(), { once: true });
