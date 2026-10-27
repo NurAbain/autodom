@@ -271,7 +271,7 @@ details[open] > summary { margin-bottom: 14px; }
 .filter-vehicles > .filter-label { margin: 0; }
 .filter-makes, .filter-cities { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
 .filter-makes > .button, .filter-cities > .button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); background: var(--panel); color: inherit; font-size: 14px; text-align: left; }
-.filter-choice-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-choice-label { min-width: 0; overflow-wrap: anywhere; }
 .filter-choice-all { border-style: dashed; }
 .filter-make-block { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
 .filter-make-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }

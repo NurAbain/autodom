@@ -336,10 +336,11 @@ function choiceButton(label: string, matches: number, action: () => void): HTMLB
   const node = element("button", "button filter-choice");
   node.type = "button";
   node.append(element("span", "filter-choice-label", label));
-  if (matches > 0) {
-    node.title = `${matches} ${plural(matches, "объявление", "объявления", "объявлений")}`;
-    node.append(element("span", "filter-choice-hint", String(matches)));
-  }
+  node.title =
+    matches > 0
+      ? `${label} — ${matches} ${plural(matches, "объявление", "объявления", "объявлений")}`
+      : label;
+  if (matches > 0) node.append(element("span", "filter-choice-hint", String(matches)));
   node.addEventListener("click", action);
   return node;
 }
