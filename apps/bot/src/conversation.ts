@@ -15,6 +15,7 @@ import {
 } from "@autodom/core";
 import type { Store } from "@autodom/storage";
 import type { AnalyticsEvent, AnalyticsRecorder, AnalyticsSurface } from "./analytics-contract.js";
+import { NO_BUDGET_LIMIT_MINOR } from "./budget-limit.js";
 import { escapeHtml } from "./html.js";
 import { listingPhotoUrls } from "./media.js";
 import type { SellerConversation } from "./seller-conversation.js";
@@ -105,9 +106,11 @@ export function queryLabel(query: string): string {
 
 export function profileText(profile: Profile): string {
   const budget =
-    profile.budget_min_minor === 0
-      ? `до ${money(profile.budget_max_minor, profile.currency)}`
-      : `${money(profile.budget_min_minor, profile.currency)} — ${money(profile.budget_max_minor, profile.currency)}`;
+    profile.budget_max_minor >= NO_BUDGET_LIMIT_MINOR
+      ? "бюджет не ограничен"
+      : profile.budget_min_minor === 0
+        ? `до ${money(profile.budget_max_minor, profile.currency)}`
+        : `${money(profile.budget_min_minor, profile.currency)} — ${money(profile.budget_max_minor, profile.currency)}`;
   let quiet = "выключены";
   if (profile.quiet_start_minute !== null && profile.quiet_end_minute !== null) {
     quiet = [profile.quiet_start_minute, profile.quiet_end_minute]
