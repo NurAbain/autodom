@@ -140,7 +140,8 @@ export async function main(
       store = await Store.open(settings.database_url);
       // The search index is built in the background: the service serves right away.
       void store.ensureSearchIndex().catch((err: unknown) => {
-        if (logger) logger.warn({ err }, "Autodom search text index is not ready");
+        const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : "";
+        if (logger) logger.warn({ err, cause }, "Autodom search text index is not ready");
       });
       if (!abort.signal.aborted) {
         const conversation = new Conversation(store, {

@@ -214,7 +214,8 @@ export class Store {
    * The text filter of a search matches inside the collected ads. A trigram index
    * turns that match into an index lookup, and the build runs in the background:
    * CREATE INDEX CONCURRENTLY cannot run inside a transaction and must not hold
-   * the service back.
+   * the service back. The statement goes through the pool, because the extended
+   * query protocol of a prepared statement runs inside an implicit transaction.
    */
   async ensureSearchIndex(): Promise<void> {
     const extension = await this.database.execute<{ present: boolean }>(
@@ -228,13 +229,22 @@ export class Store {
               false) AS valid`,
     );
     if (index.rows[0]?.valid) return;
-    if (index.rows[0])
-      await this.database.execute(sql.raw("DROP INDEX IF EXISTS listings_text_trgm"));
-    await this.database.execute(
-      sql.raw(
+    if (index.rows[0]) await this.pool.query("DROP INDEX IF EXISTS listings_text_trgm");
+    try {
+      await this.pool.query(
         "CREATE INDEX CONCURRENTLY listings_text_trgm ON listings USING gin (normalized_text gin_trgm_ops)",
-      ),
-    );
+      );
+    } catch (error) {
+      // Another instance may have built the same index in the meantime.
+      const valid = await this.database.execute<{ valid: boolean }>(
+        sql`SELECT COALESCE(
+                (SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+                 WHERE c.relname = 'listings_text_trgm'),
+                false) AS valid`,
+      );
+      if (valid.rows[0]?.valid) return;
+      throw error;
+    }
   }
   /** Shared by the importer and snapshot transaction, never a separate persistence path. */
   get database(): NodePgDatabase<typeof schema> {

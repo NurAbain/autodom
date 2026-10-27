@@ -18,8 +18,8 @@ export class CatalogPendingError extends Error {
 }
 
 /** The taxonomy changes once a day, the editor asks for it on every make. */
-const CACHE_TTL_MS = 10 * 60 * 1000;
-const CACHE_LIMIT = 128;
+const CACHE_TTL_MS = 60 * 60 * 1000;
+const CACHE_LIMIT = 512;
 const cache = new Map<string, { expires: number; result: Promise<readonly CatalogChoice[]> }>();
 
 function memoCatalogue(
