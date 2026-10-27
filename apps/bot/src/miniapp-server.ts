@@ -35,10 +35,10 @@ import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
 import type { MiniAppCar } from "./miniapp-contract.js";
 import {
+  countModelsByModel,
   draftToProfile,
   filterChoices,
   filterProfileView,
-  listingMatchesModel,
   parseFilterDraft,
   parseModelRequest,
 } from "./miniapp-filter.js";
@@ -139,8 +139,16 @@ function carView(listing: Listing, currency: string): MiniAppCar {
   };
 }
 
+/** The count scans the collected ads; the editor asks again on every change. */
+const COUNT_CACHE_TTL_MS = 30_000;
+const COUNT_CACHE_LIMIT = 200;
+const countCache = new Map<string, { expires: number; matches: number }>();
+
 export interface MiniAppServerOptions {
-  store: Pick<Store, "getProfile" | "getListing" | "saveProfile" | "countMatches" | "search">;
+  store: Pick<
+    Store,
+    "getProfile" | "getListing" | "saveProfile" | "countMatches" | "search" | "searchModelRows"
+  >;
   token: string;
   publicUrl: string;
   host: string;
@@ -522,19 +530,20 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
               { ...requested.request.draft, query: requested.request.make.value },
               previous,
             );
-            const listings = await options.store.search(profile, 2000);
+            const rows = await options.store.searchModelRows(profile, 2000);
             const items = await loadCatalogue("model", requested.request.make.id);
             if (!items) {
               response.setHeader("Retry-After", "3");
               respond(response, 202, { state: "loading" });
               return;
             }
+            const counts = countModelsByModel(rows, items);
             const matching = items
               .map((item) => ({
                 id: item.id,
                 value: item.value,
                 label: item.label,
-                matches: listings.filter((listing) => listingMatchesModel(listing, item)).length,
+                matches: counts.get(item.value) ?? 0,
               }))
               .filter((item) => item.matches > 0)
               .sort(
@@ -554,9 +563,17 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             const parsed = parseFilterDraft(body);
             if (!parsed.ok) throw new RequestError(400, parsed.message);
             const previous = await options.store.getProfile(user.id);
+            const key = `${user.id}:${JSON.stringify(parsed.draft)}`;
+            const cached = countCache.get(key);
+            if (cached && cached.expires > Date.now()) {
+              respond(response, 200, { matches: cached.matches });
+              return;
+            }
             const matches = await options.store.countMatches(
               draftToProfile(user.id, parsed.draft, previous),
             );
+            if (countCache.size >= COUNT_CACHE_LIMIT) countCache.clear();
+            countCache.set(key, { expires: Date.now() + COUNT_CACHE_TTL_MS, matches });
             respond(response, 200, { matches });
             return;
           }

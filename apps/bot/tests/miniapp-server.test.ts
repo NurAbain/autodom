@@ -203,6 +203,19 @@ beforeAll(async () => {
           words.every((word) => item.title.toLowerCase().includes(word)),
         ).length;
       },
+      async searchModelRows(input, limit = 2000) {
+        const words = input.query
+          .split(",")
+          .map((part) => part.trim().toLowerCase())
+          .filter(Boolean);
+        return [listing, lalafoListing]
+          .filter((item) => words.every((word) => item.title.toLowerCase().includes(word)))
+          .slice(0, limit)
+          .map((item) => ({
+            title: ` ${item.title.toLowerCase()} `,
+            model: item.catalog_attributes.model ?? "",
+          }));
+      },
       async search(input, limit = 5, offset = 0) {
         const words = input.query
           .split(",")
@@ -559,6 +572,7 @@ it("creates the requested report from recent actor evidence without another VIN 
     saveProfile: async () => profile,
     countMatches: async () => 0,
     search: async () => [],
+    searchModelRows: async () => [],
     withLock: async <T>(_key: string, action: () => Promise<T>) => action(),
   };
   const payments = new PaymentService(store as unknown as Store);
@@ -743,6 +757,7 @@ it("reports an unconfigured VIN service without fabricating observations", async
       saveProfile: async () => profile,
       countMatches: async () => 0,
       search: async () => [],
+      searchModelRows: async () => [],
     },
   });
   try {
@@ -852,6 +867,7 @@ it("reports refused dialogue admission as retryable without confusing an empty s
       saveProfile: async () => profile,
       countMatches: async () => 0,
       search: async () => [],
+      searchModelRows: async () => [],
     },
     dialogue: async () => (busy ? null : []),
   });
@@ -1153,6 +1169,7 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
       saveProfile: async () => profile,
       countMatches: async () => 0,
       search: async () => [],
+      searchModelRows: async () => [],
     },
     analytics: {
       async record(event) {
@@ -1443,6 +1460,7 @@ describe("buyer filter editor", () => {
         saveProfile: async () => profile,
         countMatches: async () => 0,
         search: async () => [],
+        searchModelRows: async () => [],
       },
     });
     try {
@@ -1512,6 +1530,13 @@ describe("buyer filter editor", () => {
         async search(input) {
           return input.budget_max_minor >= 1_200_000 ? [camry, corolla] : [];
         },
+        async searchModelRows(input, limit = 2000) {
+          const rows = input.budget_max_minor >= 1_200_000 ? [camry, corolla] : [];
+          return rows.slice(0, limit).map((item) => ({
+            title: ` ${item.title.toLowerCase()} `,
+            model: item.catalog_attributes.model ?? "",
+          }));
+        },
       },
     });
     try {
@@ -1566,6 +1591,7 @@ describe("buyer filter editor", () => {
         saveProfile: async () => profile,
         countMatches: async () => 0,
         search: async () => [],
+        searchModelRows: async () => [],
       },
     });
     try {
