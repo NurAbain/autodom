@@ -16,6 +16,7 @@ import {
   PURCHASE_REASONS,
 } from "../src/analytics-contract.js";
 import { type BotMode, loadReportBotUrl } from "../src/bot-mode.js";
+import { NO_BUDGET_LIMIT_MINOR } from "../src/budget-limit.js";
 import { CARFAX_REPORT_EXAMPLE_PDF } from "../src/carfax-report-example.js";
 import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
@@ -838,7 +839,11 @@ async function showFilters(): Promise<void> {
   const draft: FilterDraft = {
     currency: saved?.currency ?? "USD",
     budgetMin: Math.floor((saved?.budget_min_minor ?? 0) / 100),
-    budgetMax: Math.floor((saved?.budget_max_minor ?? 0) / 100),
+    // A saved "any price" budget is the highest limit; the field stays empty.
+    budgetMax:
+      (saved?.budget_max_minor ?? 0) >= NO_BUDGET_LIMIT_MINOR
+        ? 0
+        : Math.floor((saved?.budget_max_minor ?? 0) / 100),
     selection,
     city: saved?.city ?? "",
     bodyType: saved?.body_type ?? "",
@@ -897,7 +902,9 @@ async function showFilters(): Promise<void> {
   const draftBody = (): Record<string, unknown> => ({
     currency: draft.currency,
     budget_min_minor: Math.round(draft.budgetMin * 100),
-    budget_max_minor: Math.round(draft.budgetMax * 100),
+    // An empty budget means "any price"; the server needs a positive limit.
+    budget_max_minor:
+      draft.budgetMax > 0 ? Math.round(draft.budgetMax * 100) : NO_BUDGET_LIMIT_MINOR,
     query: queryText(),
     city: draft.city.trim(),
     body_type: draft.bodyType,

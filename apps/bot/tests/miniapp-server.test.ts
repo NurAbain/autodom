@@ -1414,6 +1414,16 @@ describe("buyer filter editor", () => {
     expect(savedProfiles.get(42)).toBeUndefined();
   });
 
+  it("counts a draft without a budget as any price", async () => {
+    const response = await fetch(`${base}/miniapp/api/filter/preview`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ...draft, budget_min_minor: 0, budget_max_minor: 1_000_000_000_00 }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ matches: 2 });
+  });
+
   it("suggests makes and models from the catalogue and refuses unknown requests", async () => {
     const makes = await fetch(`${base}/miniapp/api/filter/suggest?key=make`, {
       headers: { Authorization: authorization() },
