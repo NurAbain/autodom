@@ -97,11 +97,15 @@ export class VehicleCatalog implements CatalogLookup {
    */
   async warmMakes(): Promise<void> {
     const makes = await this.getOptions("make");
+    const pending: CatalogChoice[] = [];
     for (const make of makes) {
-      const cacheKey = `model:${make.id}:`;
-      if (await this.storedIsFresh(cacheKey)) continue;
-      await this.getOptions("model", make.id).catch(() => undefined);
+      if (await this.storedIsFresh(`model:${make.id}:`)) continue;
+      pending.push(make);
     }
+    // Four at a time: the source route accepts a few parallel requests.
+    await eachChoice(pending, async (make) => {
+      await this.getOptions("model", make.id).catch(() => undefined);
+    });
   }
 
   /**
