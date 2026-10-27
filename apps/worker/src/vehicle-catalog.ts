@@ -65,6 +65,30 @@ export class VehicleCatalog implements CatalogLookup {
     parentId?: string,
     scope?: ModificationScope,
   ): Promise<readonly CatalogChoice[]> {
+    return this.loadOptions(key, parentId, scope);
+  }
+
+  /**
+   * Fetches the taxonomy from the source again and replaces the stored copy.
+   * The editor never waits for the source: this is the operator's way to pick
+   * up a new model without a restart.
+   */
+  async refresh(): Promise<{ makes: number; models: number }> {
+    const makes = await this.loadOptions("make", undefined, undefined, true);
+    let models = 0;
+    await eachChoice(makes, async (make) => {
+      await this.loadOptions("model", make.id, undefined, true);
+      models += 1;
+    });
+    return { makes: makes.length, models };
+  }
+
+  private async loadOptions(
+    key: CatalogFieldKey,
+    parentId?: string,
+    scope?: ModificationScope,
+    force = false,
+  ): Promise<readonly CatalogChoice[]> {
     if (!approvedSources().includes("mashina.kg"))
       throw new Error("Справочник этого рынка сейчас отключён.");
     if (!Object.hasOwn(LOOKUPS, key)) throw new Error("Неизвестный параметр автомобиля.");
@@ -82,13 +106,17 @@ export class VehicleCatalog implements CatalogLookup {
     )
       throw new Error("Сначала выберите модель и поколение автомобиля.");
     const cacheKey = `${key}:${parentId ?? ""}:${key === "modification" ? JSON.stringify(scope) : ""}`;
-    return this.memo(this.cache, cacheKey, MAX_ENTRIES, () =>
-      this.stored(cacheKey, () =>
-        key === "modification"
-          ? this.modifications(parentId!, scope!)
-          : this.options(lookup.id, parentId, lookup.skip),
-      ),
-    );
+    const load = () =>
+      key === "modification"
+        ? this.modifications(parentId!, scope!)
+        : this.options(lookup.id, parentId, lookup.skip);
+    if (force) {
+      this.cache.delete(cacheKey);
+      const value = await load();
+      await this.writeStored(cacheKey, value);
+      return value;
+    }
+    return this.memo(this.cache, cacheKey, MAX_ENTRIES, () => this.stored(cacheKey, load));
   }
 
   /**
@@ -99,7 +127,7 @@ export class VehicleCatalog implements CatalogLookup {
     const makes = await this.getOptions("make");
     const pending: CatalogChoice[] = [];
     for (const make of makes) {
-      if (await this.storedIsFresh(`model:${make.id}:`)) continue;
+      if (await this.hasStored(`model:${make.id}:`)) continue;
       pending.push(make);
     }
     // Four at a time: the source route accepts a few parallel requests.
@@ -109,8 +137,8 @@ export class VehicleCatalog implements CatalogLookup {
   }
 
   /**
-   * The catalogue lives on disk: a restart serves the stored copy at once and
-   * refreshes it in the background, so the editor never waits for the taxonomy.
+   * The catalogue is kept on disk and served from there for good: the source is
+   * asked once per list, and the copy is replaced only by an explicit refresh.
    */
   private async stored(
     cacheKey: string,
@@ -122,10 +150,6 @@ export class VehicleCatalog implements CatalogLookup {
       await this.writeStored(cacheKey, value);
       return value;
     }
-    if (Date.now() - stored.savedAt > TTL_MS)
-      void load()
-        .then((value) => this.writeStored(cacheKey, value))
-        .catch(() => undefined);
     return stored.items;
   }
 
@@ -164,12 +188,12 @@ export class VehicleCatalog implements CatalogLookup {
     }
   }
 
-  private async storedIsFresh(cacheKey: string): Promise<boolean> {
+  private async hasStored(cacheKey: string): Promise<boolean> {
     const file = this.storedFile(cacheKey);
     if (!file) return false;
     try {
-      const info = await stat(file);
-      return Date.now() - info.mtimeMs <= TTL_MS;
+      await stat(file);
+      return true;
     } catch {
       return false;
     }
