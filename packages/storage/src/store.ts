@@ -210,6 +210,32 @@ export class Store {
     this.closing ??= this.pool.end();
     await this.closing;
   }
+  /**
+   * The text filter of a search matches inside the collected ads. A trigram index
+   * turns that match into an index lookup, and the build runs in the background:
+   * CREATE INDEX CONCURRENTLY cannot run inside a transaction and must not hold
+   * the service back.
+   */
+  async ensureSearchIndex(): Promise<void> {
+    const extension = await this.database.execute<{ present: boolean }>(
+      sql`SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm') AS present`,
+    );
+    if (!extension.rows[0]?.present) return;
+    const index = await this.database.execute<{ valid: boolean }>(
+      sql`SELECT COALESCE(
+              (SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+               WHERE c.relname = 'listings_text_trgm'),
+              false) AS valid`,
+    );
+    if (index.rows[0]?.valid) return;
+    if (index.rows[0])
+      await this.database.execute(sql.raw("DROP INDEX IF EXISTS listings_text_trgm"));
+    await this.database.execute(
+      sql.raw(
+        "CREATE INDEX CONCURRENTLY listings_text_trgm ON listings USING gin (normalized_text gin_trgm_ops)",
+      ),
+    );
+  }
   /** Shared by the importer and snapshot transaction, never a separate persistence path. */
   get database(): NodePgDatabase<typeof schema> {
     return this.sessions.getStore()?.db ?? this.pooledDb;
@@ -340,6 +366,7 @@ export class Store {
         "0012_vin_report_kinds.sql",
         "0013_vin_photos.sql",
         "0014_buyer_filter.sql",
+        "0015_search_text_index.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
@@ -649,9 +676,7 @@ export class Store {
       clauses.push(
         or(
           ...groups.map((group) =>
-            and(
-              ...group.map((word) => sql`strpos(${listings.normalized_text}, ${` ${word} `}) > 0`),
-            ),
+            and(...group.map((word) => like(listings.normalized_text, `% ${word} %`))),
           ),
         ),
       );
@@ -676,6 +701,27 @@ export class Store {
       .from(listings)
       .where(this.searchWhere(profile));
     return row!.value;
+  }
+  /**
+   * The ads a search returns, without the heavy listing payload. The normalised
+   * title and the catalogue model are enough to tell which model an ad belongs
+   * to, and the editor counts thousands of ads per make.
+   */
+  async searchModelRows(
+    profile: Profile,
+    limit = 2000,
+  ): Promise<{ title: string; model: string }[]> {
+    if (limit <= 0) return [];
+    const rows = await this.database
+      .select({
+        title: listings.normalized_title,
+        model: sql<string>`${listings.data}->'catalog_attributes'->>'model'`,
+      })
+      .from(listings)
+      .where(this.searchWhere(profile))
+      .orderBy(desc(listings.last_seen), desc(listings.first_seen), asc(listings.id))
+      .limit(limit);
+    return rows.map((row) => ({ title: row.title, model: row.model ?? "" }));
   }
   /**
    * Catalogue read with an explicit order. The public site needs price and mileage
