@@ -65,9 +65,12 @@ export async function runWorkerService(
     // The taxonomy of every make is kept warm in the background, so the editor
     // never waits for the source after a restart.
     if (catalog)
-      void catalog.warmMakes().catch((error: unknown) => {
-        logger.warn({ err: error }, "Autodom catalogue warm-up failed");
-      });
+      void catalog
+        .warmMakes()
+        .then(() => logger.info({ role: "worker" }, "Autodom catalogue is warm"))
+        .catch((error: unknown) => {
+          logger.warn({ err: error }, "Autodom catalogue warm-up failed");
+        });
     const { promise: aborted, resolve: onAbort } = Promise.withResolvers<void>();
     if (abort.signal.aborted) onAbort();
     else abort.signal.addEventListener("abort", () => onAbort(), { once: true });
