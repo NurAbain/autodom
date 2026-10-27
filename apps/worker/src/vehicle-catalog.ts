@@ -1,9 +1,13 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { approvedSources, type DocumentTransport } from "@autodom/core";
-import type {
-  CatalogChoice,
-  CatalogFieldKey,
-  CatalogLookup,
-  ModificationScope,
+import {
+  type CatalogChoice,
+  type CatalogFieldKey,
+  type CatalogLookup,
+  catalogChoicesSchema,
+  type ModificationScope,
 } from "@autodom/core/catalog-filter";
 import pLimit from "p-limit";
 
@@ -25,7 +29,7 @@ const LOOKUPS: Record<CatalogFieldKey, { id: number; parent?: boolean; skip?: nu
   city: { id: 50, parent: true },
   availibility: { id: 96 },
 };
-const TTL_MS = 24 * 60 * 60 * 1000;
+const TTL_MS = 12 * 60 * 60 * 1000;
 /** The make and model lists of every marketplace make must stay cached. */
 const MAX_ENTRIES = 1024;
 const MAX_OPTIONS = 10_000;
@@ -51,7 +55,10 @@ export class VehicleCatalog implements CatalogLookup {
   private readonly paths = new Map<string, CacheEntry<ReadonlyMap<string, readonly string[]>>>();
   private readonly requests = pLimit(4);
 
-  constructor(private readonly transport: DocumentTransport) {}
+  constructor(
+    private readonly transport: DocumentTransport,
+    private readonly dataDirectory?: string,
+  ) {}
 
   async getOptions(
     key: CatalogFieldKey,
@@ -76,10 +83,92 @@ export class VehicleCatalog implements CatalogLookup {
       throw new Error("Сначала выберите модель и поколение автомобиля.");
     const cacheKey = `${key}:${parentId ?? ""}:${key === "modification" ? JSON.stringify(scope) : ""}`;
     return this.memo(this.cache, cacheKey, MAX_ENTRIES, () =>
-      key === "modification"
-        ? this.modifications(parentId!, scope!)
-        : this.options(lookup.id, parentId, lookup.skip),
+      this.stored(cacheKey, () =>
+        key === "modification"
+          ? this.modifications(parentId!, scope!)
+          : this.options(lookup.id, parentId, lookup.skip),
+      ),
     );
+  }
+
+  /**
+   * The model list of every make is fetched in the background, so the first pick
+   * of a make in the editor never waits for the taxonomy.
+   */
+  async warmMakes(): Promise<void> {
+    const makes = await this.getOptions("make");
+    for (const make of makes) {
+      const cacheKey = `model:${make.id}:`;
+      if (await this.storedIsFresh(cacheKey)) continue;
+      await this.getOptions("model", make.id).catch(() => undefined);
+    }
+  }
+
+  /**
+   * The catalogue lives on disk: a restart serves the stored copy at once and
+   * refreshes it in the background, so the editor never waits for the taxonomy.
+   */
+  private async stored(
+    cacheKey: string,
+    load: () => Promise<readonly CatalogChoice[]>,
+  ): Promise<readonly CatalogChoice[]> {
+    const stored = await this.readStored(cacheKey);
+    if (!stored) {
+      const value = await load();
+      await this.writeStored(cacheKey, value);
+      return value;
+    }
+    if (Date.now() - stored.savedAt > TTL_MS)
+      void load()
+        .then((value) => this.writeStored(cacheKey, value))
+        .catch(() => undefined);
+    return stored.items;
+  }
+
+  private storedFile(cacheKey: string): string | null {
+    if (!this.dataDirectory) return null;
+    const name = createHash("sha256").update(cacheKey).digest("hex").slice(0, 32);
+    return join(this.dataDirectory, "catalog", `${name}.json`);
+  }
+
+  private async readStored(
+    cacheKey: string,
+  ): Promise<{ savedAt: number; items: readonly CatalogChoice[] } | null> {
+    const file = this.storedFile(cacheKey);
+    if (!file) return null;
+    try {
+      const raw: unknown = JSON.parse(await readFile(file, "utf8"));
+      if (!raw || typeof raw !== "object") return null;
+      const { savedAt, items } = raw as { savedAt?: unknown; items?: unknown };
+      if (typeof savedAt !== "number" || !Number.isFinite(savedAt)) return null;
+      const parsed = catalogChoicesSchema.safeParse(items);
+      if (!parsed.success) return null;
+      return { savedAt, items: parsed.data };
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeStored(cacheKey: string, items: readonly CatalogChoice[]): Promise<void> {
+    const file = this.storedFile(cacheKey);
+    if (!file) return;
+    try {
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, JSON.stringify({ savedAt: Date.now(), items }), "utf8");
+    } catch {
+      // A missing copy only costs a slower request; the catalogue still works.
+    }
+  }
+
+  private async storedIsFresh(cacheKey: string): Promise<boolean> {
+    const file = this.storedFile(cacheKey);
+    if (!file) return false;
+    try {
+      const info = await stat(file);
+      return Date.now() - info.mtimeMs <= TTL_MS;
+    } catch {
+      return false;
+    }
   }
 
   private memo<T>(
