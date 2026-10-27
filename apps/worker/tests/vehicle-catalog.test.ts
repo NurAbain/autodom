@@ -48,7 +48,7 @@ it("unions modifications across physical years and bodies without including anot
   ).rejects.toThrow();
 });
 
-it("serves the stored catalogue after a restart and refreshes it in the background", async () => {
+it("serves the stored catalogue after a restart and never asks the source again", async () => {
   vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
   const directory = await mkdtemp(join(tmpdir(), "autodom-catalog-"));
   try {
@@ -79,6 +79,46 @@ it("serves the stored catalogue after a restart and refreshes it in the backgrou
     const second = new VehicleCatalog(transport, directory);
     expect((await second.getOptions("model", "1")).map((item) => item.value)).toEqual(["Camry"]);
     expect(requests).toBe(1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("replaces the stored catalogue only when the refresh is asked for", async () => {
+  vi.stubEnv("AUTODOM_APPROVED_SOURCES", "mashina.kg");
+  const directory = await mkdtemp(join(tmpdir(), "autodom-catalog-"));
+  try {
+    let requests = 0;
+    const transport: DocumentTransport = {
+      async fetchDocument(url, parse) {
+        requests += 1;
+        const parsed = new URL(url);
+        if (parsed.searchParams.get("parent_option_id") === "1")
+          return parse(
+            JSON.stringify([
+              { attribute_id: 17, id: 2, value: "Camry", label: "Camry", is_active: true },
+            ]),
+          );
+        return parse(
+          JSON.stringify([
+            { attribute_id: 16, id: 1, value: "Toyota", label: "Toyota", is_active: true },
+          ]),
+        );
+      },
+      fetchDocuments: vi.fn(),
+    };
+    const catalog = new VehicleCatalog(transport, directory);
+    await catalog.getOptions("model", "1");
+    const before = requests;
+
+    const result = await catalog.refresh();
+    expect(result).toEqual({ makes: 1, models: 1 });
+    expect(requests).toBe(before + 2);
+
+    // The refreshed copy is the one that is served afterwards.
+    const restarted = new VehicleCatalog(transport, directory);
+    expect((await restarted.getOptions("model", "1")).map((item) => item.value)).toEqual(["Camry"]);
+    expect(requests).toBe(before + 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -9,6 +9,7 @@ import { Store } from "@autodom/storage";
 import type { Logger } from "pino";
 import { syncPages } from "./collector.js";
 import { runWorkerService } from "./service.js";
+import { VehicleCatalog } from "./vehicle-catalog.js";
 
 const HELP = `Autodom parser worker
 
@@ -17,6 +18,7 @@ Usage: pnpm worker [command] [options]
   serve                       Durable Redis/BullMQ source collection (default)
   health                      Probe this node's local metrics HTTP /health endpoint
   sync [--pages 3]             Bounded collection through mandatory proxies
+  catalogue                   Fetch the make and model lists once and store them on disk
   sources                     Offline source registry, access evidence and coverage gaps (JSON)
 
 Node 24 and pnpm are required. Configure .env.example and export its values.
@@ -27,6 +29,8 @@ and AUTODOM_APPROVED_SOURCES opt-in. No import or auction cost is invented.
 The sources command needs no database, Redis, Telegram token or proxy; it never contacts providers.
 Candidate entries cannot be enabled. Published membership fees are not data-license prices.
 Health needs only AUTODOM_METRICS_PORT (default 9901), with a five-second timeout.
+The catalogue command writes the make and model lists to the data directory and
+is the only way to pull a new model from the source.
 This node never starts Telegram or MiniApp and does not require their configuration.
 `;
 
@@ -49,7 +53,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       return 0;
     }
     const [command = "serve", ...extra] = positionals;
-    if (!["serve", "health", "sync", "sources"].includes(command)) {
+    if (!["serve", "health", "sync", "catalogue", "sources"].includes(command)) {
       process.stdout.write(HELP);
       return 2;
     }
@@ -82,6 +86,32 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     logger = createLogger();
     const settings = loadSettings();
     const routes = loadProxyRoutes();
+    if (command === "catalogue") {
+      const abort = new AbortController();
+      const stop = () => abort.abort();
+      process.once("SIGINT", stop);
+      process.once("SIGTERM", stop);
+      let transport: ProxyTransport | undefined;
+      try {
+        transport = new ProxyTransport({
+          routes,
+          dataDir: settings.data_dir,
+          requestDelaySeconds: settings.crawl_delay,
+          signal: abort.signal,
+        });
+        const result = await new VehicleCatalog(transport, settings.data_dir).refresh();
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      } finally {
+        abort.abort();
+        try {
+          await transport?.close();
+        } finally {
+          process.off("SIGINT", stop);
+          process.off("SIGTERM", stop);
+        }
+      }
+      return 0;
+    }
     store = await Store.open(settings.database_url);
     if (command === "sync") {
       const abort = new AbortController();
