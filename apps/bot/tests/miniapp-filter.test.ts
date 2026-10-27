@@ -1,5 +1,6 @@
 import { makeProfile } from "@autodom/core";
 import { describe, expect, it } from "vitest";
+import { NO_BUDGET_LIMIT_MINOR } from "../src/budget-limit.js";
 import { countModelsByModel, filterProfileView } from "../src/miniapp-filter.js";
 
 const models = [{ value: "Camry" }, { value: "X5 M" }, { value: "X5" }, { value: "Land Cruiser" }];
@@ -62,5 +63,18 @@ describe("saved conditions", () => {
     const view = filterProfileView(profile);
     expect(view.body_type).toBe("sedan");
     expect(view.transmission).toBe("automatic");
+  });
+
+  it("shows an unlimited budget as empty", () => {
+    const profile = makeProfile({
+      user_id: 42,
+      chat_id: 42,
+      currency: "USD",
+      budget_min_minor: 0,
+      budget_max_minor: NO_BUDGET_LIMIT_MINOR,
+      query: "",
+      market: "KG",
+    });
+    expect(filterProfileView(profile).budget_max_minor).toBe(0);
   });
 });

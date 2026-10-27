@@ -1,8 +1,8 @@
 import { BODY_TYPES, makeProfile, normalize, type Profile, TRANSMISSIONS } from "@autodom/core";
 import { z } from "zod";
+import { NO_BUDGET_LIMIT_MINOR } from "./budget-limit.js";
 import type { MiniAppFilterDraft, MiniAppFilterProfile } from "./miniapp-contract.js";
 
-const MAX_MONEY = 1_000_000_000_00;
 const MAX_YEAR = new Date().getUTCFullYear() + 1;
 const MAX_QUERY = 160;
 const MAX_CITY = 80;
@@ -18,8 +18,8 @@ const plainText = (maximum: number) =>
 export const filterDraftSchema = z
   .object({
     currency: z.enum(["USD", "KGS"]),
-    budget_min_minor: z.number().int().min(0).max(MAX_MONEY),
-    budget_max_minor: z.number().int().min(1).max(MAX_MONEY),
+    budget_min_minor: z.number().int().min(0).max(NO_BUDGET_LIMIT_MINOR),
+    budget_max_minor: z.number().int().min(1).max(NO_BUDGET_LIMIT_MINOR),
     query: plainText(MAX_QUERY).refine((value) => {
       if (!value) return true;
       const alternatives = value.split(",");
@@ -175,7 +175,9 @@ export function filterProfileView(profile: Profile): MiniAppFilterProfile {
   return {
     currency: profile.currency === "KGS" ? "KGS" : "USD",
     budget_min_minor: profile.budget_min_minor,
-    budget_max_minor: profile.budget_max_minor,
+    // A saved "any price" budget is the highest limit; the editor shows it empty.
+    budget_max_minor:
+      profile.budget_max_minor >= NO_BUDGET_LIMIT_MINOR ? 0 : profile.budget_max_minor,
     query: profile.query,
     city: profile.city,
     // A profile saved by an older editor may hold a label instead of a key; the
