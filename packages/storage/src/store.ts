@@ -6,6 +6,7 @@ import {
   approvedSources,
   BODY_TYPES,
   BUDGET_SCOPES,
+  cityAlternatives,
   type Listing,
   type ListingEvent,
   listingIsAuction,
@@ -125,9 +126,9 @@ export function validateProfile(input: Profile): Profile {
   }
   if (
     typeof p.city !== "string" ||
-    [...p.city].length > 80 ||
+    [...p.city].length > 160 ||
     /:|[\p{Cc}&&\p{ASCII}]/v.test(p.city) ||
-    (p.city !== "" && !/\p{L}/u.test(normalizeCity(p.city)))
+    (p.city !== "" && p.city.split(",").some((part) => !/\p{L}/u.test(normalizeCity(part))))
   )
     throw new Error("Invalid city");
   for (const [value, minimum, maximum] of [
@@ -642,13 +643,18 @@ export class Store {
         ).length === 1,
     );
   }
-  private searchWhere(p: Profile): SQL {
+  /**
+   * The conditions of a search. The editor counts makes and cities across the whole
+   * market, so it can leave the city or the text query out of the counting.
+   */
+  private searchWhere(p: Profile, options?: { skipCity?: boolean; skipQuery?: boolean }): SQL {
     if (!["USD", "KGS"].includes(p.currency) || !Object.hasOwn(MARKETS, p.market))
       return sql`false`;
     const sources = [...approvedSources()];
     if (!sources.length) return sql`false`;
     const price = p.currency === "USD" ? listings.price_usd_minor : listings.price_kgs_minor;
     const now = nowSeconds();
+    const cities = options?.skipCity ? [] : cityAlternatives(p.city);
     const clauses: (SQL | undefined)[] = [
       gt(price, 0),
       between(price, p.budget_min_minor, p.budget_max_minor),
@@ -673,15 +679,15 @@ export class Store {
       p.allow_import === false || p.budget_scope === "total"
         ? eq(listings.market, "KG")
         : undefined,
-      p.city ? eq(listings.normalized_city, normalizeCity(p.city)) : undefined,
+      cities.length ? inArray(listings.normalized_city, cities) : undefined,
       p.body_type ? eq(listings.normalized_body_type, p.body_type) : undefined,
       p.transmission ? eq(listings.normalized_transmission, p.transmission) : undefined,
       p.year_min !== null ? gte(listings.vehicle_year, p.year_min) : undefined,
       p.year_max !== null ? lte(listings.vehicle_year, p.year_max) : undefined,
       p.mileage_max_km !== null ? lte(listings.mileage_km, p.mileage_max_km) : undefined,
     ];
-    const groups = queryGroups(p.query);
-    if (p.query.trim() && !groups.length) return sql`false`;
+    const groups = options?.skipQuery ? [] : queryGroups(p.query);
+    if (!options?.skipQuery && p.query.trim() && !groups.length) return sql`false`;
     if (groups.length)
       clauses.push(
         or(
@@ -711,6 +717,49 @@ export class Store {
       .from(listings)
       .where(this.searchWhere(profile));
     return row!.value;
+  }
+  /**
+   * The cities of the market and how many ads each one has. The editor offers the
+   * cities as buttons, so the count leaves the chosen city out of the conditions.
+   */
+  async countCities(profile: Profile, limit = 40): Promise<{ city: string; matches: number }[]> {
+    if (limit <= 0) return [];
+    const rows = await this.database
+      .select({
+        city: sql<string>`MAX(${listings.data}->>'city')`,
+        matches: count(),
+      })
+      .from(listings)
+      .where(this.searchWhere(profile, { skipCity: true }))
+      .groupBy(listings.normalized_city)
+      .orderBy(desc(count()))
+      .limit(limit);
+    return rows
+      .filter((row) => row.city.trim())
+      .map((row) => ({ city: row.city.trim(), matches: Number(row.matches) }));
+  }
+  /**
+   * The ads of every make of the market. The make comes from the marketplace
+   * attributes, and the text query stays out of the count so that every make of
+   * the list can be compared with the others.
+   */
+  async countMakes(profile: Profile, limit = 300): Promise<Map<string, number>> {
+    if (limit <= 0) return new Map();
+    const make = sql<string>`${listings.data}->'catalog_attributes'->>'make'`;
+    const rows = await this.database
+      .select({ make, matches: count() })
+      .from(listings)
+      .where(this.searchWhere(profile, { skipQuery: true }))
+      .groupBy(make)
+      .orderBy(desc(count()))
+      .limit(limit);
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      const name = row.make?.trim();
+      if (!name) continue;
+      counts.set(name, Number(row.matches));
+    }
+    return counts;
   }
   /**
    * The ads a search returns, without the heavy listing payload. The normalised

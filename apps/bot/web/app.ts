@@ -22,6 +22,8 @@ import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
 import type {
   MiniAppCar,
+  MiniAppChoice,
+  MiniAppCityChoice,
   MiniAppFilterState,
   MiniAppFinikMethods,
   MiniAppSuggestions,
@@ -325,6 +327,19 @@ function element<K extends keyof HTMLElementTagNameMap>(
 function button(text: string, action: () => void, className = "button"): HTMLButtonElement {
   const node = element("button", className, text);
   node.type = "button";
+  node.addEventListener("click", action);
+  return node;
+}
+
+/** A choice button: the name stays on one line, the count of ads sits on the right. */
+function choiceButton(label: string, matches: number, action: () => void): HTMLButtonElement {
+  const node = element("button", "button filter-choice");
+  node.type = "button";
+  node.append(element("span", "filter-choice-label", label));
+  if (matches > 0) {
+    node.title = `${matches} ${plural(matches, "объявление", "объявления", "объявлений")}`;
+    node.append(element("span", "filter-choice-hint", String(matches)));
+  }
   node.addEventListener("click", action);
   return node;
 }
@@ -725,7 +740,7 @@ type FilterDraft = {
   budgetMin: number;
   budgetMax: number;
   selection: FilterSelection;
-  city: string;
+  cities: string[];
   bodyType: string;
   transmission: string;
   yearMin: number | null;
@@ -743,6 +758,12 @@ type FilterAlternative = {
 
 /** The search accepts five alternatives at most, as the chat text search did. */
 const MAX_ALTERNATIVES = 5;
+
+/** The buyer filter accepts eight cities at most. */
+const MAX_CITIES = 8;
+
+/** The popular makes stay on the screen; the rest waits in the sheet. */
+const POPULAR_MAKES = 10;
 
 /** The catalogue of makes is public and stable: one load per session is enough. */
 let makeCatalogue: { items: FilterChoice[] } | null = null;
@@ -845,7 +866,7 @@ async function showFilters(): Promise<void> {
         ? 0
         : Math.floor((saved?.budget_max_minor ?? 0) / 100),
     selection,
-    city: saved?.city ?? "",
+    cities: saved?.cities ?? [],
     bodyType: saved?.body_type ?? "",
     transmission: saved?.transmission ?? "",
     yearMin: saved?.year_min ?? null,
@@ -856,7 +877,12 @@ async function showFilters(): Promise<void> {
   const transmissionLabels = new Map(
     state.transmissions.map((option) => [option.value, option.label]),
   );
-  let consent = false;
+  /** The makes with ads under the current conditions, the most wanted first. */
+  let popularMakes: (FilterChoice & { matches: number })[] = [];
+  /** The cities with ads under the current conditions, the most wanted first. */
+  let cityCatalogue: { value: string; matches: number }[] = [];
+  /** The conditions the loaded makes and cities belong to. */
+  let choicesSignature = "";
   let saving = false;
   let previewTimer: number | undefined;
   const chipsHost = element("div", "filter-chips");
@@ -906,7 +932,7 @@ async function showFilters(): Promise<void> {
     budget_max_minor:
       draft.budgetMax > 0 ? Math.round(draft.budgetMax * 100) : NO_BUDGET_LIMIT_MINOR,
     query: queryText(),
-    city: draft.city.trim(),
+    city: draft.cities.join(", "),
     body_type: draft.bodyType,
     transmission: draft.transmission,
     year_min: draft.yearMin,
@@ -1004,20 +1030,40 @@ async function showFilters(): Promise<void> {
   );
 
   const place = element("section", "panel");
+  const cityHost = element("div", "filter-place");
   const cityInput = element("input", "text-input");
   cityInput.id = "filter-city";
   cityInput.type = "text";
   cityInput.maxLength = 80;
   cityInput.placeholder = "Бишкек";
-  cityInput.value = draft.city;
-  cityInput.addEventListener("input", () => {
-    draft.city = cityInput.value;
+  const addCity = (): void => {
+    const value = cityInput.value.trim();
+    cityInput.value = "";
+    if (!value) return;
+    if (draft.cities.some((city) => city.toLowerCase() === value.toLowerCase())) return;
+    if (draft.cities.length >= MAX_CITIES) {
+      status.textContent = `Можно выбрать не больше ${MAX_CITIES} городов. Снимите один, чтобы добавить.`;
+      return;
+    }
+    draft.cities = [...draft.cities, value];
+    renderPlaces();
     renderChips();
     schedulePreview();
+  };
+  cityInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addCity();
   });
+  cityInput.addEventListener("change", addCity);
   place.append(
     element("h2", "", "Место"),
-    field("Город объявления", cityInput, "Место автомобиля в источнике, не адрес доставки."),
+    cityHost,
+    field(
+      "Свой город",
+      cityInput,
+      "Города из списка выбираются кнопками, можно добавить свой. Место автомобиля в источнике, не адрес доставки.",
+    ),
   );
 
   const traits = element("section", "panel");
@@ -1080,22 +1126,13 @@ async function showFilters(): Promise<void> {
     ),
   );
 
-  const consentPanel = element("section", "panel");
+  const dataPanel = element("section", "panel");
   const privacy = element("details", "filter-privacy");
-  privacy.append(element("summary", "", "Данные и согласие"));
+  privacy.append(element("summary", "", "Данные и хранение"));
   const privacyText = element("div", "reply-text");
   privacyText.append(richText(state.privacy, null));
   privacy.append(privacyText);
-  const consentBox = element("input", "filter-consent-box");
-  consentBox.type = "checkbox";
-  consentBox.id = "filter-consent";
-  const consentLabel = element("label", "filter-consent", "Согласен на хранение данных");
-  consentLabel.htmlFor = consentBox.id;
-  consentBox.addEventListener("change", () => {
-    consent = consentBox.checked;
-    renderSaveState();
-  });
-  consentPanel.append(privacy, element("div", "filter-consent", ""), consentBox, consentLabel);
+  dataPanel.append(privacy);
 
   const bar = element("div", "filter-bar");
   const saveMonitor = button("Сохранить и включить мониторинг", () => void save(true), "button");
@@ -1109,7 +1146,7 @@ async function showFilters(): Promise<void> {
   const selected = element("section", "panel");
   selected.append(element("h2", "", "Выбранные условия"), chipsHost);
 
-  main.replaceChildren(selected, budget, vehicle, place, traits, consentPanel, status, bar);
+  main.replaceChildren(selected, budget, vehicle, place, traits, dataPanel, status, bar);
 
   function renderCurrency(): void {
     for (const [index, value] of (["USD", "KGS"] as const).entries()) {
@@ -1141,12 +1178,12 @@ async function showFilters(): Promise<void> {
           maximumInput.value = "";
         },
       });
-    if (draft.city.trim())
+    for (const city of draft.cities)
       chips.push({
-        label: draft.city.trim(),
+        label: city,
         clear: () => {
-          draft.city = "";
-          cityInput.value = "";
+          draft.cities = draft.cities.filter((item) => item !== city);
+          renderPlaces();
         },
       });
     if (draft.bodyType)
@@ -1209,13 +1246,16 @@ async function showFilters(): Promise<void> {
   }
 
   function renderSaveState(): void {
-    saveMonitor.disabled = !consent || saving;
-    saveSilent.disabled = !consent || saving;
+    saveMonitor.disabled = saving;
+    saveSilent.disabled = saving;
   }
 
   function schedulePreview(): void {
     window.clearTimeout(previewTimer);
-    previewTimer = window.setTimeout(() => void refreshMatches(), 400);
+    previewTimer = window.setTimeout(() => {
+      void refreshMatches();
+      void loadChoices();
+    }, 400);
   }
 
   async function refreshMatches(): Promise<void> {
@@ -1240,7 +1280,7 @@ async function showFilters(): Promise<void> {
       draft.currency,
       draft.budgetMin,
       draft.budgetMax,
-      draft.city,
+      draft.cities.join(","),
       draft.bodyType,
       draft.transmission,
       draft.yearMin,
@@ -1342,20 +1382,24 @@ async function showFilters(): Promise<void> {
       return;
     }
     const parts: HTMLElement[] = [];
-    const strip = element("div", "filter-makes");
-    const shown = makeCatalogue.items.slice(0, 12);
+    const grid = element("div", "filter-makes");
+    const shown: FilterChoice[] = popularMakes.slice(0, POPULAR_MAKES);
+    // Without collected ads the catalogue order is the only hint the user gets.
+    if (!shown.length) shown.push(...makeCatalogue.items.slice(0, POPULAR_MAKES));
     for (const make of selection.makes) {
       if (!shown.some((item) => item.value === make.value)) shown.push(make);
     }
     for (const make of shown) {
-      const control = button(make.label, () => toggleMake(make), "button filter-choice");
+      const matches = popularMakes.find((item) => item.value === make.value)?.matches ?? 0;
+      const control = choiceButton(make.label, matches, () => toggleMake(make));
       control.setAttribute("aria-pressed", String(isMakeSelected(make)));
-      strip.append(control);
+      grid.append(control);
     }
-    strip.append(
-      button("Все марки", () => openMakeSheet(), "button filter-choice filter-choice-all"),
+    parts.push(
+      element("p", "filter-label", "Марка"),
+      grid,
+      button("Другие марки", () => openMakeSheet(), "button filter-choice filter-choice-all"),
     );
-    parts.push(element("p", "filter-label", "Марка"), strip);
 
     for (const make of selection.makes) {
       const block = element("div", "filter-make-block");
@@ -1384,14 +1428,8 @@ async function showFilters(): Promise<void> {
       else {
         const grid = element("div", "filter-models");
         for (const model of cached.items) {
-          const control = button(
-            model.label,
-            () => toggleModel(make, model),
-            "button filter-choice",
-          );
+          const control = choiceButton(model.label, model.matches, () => toggleModel(make, model));
           control.setAttribute("aria-pressed", String(isModelSelected(make, model)));
-          control.title = `${model.matches} ${plural(model.matches, "объявление", "объявления", "объявлений")}`;
-          control.append(element("span", "filter-choice-hint", String(model.matches)));
           grid.append(control);
         }
         block.append(grid);
@@ -1428,6 +1466,63 @@ async function showFilters(): Promise<void> {
     } catch (error) {
       if (started === generation)
         vehicleHost.replaceChildren(element("p", "footnote", errorText(error)));
+    }
+  }
+
+  /** The city buttons: several cities at once, the chosen ones always visible. */
+  function renderPlaces(): void {
+    const known = new Set(cityCatalogue.map((city) => city.value));
+    const cities = [
+      ...cityCatalogue,
+      ...draft.cities
+        .filter((city) => !known.has(city))
+        .map((city) => ({ value: city, matches: 0 })),
+    ];
+    if (!cities.length) {
+      cityHost.replaceChildren(
+        element(
+          "p",
+          "footnote",
+          "Города появятся, когда соберём объявления. Свой город можно добавить ниже.",
+        ),
+      );
+      return;
+    }
+    const grid = element("div", "filter-cities");
+    for (const city of cities) {
+      const control = choiceButton(city.value, city.matches, () => toggleCity(city.value));
+      control.setAttribute("aria-pressed", String(draft.cities.includes(city.value)));
+      grid.append(control);
+    }
+    cityHost.replaceChildren(grid);
+  }
+
+  function toggleCity(city: string): void {
+    draft.cities = draft.cities.includes(city)
+      ? draft.cities.filter((item) => item !== city)
+      : [...draft.cities, city];
+    renderPlaces();
+    renderChips();
+    schedulePreview();
+  }
+
+  /** The popular makes and the cities of the market under the current conditions. */
+  async function loadChoices(): Promise<void> {
+    const signature = conditionSignature();
+    if (signature === choicesSignature) return;
+    try {
+      const [makes, cities] = await Promise.all([
+        request<{ items?: MiniAppChoice[] }>("/miniapp/api/filter/makes", draftBody()),
+        request<{ items?: MiniAppCityChoice[] }>("/miniapp/api/filter/cities", draftBody()),
+      ]);
+      if (started !== generation) return;
+      popularMakes = makes.items ?? [];
+      cityCatalogue = cities.items ?? [];
+      choicesSignature = signature;
+      renderVehicle();
+      renderPlaces();
+    } catch {
+      if (started === generation) status.textContent = "Марки и города временно недоступны.";
     }
   }
 
@@ -1493,7 +1588,9 @@ async function showFilters(): Promise<void> {
         continue;
       }
       const rest = words.slice(make.words);
-      const model = rest.length ? findModel(await modelItems(make.choice), rest) : null;
+      // The models of a restored make are needed even when the query names no model.
+      const modelList = await modelItems(make.choice);
+      const model = rest.length ? findModel(modelList, rest) : null;
       if (rest.length && !model) {
         unresolved.push(part);
         continue;
@@ -1575,17 +1672,13 @@ async function showFilters(): Promise<void> {
 
   async function save(monitoring: boolean): Promise<void> {
     if (saving) return;
-    if (!consent) {
-      status.textContent = "Отметьте согласие на хранение данных.";
-      return;
-    }
     saving = true;
     renderSaveState();
     status.textContent = "Сохраняем условия…";
     try {
       const result = await request<{ revision: string; monitoring: boolean; matches: number }>(
         "/miniapp/api/filter",
-        { ...draftBody(), monitoring, consent: true },
+        { ...draftBody(), monitoring },
       );
       if (started !== generation) return;
       const section = element("section", "panel");
@@ -1617,10 +1710,12 @@ async function showFilters(): Promise<void> {
 
   renderCurrency();
   renderVehicle();
+  renderPlaces();
   renderChips();
   renderSaveState();
   void refreshMatches();
   void loadCatalogue();
+  void loadChoices();
 }
 
 function showDialogue(view: "sell"): void {

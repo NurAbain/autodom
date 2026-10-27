@@ -41,6 +41,7 @@ import {
   filterProfileView,
   parseFilterDraft,
   parseModelRequest,
+  rankMakesByCount,
 } from "./miniapp-filter.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
 import {
@@ -147,7 +148,14 @@ const countCache = new Map<string, { expires: number; matches: number }>();
 export interface MiniAppServerOptions {
   store: Pick<
     Store,
-    "getProfile" | "getListing" | "saveProfile" | "countMatches" | "search" | "searchModelRows"
+    | "getProfile"
+    | "getListing"
+    | "saveProfile"
+    | "countMatches"
+    | "countCities"
+    | "countMakes"
+    | "search"
+    | "searchModelRows"
   >;
   token: string;
   publicUrl: string;
@@ -223,6 +231,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/car",
     "/miniapp/api/filter",
     "/miniapp/api/filter/suggest",
+    "/miniapp/api/filter/makes",
+    "/miniapp/api/filter/cities",
     "/miniapp/api/filter/models",
     "/miniapp/api/filter/preview",
     "/miniapp/api/vin",
@@ -515,6 +525,46 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             respond(response, 200, { state: "ready", items });
             return;
           }
+          if (url.pathname === "/miniapp/api/filter/makes") {
+            if (request.method !== "POST") {
+              response.setHeader("Allow", "POST");
+              throw new RequestError(405, "Подбор марок доступен только через POST.");
+            }
+            if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
+            const body = await readFlatJson(request, 8192);
+            const parsed = parseFilterDraft(body);
+            if (!parsed.ok) throw new RequestError(400, parsed.message);
+            const catalogue = await loadCatalogue("make");
+            if (!catalogue) {
+              response.setHeader("Retry-After", "3");
+              respond(response, 202, { state: "loading" });
+              return;
+            }
+            const previous = await options.store.getProfile(user.id);
+            const counts = await options.store.countMakes(
+              draftToProfile(user.id, parsed.draft, previous),
+            );
+            respond(response, 200, { items: rankMakesByCount(catalogue, counts) });
+            return;
+          }
+          if (url.pathname === "/miniapp/api/filter/cities") {
+            if (request.method !== "POST") {
+              response.setHeader("Allow", "POST");
+              throw new RequestError(405, "Список городов доступен только через POST.");
+            }
+            if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
+            const body = await readFlatJson(request, 8192);
+            const parsed = parseFilterDraft(body);
+            if (!parsed.ok) throw new RequestError(400, parsed.message);
+            const previous = await options.store.getProfile(user.id);
+            const items = await options.store.countCities(
+              draftToProfile(user.id, parsed.draft, previous),
+            );
+            respond(response, 200, {
+              items: items.map((item) => ({ value: item.city, matches: item.matches })),
+            });
+            return;
+          }
           if (url.pathname === "/miniapp/api/filter/models") {
             if (request.method !== "POST") {
               response.setHeader("Allow", "POST");
@@ -592,8 +642,6 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           }
           if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
           const body = await readFlatJson(request, 8192);
-          if (body.consent !== true)
-            throw new RequestError(400, "Нужно согласие на хранение данных.");
           const parsed = parseFilterDraft(body);
           if (!parsed.ok) throw new RequestError(400, parsed.message);
           const previous = await options.store.getProfile(user.id);

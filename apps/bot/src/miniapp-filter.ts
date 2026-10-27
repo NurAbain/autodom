@@ -1,11 +1,16 @@
 import { BODY_TYPES, makeProfile, normalize, type Profile, TRANSMISSIONS } from "@autodom/core";
 import { z } from "zod";
 import { NO_BUDGET_LIMIT_MINOR } from "./budget-limit.js";
-import type { MiniAppFilterDraft, MiniAppFilterProfile } from "./miniapp-contract.js";
+import type {
+  MiniAppChoice,
+  MiniAppFilterDraft,
+  MiniAppFilterProfile,
+} from "./miniapp-contract.js";
 
 const MAX_YEAR = new Date().getUTCFullYear() + 1;
 const MAX_QUERY = 160;
-const MAX_CITY = 80;
+const MAX_CITY = 160;
+const MAX_CITIES = 8;
 
 /** The same conditions for every marketplace: text, budget, place and characteristics. */
 const plainText = (maximum: number) =>
@@ -14,6 +19,20 @@ const plainText = (maximum: number) =>
     .trim()
     .max(maximum)
     .refine((value) => !/[\p{Cc}]/u.test(value), "Control characters are not allowed");
+
+/** The cities of the draft: the field carries a list separated by commas. */
+export const cityList = (city: string): string[] => {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const part of city.split(",")) {
+    const name = part.trim();
+    const key = normalize(name);
+    if (!name || !key || seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+};
 
 export const filterDraftSchema = z
   .object({
@@ -25,10 +44,14 @@ export const filterDraftSchema = z
       const alternatives = value.split(",");
       return alternatives.length <= 5 && alternatives.every((part) => part.trim().length > 0);
     }, "Укажите до пяти непустых вариантов через запятую"),
-    city: plainText(MAX_CITY).refine(
-      (value) => value === "" || /\p{L}/u.test(value),
-      "Введите название города с буквами",
-    ),
+    city: plainText(MAX_CITY)
+      .refine(
+        (value) =>
+          value === "" ||
+          value.split(",").every((part) => part.trim().length > 0 && /\p{L}/u.test(part.trim())),
+        "Введите названия городов с буквами через запятую",
+      )
+      .refine((value) => cityList(value).length <= MAX_CITIES, "Слишком много городов"),
     body_type: z
       .string()
       .refine((value) => value === "" || Object.hasOwn(BODY_TYPES, value), "Unknown body type"),
@@ -85,7 +108,7 @@ export function parseFilterDraft(body: Record<string, unknown>): FilterDraftResu
           : DRAFT_MESSAGES.default!,
     };
   }
-  return { ok: true, draft: { ...parsed.data, consent: body.consent === true } };
+  return { ok: true, draft: parsed.data };
 }
 
 /** The characteristic choices the editor offers; the server owns the list. */
@@ -99,12 +122,31 @@ export function filterChoices(): {
   };
 }
 
-export interface MiniAppModelChoice {
-  id: string;
-  value: string;
-  label: string;
-  /** How many collected ads match the current conditions for this model. */
-  matches: number;
+/**
+ * The makes of the catalogue with the number of ads behind them. The ads name the
+ * make the way the marketplace does, so the counts are matched by name; a make
+ * without ads under the current conditions stays out of the list.
+ */
+export function rankMakesByCount(
+  makes: readonly { id: string; value: string; label: string }[],
+  counts: ReadonlyMap<string, number>,
+): MiniAppChoice[] {
+  const byName = new Map<string, number>();
+  for (const [name, matches] of counts) {
+    const key = normalize(name);
+    if (key && !byName.has(key)) byName.set(key, matches);
+  }
+  return makes
+    .map((make) => ({
+      id: make.id,
+      value: make.value,
+      label: make.label,
+      matches: byName.get(normalize(make.value)) ?? byName.get(normalize(make.label)) ?? 0,
+    }))
+    .filter((make) => make.matches > 0)
+    .sort(
+      (left, right) => right.matches - left.matches || left.label.localeCompare(right.label, "ru"),
+    );
 }
 
 export interface ModelRequest {
@@ -179,7 +221,7 @@ export function filterProfileView(profile: Profile): MiniAppFilterProfile {
     budget_max_minor:
       profile.budget_max_minor >= NO_BUDGET_LIMIT_MINOR ? 0 : profile.budget_max_minor,
     query: profile.query,
-    city: profile.city,
+    cities: cityList(profile.city),
     // A profile saved by an older editor may hold a label instead of a key; the
     // editor shows the "any" option and the next save heals the row.
     body_type: Object.hasOwn(BODY_TYPES, profile.body_type) ? profile.body_type : "",

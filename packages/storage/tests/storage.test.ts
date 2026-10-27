@@ -1748,6 +1748,43 @@ describe("PostgreSQL Store", () => {
     expect(rows[1]?.model).toBe("");
     expect(await db.countMatches({ ...profile(), query: "Toyota" })).toBe(2);
   });
+  it("counts the cities and the makes of the market and filters by several cities", async () => {
+    await db.upsertListings([
+      car({
+        id: "01-bishkek",
+        title: "Toyota Camry",
+        city: "Бишкек",
+        catalog_attributes: { make: "Toyota", model: "Camry" },
+      }),
+      car({
+        id: "02-osh",
+        title: "Kia Rio",
+        city: "Ош",
+        catalog_attributes: { make: "Kia", model: "Rio" },
+      }),
+      car({
+        id: "03-bishkek",
+        title: "Toyota Corolla",
+        city: "Бишкек",
+        catalog_attributes: { make: "Toyota", model: "Corolla" },
+      }),
+    ]);
+    expect(await db.countCities(profile())).toEqual([
+      { city: "Бишкек", matches: 2 },
+      { city: "Ош", matches: 1 },
+    ]);
+    expect([...(await db.countMakes(profile())).entries()]).toEqual([
+      ["Toyota", 2],
+      ["Kia", 1],
+    ]);
+    const several = { ...profile(), city: "Бишкек, Ош" };
+    expect((await db.search(several)).map((item) => item.id).sort()).toEqual([
+      "01-bishkek",
+      "02-osh",
+      "03-bishkek",
+    ]);
+    expect(await db.countMatches({ ...profile(), city: "Бишкек" })).toBe(2);
+  });
   it("upgrades a populated v1 catalog without narrowing the normalized mileage range", async () => {
     const legacyUrl = await database();
     const legacy = new pg.Client({ connectionString: legacyUrl });

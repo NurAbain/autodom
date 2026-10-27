@@ -264,16 +264,14 @@ details[open] > summary { margin-bottom: 14px; }
 .filter-label { font-size: 13px; font-weight: 600; line-height: 1.5; }
 .filter-block .footnote { margin: 0; }
 .filter-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.filter-consent { display: flex; align-items: flex-start; gap: 10px; margin-top: 16px; }
-.filter-consent-box { flex: none; width: 20px; height: 20px; margin: 1px 0 0; }
-.filter-consent { font-size: 14px; line-height: 1.5; }
 .filter-privacy { margin-bottom: 4px; }
 .filter-privacy > summary { color: var(--muted); font-size: 13px; }
 .filter-privacy .reply-text { font-size: 13px; }
 .filter-vehicles { display: grid; gap: 14px; min-width: 0; }
 .filter-vehicles > .filter-label { margin: 0; }
-.filter-makes { display: flex; gap: 8px; overflow-x: auto; margin: 0 -4px; padding: 2px 4px 6px; scrollbar-width: thin; }
-.filter-makes > .button { flex: none; min-height: 40px; padding: 8px 14px; border: 1px solid var(--line); background: var(--panel); color: inherit; font-size: 14px; }
+.filter-makes, .filter-cities { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 8px; }
+.filter-makes > .button, .filter-cities > .button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--line); background: var(--panel); color: inherit; font-size: 14px; text-align: left; }
+.filter-choice-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filter-choice-all { border-style: dashed; }
 .filter-make-block { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
 .filter-make-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
