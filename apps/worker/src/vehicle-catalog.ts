@@ -26,7 +26,8 @@ const LOOKUPS: Record<CatalogFieldKey, { id: number; parent?: boolean; skip?: nu
   availibility: { id: 96 },
 };
 const TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_ENTRIES = 256;
+/** The make and model lists of every marketplace make must stay cached. */
+const MAX_ENTRIES = 1024;
 const MAX_OPTIONS = 10_000;
 const INVALID = "Справочник временно недоступен. Выбранные параметры сохранены; повторите позже.";
 
