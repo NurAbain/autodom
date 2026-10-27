@@ -1732,6 +1732,22 @@ describe("PostgreSQL Store", () => {
     }
     expect((await db.getListing("01-usd"))?.availability).toBe("Опубликовано");
   });
+  it("returns the model rows of a search without the listing payload", async () => {
+    await db.upsertListings([
+      car({
+        id: "01-camry",
+        title: "Toyota Camry 2019",
+        catalog_attributes: { make: "Toyota", model: "Camry" },
+      }),
+      car({ id: "02-corolla", title: "Toyota Corolla 2015" }),
+      car({ id: "03-old", title: "Toyota Camry 2012", observed_at: NOW - 49 * 3600 }),
+    ]);
+    const rows = await db.searchModelRows({ ...profile(), query: "Toyota" });
+    expect(rows.map((row) => row.title)).toEqual([" toyota camry 2019 ", " toyota corolla 2015 "]);
+    expect(rows[0]?.model).toBe("Camry");
+    expect(rows[1]?.model).toBe("");
+    expect(await db.countMatches({ ...profile(), query: "Toyota" })).toBe(2);
+  });
   it("upgrades a populated v1 catalog without narrowing the normalized mileage range", async () => {
     const legacyUrl = await database();
     const legacy = new pg.Client({ connectionString: legacyUrl });

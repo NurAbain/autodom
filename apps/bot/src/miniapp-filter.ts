@@ -1,11 +1,4 @@
-import {
-  BODY_TYPES,
-  type Listing,
-  makeProfile,
-  normalize,
-  type Profile,
-  TRANSMISSIONS,
-} from "@autodom/core";
+import { BODY_TYPES, makeProfile, normalize, type Profile, TRANSMISSIONS } from "@autodom/core";
 import { z } from "zod";
 import type { MiniAppFilterDraft, MiniAppFilterProfile } from "./miniapp-contract.js";
 
@@ -146,16 +139,36 @@ export function parseModelRequest(body: Record<string, unknown>): ModelRequestRe
 }
 
 /**
- * True when the ad belongs to the model. Mashina names the model in its attributes;
+ * How many ads belong to each model. Mashina names the model in its attributes;
  * the other marketplaces only carry it in the title, so both are checked.
+ *
+ * The database hands over the normalised title and the catalogue model of every
+ * ad, so each ad is prepared once instead of once per model.
  */
-export function listingMatchesModel(listing: Listing, model: { value: string }): boolean {
-  const attribute = listing.catalog_attributes.model;
-  if (attribute && normalize(attribute) === normalize(model.value)) return true;
-  const words = normalize(model.value).split(" ").filter(Boolean);
-  if (!words.length) return false;
-  const title = ` ${normalize(listing.title)} `;
-  return words.every((word) => title.includes(` ${word} `));
+export function countModelsByModel(
+  rows: readonly { title: string; model: string }[],
+  models: readonly { value: string }[],
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  const prepared = models
+    .map((model) => ({
+      value: model.value,
+      normalized: normalize(model.value),
+      words: normalize(model.value).split(" ").filter(Boolean),
+    }))
+    .filter((model) => model.words.length > 0);
+  for (const row of rows) {
+    const attribute = row.model ? normalize(row.model) : "";
+    for (const model of prepared) {
+      if (attribute && attribute === model.normalized) {
+        counts.set(model.value, (counts.get(model.value) ?? 0) + 1);
+        continue;
+      }
+      if (model.words.every((word) => row.title.includes(` ${word} `)))
+        counts.set(model.value, (counts.get(model.value) ?? 0) + 1);
+    }
+  }
+  return counts;
 }
 
 export function filterProfileView(profile: Profile): MiniAppFilterProfile {
@@ -165,8 +178,10 @@ export function filterProfileView(profile: Profile): MiniAppFilterProfile {
     budget_max_minor: profile.budget_max_minor,
     query: profile.query,
     city: profile.city,
-    body_type: profile.body_type,
-    transmission: profile.transmission,
+    // A profile saved by an older editor may hold a label instead of a key; the
+    // editor shows the "any" option and the next save heals the row.
+    body_type: Object.hasOwn(BODY_TYPES, profile.body_type) ? profile.body_type : "",
+    transmission: Object.hasOwn(TRANSMISSIONS, profile.transmission) ? profile.transmission : "",
     year_min: profile.year_min,
     year_max: profile.year_max,
     mileage_max_km: profile.mileage_max_km,

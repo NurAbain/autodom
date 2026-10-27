@@ -1016,7 +1016,9 @@ async function showFilters(): Promise<void> {
   const traits = element("section", "panel");
   const bodySelect = element("select", "text-input");
   bodySelect.id = "filter-body";
-  bodySelect.append(element("option", "", "Любой кузов"));
+  const anyBody = element("option", "", "Любой кузов");
+  anyBody.value = "";
+  bodySelect.append(anyBody);
   for (const option of state.bodyTypes) {
     const item = element("option", "", option.label);
     item.value = option.value;
@@ -1030,7 +1032,9 @@ async function showFilters(): Promise<void> {
   });
   const transmissionSelect = element("select", "text-input");
   transmissionSelect.id = "filter-transmission";
-  transmissionSelect.append(element("option", "", "Любая коробка"));
+  const anyTransmission = element("option", "", "Любая коробка");
+  anyTransmission.value = "";
+  transmissionSelect.append(anyTransmission);
   for (const option of state.transmissions) {
     const item = element("option", "", option.label);
     item.value = option.value;
