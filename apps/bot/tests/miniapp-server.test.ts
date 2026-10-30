@@ -4,6 +4,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeListing, makeProfile, money } from "@autodom/core";
+import type { OwnerVehicle } from "@autodom/core/owner-vehicle";
 import type { PaymentOrder } from "@autodom/core/payments";
 import type { VinCheckResult, VinLookup } from "@autodom/core/vin";
 import type {
@@ -31,6 +32,34 @@ const storageError = new Error("database password=private-connection-secret");
 const analyticsEvents: AnalyticsEvent[] = [];
 let rejectAnalytics = false;
 const savedProfiles = new Map<number, ReturnType<typeof makeProfile>>();
+const savedOwnerCards = new Map<number, OwnerVehicle>();
+const ownerCard: OwnerVehicle = {
+  user_id: 42,
+  chat_id: 42,
+  purpose: "sale",
+  make_model: "Toyota Camry",
+  make_id: "1",
+  make_value: "toyota",
+  make_label: "Toyota",
+  model_id: "2",
+  model_value: "Camry",
+  model_label: "Camry",
+  year: 2019,
+  mileage_km: 120_000,
+  body_type: "sedan",
+  transmission: "automatic",
+  city: "Бишкек",
+  sale_price_minor: 1_500_000,
+  sale_currency: "USD",
+  property_city: null,
+  property_type: null,
+  cash_minor: null,
+  cash_currency: null,
+  monthly_minor: null,
+  monthly_currency: null,
+  consent_at: 1_789_000_000,
+  updated_at: 1_789_000_000,
+};
 const profile = makeProfile({
   user_id: 42,
   chat_id: 42,
@@ -122,6 +151,7 @@ const paidPhotoAccess = vi.fn<PaymentService["hasPhotoAccess"]>(
 beforeEach(() => {
   vi.spyOn(photoPayments, "hasPhotoAccess").mockImplementation(paidPhotoAccess);
   savedProfiles.clear();
+  savedOwnerCards.clear();
 });
 
 function authorization(userId = 42): string {
@@ -193,6 +223,13 @@ beforeAll(async () => {
         const saved = { ...input, revision: String(Number(input.revision || "0") + 1) };
         savedProfiles.set(input.user_id, saved);
         return saved;
+      },
+      async getOwnerVehicle(id) {
+        return savedOwnerCards.get(id) ?? (id === 42 ? ownerCard : null);
+      },
+      async saveOwnerVehicle(input) {
+        savedOwnerCards.set(input.user_id, input);
+        return input;
       },
       async countMatches(input) {
         const words = input.query
@@ -584,6 +621,8 @@ it("creates the requested report from recent actor evidence without another VIN 
     searchModelRows: async () => [],
     countCities: async () => [],
     countMakes: async () => new Map(),
+    getOwnerVehicle: async () => null,
+    saveOwnerVehicle: async (input: OwnerVehicle) => input,
     withLock: async <T>(_key: string, action: () => Promise<T>) => action(),
   };
   const payments = new PaymentService(store as unknown as Store);
@@ -771,6 +810,8 @@ it("reports an unconfigured VIN service without fabricating observations", async
       searchModelRows: async () => [],
       countCities: async () => [],
       countMakes: async () => new Map(),
+      getOwnerVehicle: async () => null,
+      saveOwnerVehicle: async (input) => input,
     },
   });
   try {
@@ -863,51 +904,6 @@ it("preserves archive failure as unknown instead of an empty successful history"
   ).toMatchObject({
     outcome: "unavailable",
   });
-});
-
-it("reports refused dialogue admission as retryable without confusing an empty successful reply", async () => {
-  let busy = true;
-  const dialogueServer = await startMiniAppServer({
-    token: TOKEN,
-    publicUrl: PUBLIC_URL,
-    host: "127.0.0.1",
-    port: 0,
-    assetsDirectory: directory,
-    ready: async () => true,
-    store: {
-      getProfile: async () => null,
-      getListing: async () => null,
-      saveProfile: async () => profile,
-      countMatches: async () => 0,
-      search: async () => [],
-      searchModelRows: async () => [],
-      countCities: async () => [],
-      countMakes: async () => new Map(),
-    },
-    dialogue: async () => (busy ? null : []),
-  });
-  try {
-    const address = dialogueServer.address();
-    if (!address || typeof address === "string") throw new Error("No listening address");
-    const endpoint = `http://127.0.0.1:${address.port}/miniapp/api/dialogue`;
-    const request = {
-      method: "POST",
-      headers: { Authorization: authorization(), "Content-Type": "application/json" },
-      body: JSON.stringify({ text: "/cancel" }),
-    };
-    const rejected = await fetch(endpoint, request);
-    expect(rejected.status).toBe(429);
-    expect(await rejected.json()).not.toHaveProperty("replies");
-    busy = false;
-    const admitted = await fetch(endpoint, request);
-    expect(admitted.status).toBe(200);
-    expect(await admitted.json()).toEqual({ replies: [] });
-  } finally {
-    await new Promise<void>((resolve, reject) => {
-      dialogueServer.close((error) => (error ? reject(error) : resolve()));
-      dialogueServer.closeAllConnections();
-    });
-  }
 });
 
 it("cancels VIN lookup when the authenticated client disconnects", async () => {
@@ -1187,6 +1183,8 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
       searchModelRows: async () => [],
       countCities: async () => [],
       countMakes: async () => new Map(),
+      getOwnerVehicle: async () => null,
+      saveOwnerVehicle: async (input) => input,
     },
     analytics: {
       async record(event) {
@@ -1521,6 +1519,8 @@ describe("buyer filter editor", () => {
         searchModelRows: async () => [],
         countCities: async () => [],
         countMakes: async () => new Map(),
+        getOwnerVehicle: async () => null,
+        saveOwnerVehicle: async (input) => input,
       },
     });
     try {
@@ -1599,6 +1599,8 @@ describe("buyer filter editor", () => {
         },
         countCities: async () => [{ city: "Бишкек", matches: 2 }],
         countMakes: async () => new Map([["Toyota", 2]]),
+        getOwnerVehicle: async () => null,
+        saveOwnerVehicle: async (input) => input,
       },
     });
     try {
@@ -1656,20 +1658,203 @@ describe("buyer filter editor", () => {
         searchModelRows: async () => [],
         countCities: async () => [],
         countMakes: async () => new Map(),
+        getOwnerVehicle: async () => null,
+        saveOwnerVehicle: async (input) => input,
       },
     });
     try {
       const address = vinServer.address();
       if (!address || typeof address === "string") throw new Error("No listening address");
-      const response = await fetch(`http://127.0.0.1:${address.port}/miniapp/api/filter`, {
-        headers: { Authorization: authorization() },
-      });
-      expect(response.status).toBe(404);
+      for (const path of [
+        "/miniapp/api/filter",
+        "/miniapp/api/owner/card",
+        "/miniapp/api/owner/cities",
+      ]) {
+        const response = await fetch(`http://127.0.0.1:${address.port}${path}`, {
+          headers: { Authorization: authorization() },
+        });
+        expect(response.status).toBe(404);
+      }
     } finally {
       await new Promise<void>((resolve, reject) => {
         vinServer.close((error) => (error ? reject(error) : resolve()));
         vinServer.closeAllConnections();
       });
     }
+  });
+});
+
+describe("owner card editor", () => {
+  const draft = {
+    purpose: "sale",
+    make_id: "1",
+    make_value: "toyota",
+    make_label: "Toyota",
+    model_id: "2",
+    model_value: "Camry",
+    model_label: "Camry",
+    make_model: "",
+    year: 2019,
+    mileage_km: 120_000,
+    body_type: "sedan",
+    transmission: "automatic",
+    city: "Бишкек",
+    sale_price_minor: 1_500_000,
+    sale_currency: "USD",
+    property_city: null,
+    property_type: null,
+    cash_minor: null,
+    cash_currency: null,
+    monthly_minor: null,
+    monthly_currency: null,
+  };
+  const post = async (body: unknown, userId = 42) =>
+    fetch(`${base}/miniapp/api/owner/card`, {
+      method: "POST",
+      headers: { Authorization: authorization(userId), "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("serves the saved card, the consent text and the choice lists", async () => {
+    const response = await fetch(`${base}/miniapp/api/owner/card`, {
+      headers: { Authorization: authorization() },
+    });
+    expect(response.status).toBe(200);
+    const state = await response.json();
+    expect(state.card).toMatchObject({
+      purpose: "sale",
+      make: { id: "1", value: "toyota", label: "Toyota" },
+      model: { id: "2", value: "Camry", label: "Camry" },
+      make_model: "Toyota Camry",
+      year: 2019,
+      mileage_km: 120_000,
+      body_type: "sedan",
+      transmission: "automatic",
+      city: "Бишкек",
+      sale_price_minor: 1_500_000,
+      sale_currency: "USD",
+      property_city: null,
+      property_type: null,
+      cash_minor: null,
+      cash_currency: null,
+      monthly_minor: null,
+      monthly_currency: null,
+    });
+    expect(state.privacy).toContain("Сохранённая карточка отделена от фильтров покупки");
+    expect(state.purposes).toContainEqual({ value: "sale", label: "Продать автомобиль" });
+    expect(state.propertyTypes).toContainEqual({ value: "apartment", label: "Квартира" });
+    expect(state.bodyTypes).toContainEqual({ value: "sedan", label: "Седан" });
+    expect(state.transmissions).toContainEqual({ value: "automatic", label: "Автомат" });
+    const empty = await fetch(`${base}/miniapp/api/owner/card`, {
+      headers: { Authorization: authorization(44) },
+    });
+    expect((await empty.json()).card).toBeNull();
+  });
+
+  it("requires the Telegram session, the own origin and a known method", async () => {
+    expect((await fetch(`${base}/miniapp/api/owner/card`)).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/miniapp/api/owner/card`, {
+          headers: { Authorization: authorization(), Origin: "https://other.example" },
+        })
+      ).status,
+    ).toBe(403);
+    const response = await fetch(`${base}/miniapp/api/owner/card`, {
+      method: "PUT",
+      headers: { Authorization: authorization() },
+    });
+    expect(response.status).toBe(405);
+    expect(response.headers.get("allow")).toBe("GET, POST");
+  });
+
+  it("saves the card in the owner row and answers with it", async () => {
+    const response = await post(draft);
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.card).toMatchObject({
+      purpose: "sale",
+      make: { id: "1", value: "toyota", label: "Toyota" },
+      model: { id: "2", value: "Camry", label: "Camry" },
+      make_model: "Toyota Camry",
+      year: 2019,
+      mileage_km: 120_000,
+      body_type: "sedan",
+      transmission: "automatic",
+      city: "Бишкек",
+      sale_price_minor: 1_500_000,
+      sale_currency: "USD",
+    });
+    expect(savedOwnerCards.get(42)).toMatchObject({
+      user_id: 42,
+      chat_id: 42,
+      purpose: "sale",
+      make_model: "Toyota Camry",
+      year: 2019,
+      city: "Бишкек",
+    });
+    expect(savedProfiles.get(42)).toBeUndefined();
+  });
+
+  it("refuses unusable conditions and names the field to fix", async () => {
+    for (const [invalid, message] of [
+      [{ ...draft, year: 1800 }, "Укажите год выпуска."],
+      [
+        {
+          ...draft,
+          make_id: "",
+          make_value: "",
+          make_label: "",
+          model_id: "",
+          model_value: "",
+          model_label: "",
+          make_model: "",
+        },
+        "Выберите марку и модель автомобиля.",
+      ],
+      [{ ...draft, purpose: "property", property_city: null }, "Укажите город недвижимости."],
+      [{ ...draft, body_type: "spaceship" }, "Выберите кузов из списка."],
+    ] as const) {
+      const response = await post(invalid);
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe(message);
+    }
+    expect(savedOwnerCards.get(42)).toBeUndefined();
+  });
+
+  it("offers the cities of the market and refuses another method", async () => {
+    const response = await fetch(`${base}/miniapp/api/owner/cities`, {
+      headers: { Authorization: authorization() },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      items: [
+        { value: "Бишкек", matches: 2 },
+        { value: "Ош", matches: 1 },
+      ],
+    });
+    const wrongMethod = await fetch(`${base}/miniapp/api/owner/cities`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get("allow")).toBe("GET");
+  });
+
+  it("refuses a query string and an oversized body", async () => {
+    const withQuery = await fetch(`${base}/miniapp/api/owner/card?year=2019`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    expect(withQuery.status).toBe(400);
+    const oversized = await fetch(`${base}/miniapp/api/owner/card`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify({ ...draft, make_model: "x".repeat(9000) }),
+    });
+    expect(oversized.status).toBe(413);
+    expect(savedOwnerCards.get(42)).toBeUndefined();
   });
 });

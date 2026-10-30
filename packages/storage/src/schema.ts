@@ -141,6 +141,17 @@ export const ownerVehicles = pgTable(
     monthly_currency: text("monthly_currency").$type<OwnerCurrency>(),
     consent_at: doublePrecision("consent_at").notNull(),
     updated_at: doublePrecision("updated_at").notNull(),
+    // The catalogue choice of the make and of the model, the body, the transmission
+    // and the city; all of them are unknown until the owner names them.
+    make_id: text("make_id"),
+    make_value: text("make_value"),
+    make_label: text("make_label"),
+    model_id: text("model_id"),
+    model_value: text("model_value"),
+    model_label: text("model_label"),
+    body_type: text("body_type"),
+    transmission: text("transmission"),
+    city: text("city"),
   },
   (table) => [
     check("owner_purpose", sql`${table.purpose} IN ('sale','property','downpayment')`),
@@ -168,6 +179,27 @@ export const ownerVehicles = pgTable(
       "owner_consent",
       sql`${table.consent_at} > 0 AND ${table.updated_at} >= ${table.consent_at}`,
     ),
+    check(
+      "owner_make_choice",
+      sql`(${table.make_id} IS NULL AND ${table.make_value} IS NULL AND ${table.make_label} IS NULL) OR (${table.make_id} IS NOT NULL AND ${table.make_value} IS NOT NULL AND ${table.make_label} IS NOT NULL)`,
+    ),
+    check(
+      "owner_model_choice",
+      sql`(${table.model_id} IS NULL AND ${table.model_value} IS NULL AND ${table.model_label} IS NULL) OR (${table.model_id} IS NOT NULL AND ${table.model_value} IS NOT NULL AND ${table.model_label} IS NOT NULL)`,
+    ),
+    check(
+      "owner_catalogue_text",
+      sql`(${table.make_id} IS NULL OR length(trim(${table.make_id})) BETWEEN 1 AND 128) AND (${table.make_value} IS NULL OR length(trim(${table.make_value})) BETWEEN 1 AND 256) AND (${table.make_label} IS NULL OR length(trim(${table.make_label})) BETWEEN 1 AND 256) AND (${table.model_id} IS NULL OR length(trim(${table.model_id})) BETWEEN 1 AND 128) AND (${table.model_value} IS NULL OR length(trim(${table.model_value})) BETWEEN 1 AND 256) AND (${table.model_label} IS NULL OR length(trim(${table.model_label})) BETWEEN 1 AND 256)`,
+    ),
+    check(
+      "owner_body_type",
+      sql`${table.body_type} IS NULL OR (length(trim(${table.body_type})) BETWEEN 1 AND 32 AND ${table.body_type} IN ('sedan','suv','hatchback','wagon','minivan','pickup','coupe','convertible','van'))`,
+    ),
+    check(
+      "owner_transmission",
+      sql`${table.transmission} IS NULL OR (length(trim(${table.transmission})) BETWEEN 1 AND 32 AND ${table.transmission} IN ('manual','automatic','cvt','robot'))`,
+    ),
+    check("owner_city", sql`${table.city} IS NULL OR length(trim(${table.city})) BETWEEN 1 AND 80`),
   ],
 );
 export const drafts = pgTable("drafts", {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -12,6 +12,14 @@ import {
   money,
 } from "@autodom/core";
 import type { CatalogChoice, CatalogFieldKey, CatalogLookup } from "@autodom/core/catalog-filter";
+import {
+  ownerBodyTypes,
+  ownerDraftToCard,
+  ownerPropertyTypes,
+  ownerPurposes,
+  ownerTransmissions,
+} from "@autodom/core/owner-filter";
+import type { OwnerVehicle } from "@autodom/core/owner-vehicle";
 import { normalizeVin, VIN_PROVIDERS, type VinLookup } from "@autodom/core/vin";
 import { VIN_ARCHIVE_PHOTO_MAX_BYTES, type VinArchivePhotoLookup } from "@autodom/core/vin-archive";
 import {
@@ -28,12 +36,13 @@ import {
   PURCHASE_REASONS,
 } from "./analytics-contract.js";
 import type { BotMode } from "./bot-mode.js";
-import { listingText, privacyText, type Reply } from "./conversation.js";
+import { listingText, privacyText } from "./conversation.js";
 import { RequestError, readFlatJson } from "./http-body.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
+import { marketProfile } from "./market-profile.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
-import type { MiniAppCar } from "./miniapp-contract.js";
+import type { MiniAppCar, MiniAppOwnerState } from "./miniapp-contract.js";
 import {
   countModelsByModel,
   draftToProfile,
@@ -43,6 +52,7 @@ import {
   parseModelRequest,
   rankMakesByCount,
 } from "./miniapp-filter.js";
+import { ownerCardView, parseOwnerDraft } from "./miniapp-owner.js";
 import { forwardFullMiniApp } from "./miniapp-proxy.js";
 import {
   CARFAX_REPORT_FINIK_MINOR,
@@ -95,19 +105,6 @@ const clientAnalyticsBody = z.union([
     .strict(),
 ]);
 
-async function readDialogueRequest(request: IncomingMessage): Promise<string> {
-  const value = await readFlatJson(request, 8192);
-  if (
-    Object.keys(value).length !== 1 ||
-    typeof value.text !== "string" ||
-    !value.text.trim() ||
-    value.text.length > 2048 ||
-    /[[\p{Cc}&&\p{ASCII}]--[\t\n\r]]/v.test(value.text)
-  )
-    throw new RequestError(400, "Нужен один непустой ответ text, не длиннее 2048 символов.");
-  return value.text.trim();
-}
-
 function carView(listing: Listing, currency: string): MiniAppCar {
   const price = listingPrice(listing, currency);
   let priceText = price === null ? "Цена для сравнения недоступна" : money(price, currency);
@@ -156,6 +153,8 @@ export interface MiniAppServerOptions {
     | "countMakes"
     | "search"
     | "searchModelRows"
+    | "getOwnerVehicle"
+    | "saveOwnerVehicle"
   >;
   token: string;
   publicUrl: string;
@@ -176,7 +175,6 @@ export interface MiniAppServerOptions {
   checkVin?: VinLookup;
   getVinArchivePhoto?: VinArchivePhotoLookup;
   /** Null rejects busy-user admission without applying the reply or queueing HTTP work. */
-  dialogue?: (userId: number, text: string) => Promise<Reply[] | null>;
   /** Make and model suggestions; the parser owns the catalogue. */
   catalog?: CatalogLookup;
   payments?: PaymentService;
@@ -235,9 +233,10 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/filter/cities",
     "/miniapp/api/filter/models",
     "/miniapp/api/filter/preview",
+    "/miniapp/api/owner/card",
+    "/miniapp/api/owner/cities",
     "/miniapp/api/vin",
     "/miniapp/api/vin/archive-photo",
-    "/miniapp/api/dialogue",
     "/miniapp/api/orders",
     "/miniapp/api/orders/checkout",
     "/miniapp/api/orders/cancel",
@@ -469,8 +468,8 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         if (
           mode === "vin" &&
           (url.pathname === "/miniapp/api/car" ||
-            url.pathname === "/miniapp/api/dialogue" ||
-            url.pathname.startsWith("/miniapp/api/filter"))
+            url.pathname.startsWith("/miniapp/api/filter") ||
+            url.pathname.startsWith("/miniapp/api/owner"))
         )
           throw new RequestError(404, "В этом боте доступна только проверка VIN и отчёты.");
         if (url.pathname.startsWith("/miniapp/api/filter")) {
@@ -661,6 +660,53 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           });
           return;
         }
+        if (url.pathname.startsWith("/miniapp/api/owner")) {
+          if (url.pathname === "/miniapp/api/owner/cities") {
+            if (request.method !== "GET") {
+              response.setHeader("Allow", "GET");
+              throw new RequestError(405, "Список городов доступен только через GET.");
+            }
+            // The owner picks the city of the car, not of a search: the count
+            // covers the whole market, so no other condition narrows it.
+            const items = await options.store.countCities(marketProfile(user.id));
+            respond(response, 200, {
+              items: items.map((item) => ({ value: item.city, matches: item.matches })),
+            });
+            return;
+          }
+          if (request.method === "GET") {
+            const card = await options.store.getOwnerVehicle(user.id);
+            const state: MiniAppOwnerState = {
+              privacy: privacyText(),
+              card: card ? ownerCardView(card) : null,
+              purposes: ownerPurposes(),
+              propertyTypes: ownerPropertyTypes(),
+              bodyTypes: ownerBodyTypes(),
+              transmissions: ownerTransmissions(),
+            };
+            respond(response, 200, state);
+            return;
+          }
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "GET, POST");
+            throw new RequestError(405, "Карточка автомобиля доступна через GET и POST.");
+          }
+          if (url.search) throw new RequestError(400, "Передайте условия только в теле запроса.");
+          const body = await readFlatJson(request, 8192);
+          const parsed = parseOwnerDraft(body);
+          if (!parsed.ok) throw new RequestError(400, parsed.message);
+          const previous = await options.store.getOwnerVehicle(user.id);
+          let saved: OwnerVehicle;
+          try {
+            saved = await options.store.saveOwnerVehicle(
+              ownerDraftToCard(user.id, user.id, parsed.draft, previous),
+            );
+          } catch {
+            throw new RequestError(400, "Карточка не сохранена: проверьте марку, год и суммы.");
+          }
+          respond(response, 200, { card: ownerCardView(saved) });
+          return;
+        }
         if (url.pathname.startsWith("/miniapp/api/orders")) {
           if (reportBotUrl) {
             respond(response, 409, {
@@ -670,21 +716,6 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             return;
           }
           await handlePaymentRequest(request, response, url, user.id, payments);
-          return;
-        }
-        if (url.pathname === "/miniapp/api/dialogue") {
-          if (request.method !== "POST") {
-            response.setHeader("Allow", "POST");
-            throw new RequestError(405, "Ответы принимаются только через POST.");
-          }
-          if (url.search) throw new RequestError(400, "Передайте ответ только в теле запроса.");
-          const text = await readDialogueRequest(request);
-          if (!options.dialogue)
-            throw new RequestError(503, "Диалог недоступен. Откройте личный чат с ботом.");
-          const replies = await options.dialogue(user.id, text);
-          if (replies === null)
-            throw new RequestError(429, "Предыдущий ответ ещё обрабатывается. Повторите позже.");
-          if (!response.destroyed) respond(response, 200, { replies });
           return;
         }
         if (url.pathname === "/miniapp/api/vin/archive-photo") {

@@ -378,6 +378,7 @@ export class Store {
         "0013_vin_photos.sql",
         "0014_buyer_filter.sql",
         "0015_search_text_index.sql",
+        "0016_owner_conditions.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {

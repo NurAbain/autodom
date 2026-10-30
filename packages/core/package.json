@@ -36,6 +36,10 @@
       "types": "./src/payments.ts",
       "default": "./src/payments.ts"
     },
+    "./owner-filter": {
+      "types": "./src/owner-filter.ts",
+      "default": "./src/owner-filter.ts"
+    },
     "./owner-vehicle": {
       "types": "./src/owner-vehicle.ts",
       "default": "./src/owner-vehicle.ts"

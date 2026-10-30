@@ -39,8 +39,17 @@ const ownerCard = (): OwnerVehicle => ({
   chat_id: 10,
   purpose: "downpayment",
   make_model: "Toyota Camry",
+  make_id: null,
+  make_value: null,
+  make_label: null,
+  model_id: null,
+  model_value: null,
+  model_label: null,
   year: 2018,
   mileage_km: null,
+  body_type: null,
+  transmission: null,
+  city: null,
   sale_price_minor: null,
   sale_currency: null,
   property_city: "Бишкек",
@@ -124,6 +133,24 @@ async function rewriteSnapshot(
     for (const record of records) {
       const row = record.row as Record<string, unknown> | undefined;
       if (row && record.table === "profiles") delete row.year_max;
+    }
+  }
+  if (Number(records[0]?.schema_version) < 13) {
+    for (const record of records) {
+      const row = record.row as Record<string, unknown> | undefined;
+      if (row && record.table === "owner_vehicles")
+        for (const name of [
+          "make_id",
+          "make_value",
+          "make_label",
+          "model_id",
+          "model_value",
+          "model_label",
+          "body_type",
+          "transmission",
+          "city",
+        ])
+          delete row[name];
     }
   }
   if (Number(records[0]?.schema_version) < 8) {
@@ -1926,6 +1953,85 @@ describe("PostgreSQL Store", () => {
     expect(await db.getProfile(1)).toEqual(buyer);
     expect(await db.getDraft(1)).toEqual(["budget", { minimum: 100 }]);
   });
+  it("keeps the catalogue choice, the body, the transmission and the city of the owner card", async () => {
+    const conditions = {
+      make_id: "toyota",
+      make_value: "toyota",
+      make_label: "Toyota",
+      model_id: "camry",
+      model_value: "camry",
+      model_label: "Camry",
+      body_type: "sedan",
+      transmission: "automatic",
+      city: "Бишкек",
+    };
+    const owner = { ...ownerCard(), ...conditions };
+    await db.saveOwnerVehicle(owner);
+    expect(await db.getOwnerVehicle(1)).toEqual(owner);
+    const plain = { ...ownerCard(), user_id: 2, chat_id: 20 };
+    await db.saveOwnerVehicle(plain);
+    const stored = await db.getOwnerVehicle(2);
+    expect(stored).toEqual(plain);
+    expect(stored).toMatchObject({
+      make_id: null,
+      make_value: null,
+      make_label: null,
+      model_id: null,
+      model_value: null,
+      model_label: null,
+      body_type: null,
+      transmission: null,
+      city: null,
+    });
+  });
+  it("refuses an incomplete catalogue choice and an unknown body type in the database", async () => {
+    const raw = new pg.Pool({ connectionString: url });
+    try {
+      await expect(
+        raw.query(
+          "INSERT INTO owner_vehicles (user_id, chat_id, purpose, make_model, year, consent_at, updated_at, make_id) VALUES (1, 10, 'sale', 'Toyota Camry', 2018, $1, $1, 'toyota')",
+          [NOW],
+        ),
+      ).rejects.toThrow();
+      await expect(
+        raw.query(
+          "INSERT INTO owner_vehicles (user_id, chat_id, purpose, make_model, year, consent_at, updated_at, body_type) VALUES (2, 20, 'sale', 'Toyota Camry', 2018, $1, $1, 'limousine')",
+          [NOW],
+        ),
+      ).rejects.toThrow();
+      await raw.query(
+        "INSERT INTO owner_vehicles (user_id, chat_id, purpose, make_model, year, consent_at, updated_at, make_id, make_value, make_label, model_id, model_value, model_label, body_type, transmission, city) VALUES (3, 30, 'sale', 'Toyota Camry', 2018, $1, $1, 'toyota', 'toyota', 'Toyota', 'camry', 'camry', 'Camry', 'sedan', 'automatic', 'Бишкек')",
+        [NOW],
+      );
+    } finally {
+      await raw.end();
+    }
+    expect(await db.getOwnerVehicle(1)).toBeNull();
+    expect(await db.getOwnerVehicle(2)).toBeNull();
+    expect(await db.getOwnerVehicle(3)).toEqual({
+      ...ownerCard(),
+      user_id: 3,
+      chat_id: 30,
+      purpose: "sale",
+      property_city: null,
+      property_type: null,
+      cash_minor: null,
+      cash_currency: null,
+      monthly_minor: null,
+      monthly_currency: null,
+      consent_at: NOW,
+      updated_at: NOW,
+      make_id: "toyota",
+      make_value: "toyota",
+      make_label: "Toyota",
+      model_id: "camry",
+      model_value: "camry",
+      model_label: "Camry",
+      body_type: "sedan",
+      transmission: "automatic",
+      city: "Бишкек",
+    });
+  });
   it("lets another user progress while same-user lock waiters remain stalled and ordered", async () => {
     const entered = Promise.withResolvers<void>();
     const resume = Promise.withResolvers<void>();
@@ -2082,6 +2188,41 @@ describe("portable snapshots and read-only legacy import", () => {
     await expect(restore(destination, targetUrl)).rejects.toThrow();
     await target.upsertListings([car({ id: "next" })]);
     expect((await target.eventsAfter(2))[0]?.id).toBe(3);
+  });
+  it("restores a card of an older snapshot with unknown owner conditions", async () => {
+    const owner = await db.saveOwnerVehicle({
+      ...ownerCard(),
+      make_id: "toyota",
+      make_value: "toyota",
+      make_label: "Toyota",
+      model_id: "camry",
+      model_value: "camry",
+      model_label: "Camry",
+      body_type: "sedan",
+      transmission: "automatic",
+      city: "Бишкек",
+    });
+    const current = join(directory, "current.ndjson");
+    const historical = join(directory, "schema-12.ndjson");
+    await backup(db, current);
+    await rewriteSnapshot(current, historical, (record) => {
+      if (Object.hasOwn(record, "schema_version")) record.schema_version = 12;
+    });
+    const targetUrl = await database();
+    await restore(historical, targetUrl);
+    const target = await open(targetUrl);
+    expect(await target.getOwnerVehicle(1)).toEqual({
+      ...owner,
+      make_id: null,
+      make_value: null,
+      make_label: null,
+      model_id: null,
+      model_value: null,
+      model_label: null,
+      body_type: null,
+      transmission: null,
+      city: null,
+    });
   });
   it("rejects empty, truncated, and altered snapshots without committing rows", async () => {
     const snapshot = join(directory, "broken.ndjson");

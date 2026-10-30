@@ -18,7 +18,6 @@ import {
 import { type BotMode, loadReportBotUrl } from "../src/bot-mode.js";
 import { NO_BUDGET_LIMIT_MINOR } from "../src/budget-limit.js";
 import { CARFAX_REPORT_EXAMPLE_PDF } from "../src/carfax-report-example.js";
-import type { Reply } from "../src/conversation.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "../src/korean-report-example.js";
 import type {
   MiniAppCar,
@@ -26,6 +25,9 @@ import type {
   MiniAppCityChoice,
   MiniAppFilterState,
   MiniAppFinikMethods,
+  MiniAppOwnerCard,
+  MiniAppOwnerChoice,
+  MiniAppOwnerState,
   MiniAppSuggestions,
   MiniAppVinResult,
 } from "../src/miniapp-contract.js";
@@ -343,6 +345,38 @@ function choiceButton(label: string, matches: number, action: () => void): HTMLB
   if (matches > 0) node.append(element("span", "filter-choice-hint", String(matches)));
   node.addEventListener("click", action);
   return node;
+}
+
+/** A number field; an empty value means "unknown", never a zero. */
+function numberInput(
+  value: number | null,
+  placeholder: string,
+  onInput: (value: number | null) => void,
+): HTMLInputElement {
+  const input = element("input", "text-input");
+  input.type = "number";
+  input.inputMode = "numeric";
+  input.min = "0";
+  input.step = "1";
+  input.placeholder = placeholder;
+  input.value = value === null ? "" : String(value);
+  input.addEventListener("input", () => {
+    const raw = input.value.trim();
+    onInput(raw === "" ? null : Number(raw));
+  });
+  return input;
+}
+
+/** A labelled control with an optional hint under it. */
+function field(labelText: string, control: HTMLElement, hint?: string): HTMLElement {
+  const block = element("div", "filter-block");
+  const label = element("label", "filter-label", labelText);
+  if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
+    label.htmlFor = control.id;
+  }
+  block.append(label, control);
+  if (hint) block.append(element("p", "footnote", hint));
+  return block;
 }
 
 function closeCard(): void {
@@ -828,6 +862,62 @@ const plural = (count: number, one: string, few: string, many: string): string =
   return many;
 };
 
+/** Every make as a button, grouped by the first letter. */
+function openMakeSheet(
+  catalogue: { items: FilterChoice[] },
+  onPick: (make: FilterChoice) => void,
+  isSelected: (make: FilterChoice) => boolean,
+): void {
+  if (!catalogue.items.length) return;
+  const sheet = element("div", "filter-sheet");
+  sheet.setAttribute("role", "dialog");
+  sheet.setAttribute("aria-modal", "true");
+  sheet.setAttribute("aria-label", "Все марки");
+  const panel = element("div", "filter-sheet-panel");
+  const head = element("div", "filter-sheet-head");
+  const list = element("div", "filter-sheet-list");
+  const dismiss = (): void => {
+    document.removeEventListener("keydown", onKey);
+    sheet.remove();
+    if (closeSheet === dismiss) closeSheet = null;
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") dismiss();
+  };
+  const done = button("Готово", dismiss, "button");
+  head.append(element("h2", "", "Все марки"), done);
+  const sorted = [...catalogue.items].sort((left, right) =>
+    left.label.localeCompare(right.label, "ru"),
+  );
+  let letter = "";
+  for (const make of sorted) {
+    const first = make.label.charAt(0).toUpperCase();
+    if (first !== letter) {
+      letter = first;
+      list.append(element("p", "filter-sheet-letter", letter));
+    }
+    const control = button(
+      make.label,
+      () => {
+        onPick(make);
+        control.setAttribute("aria-pressed", String(isSelected(make)));
+      },
+      "button filter-choice",
+    );
+    control.setAttribute("aria-pressed", String(isSelected(make)));
+    list.append(control);
+  }
+  panel.append(head, list);
+  sheet.append(panel);
+  sheet.addEventListener("click", (event) => {
+    if (event.target === sheet) dismiss();
+  });
+  document.addEventListener("keydown", onKey);
+  document.body.append(sheet);
+  closeSheet = dismiss;
+  done.focus();
+}
+
 async function showFilters(): Promise<void> {
   const main = shell();
   const started = generation;
@@ -940,36 +1030,6 @@ async function showFilters(): Promise<void> {
     year_max: draft.yearMax,
     mileage_max_km: draft.mileageMax,
   });
-
-  const numberInput = (
-    value: number | null,
-    placeholder: string,
-    onInput: (value: number | null) => void,
-  ): HTMLInputElement => {
-    const input = element("input", "text-input");
-    input.type = "number";
-    input.inputMode = "numeric";
-    input.min = "0";
-    input.step = "1";
-    input.placeholder = placeholder;
-    input.value = value === null ? "" : String(value);
-    input.addEventListener("input", () => {
-      const raw = input.value.trim();
-      onInput(raw === "" ? null : Number(raw));
-    });
-    return input;
-  };
-
-  const field = (labelText: string, control: HTMLElement, hint?: string): HTMLElement => {
-    const block = element("div", "filter-block");
-    const label = element("label", "filter-label", labelText);
-    if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement) {
-      label.htmlFor = control.id;
-    }
-    block.append(label, control);
-    if (hint) block.append(element("p", "footnote", hint));
-    return block;
-  };
 
   const vehicle = element("section", "panel");
   const vehicleHost = element("div", "filter-vehicles");
@@ -1399,7 +1459,14 @@ async function showFilters(): Promise<void> {
     parts.push(
       element("p", "filter-label", "Марка"),
       grid,
-      button("Другие марки", () => openMakeSheet(), "button filter-choice filter-choice-all"),
+      button(
+        "Другие марки",
+        () => {
+          if (!makeCatalogue) return;
+          openMakeSheet(makeCatalogue, toggleMake, isMakeSelected);
+        },
+        "button filter-choice filter-choice-all",
+      ),
     );
 
     for (const make of selection.makes) {
@@ -1619,58 +1686,6 @@ async function showFilters(): Promise<void> {
     schedulePreview();
   }
 
-  /** Every make as a button, grouped by the first letter. */
-  function openMakeSheet(): void {
-    if (!makeCatalogue) return;
-    const sheet = element("div", "filter-sheet");
-    sheet.setAttribute("role", "dialog");
-    sheet.setAttribute("aria-modal", "true");
-    sheet.setAttribute("aria-label", "Все марки");
-    const panel = element("div", "filter-sheet-panel");
-    const head = element("div", "filter-sheet-head");
-    const list = element("div", "filter-sheet-list");
-    const dismiss = (): void => {
-      document.removeEventListener("keydown", onKey);
-      sheet.remove();
-      if (closeSheet === dismiss) closeSheet = null;
-    };
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") dismiss();
-    };
-    const done = button("Готово", dismiss, "button");
-    head.append(element("h2", "", "Все марки"), done);
-    const sorted = [...makeCatalogue.items].sort((left, right) =>
-      left.label.localeCompare(right.label, "ru"),
-    );
-    let letter = "";
-    for (const make of sorted) {
-      const first = make.label.charAt(0).toUpperCase();
-      if (first !== letter) {
-        letter = first;
-        list.append(element("p", "filter-sheet-letter", letter));
-      }
-      const control = button(
-        make.label,
-        () => {
-          toggleMake(make);
-          control.setAttribute("aria-pressed", String(isMakeSelected(make)));
-        },
-        "button filter-choice",
-      );
-      control.setAttribute("aria-pressed", String(isMakeSelected(make)));
-      list.append(control);
-    }
-    panel.append(head, list);
-    sheet.append(panel);
-    sheet.addEventListener("click", (event) => {
-      if (event.target === sheet) dismiss();
-    });
-    document.addEventListener("keydown", onKey);
-    document.body.append(sheet);
-    closeSheet = dismiss;
-    done.focus();
-  }
-
   async function save(monitoring: boolean): Promise<void> {
     if (saving) return;
     saving = true;
@@ -1719,195 +1734,873 @@ async function showFilters(): Promise<void> {
   void loadChoices();
 }
 
-function showDialogue(view: "sell"): void {
+type OwnerPurpose = MiniAppOwnerCard["purpose"];
+type OwnerCurrency = NonNullable<MiniAppOwnerCard["sale_currency"]>;
+
+/** The card of the owner; every control of the view writes into it. */
+type OwnerDraft = {
+  purpose: OwnerPurpose;
+  make: MiniAppOwnerChoice | null;
+  model: MiniAppOwnerChoice | null;
+  make_model: string;
+  year: number | null;
+  mileage_km: number | null;
+  body_type: string;
+  transmission: string;
+  city: string;
+  sale_price_minor: number | null;
+  sale_currency: OwnerCurrency;
+  property_city: string;
+  property_type: string;
+  cash_minor: number | null;
+  cash_currency: OwnerCurrency;
+  monthly_minor: number | null;
+  monthly_currency: OwnerCurrency;
+};
+
+const MIN_YEAR = 1900;
+const MAX_MILEAGE_KM = 10_000_000;
+
+/** The goal of the owner; the server knows only these three. */
+const ownerPurpose = (value: string): OwnerPurpose | null =>
+  value === "sale" || value === "property" || value === "downpayment" ? value : null;
+
+/** The saved card, read the way the owner wrote it. */
+const ownerCardSummary = (card: MiniAppOwnerCard): string => {
+  const parts: string[] = [];
+  const name = card.make
+    ? `${card.make.label}${card.model ? ` ${card.model.label}` : ""}`
+    : card.make_model;
+  if (name) parts.push(name);
+  if (card.year) parts.push(String(card.year));
+  if (card.city) parts.push(card.city);
+  if (card.sale_price_minor !== null && card.sale_currency)
+    parts.push(moneyLabel(card.sale_price_minor / 100, card.sale_currency));
+  return parts.join(" · ");
+};
+
+async function showSell(): Promise<void> {
   const main = shell();
   const started = generation;
   main.append(
-    element("p", "eyebrow", "Ваш автомобиль"),
-    element("h1", "", "Продать или обменять"),
+    element("p", "eyebrow", "Своё авто"),
+    element("h1", "", "Продать или обменять авто"),
     element(
       "p",
       "muted",
-      "Расскажите об авто и цели. Анкета продажи отделена от поиска автомобиля.",
+      "Та же карточка автомобиля, что и в боте: марка, модель, город и характеристики.",
     ),
   );
-  const content = element("div", "dialogue-content");
-  const status = element("p", "footnote dialogue-status");
+  const loading = element("div", "state");
+  loading.append(element("p", "", "Загружаем карточку…"));
+  main.append(loading);
+  let state: MiniAppOwnerState;
+  try {
+    state = await request<MiniAppOwnerState>("/miniapp/api/owner/card");
+  } catch (error) {
+    if (started === generation) {
+      loading.replaceChildren(
+        element("p", "", errorText(error)),
+        button("Повторить загрузку", () => void load(), "button button-quiet"),
+      );
+    }
+    return;
+  }
+  if (started !== generation) return;
+  loading.remove();
+
+  const saved = state.card;
+  const savedPurpose = saved?.purpose;
+  const bodyLabels = new Map(state.bodyTypes.map((option) => [option.value, option.label]));
+  const transmissionLabels = new Map(
+    state.transmissions.map((option) => [option.value, option.label]),
+  );
+  const draft: OwnerDraft = {
+    purpose:
+      savedPurpose && state.purposes.some((option) => option.value === savedPurpose)
+        ? savedPurpose
+        : "sale",
+    make: saved?.make ?? null,
+    model: saved?.model ?? null,
+    make_model: saved && !saved.make ? saved.make_model : "",
+    year: saved?.year ?? null,
+    mileage_km: saved?.mileage_km ?? null,
+    body_type: saved?.body_type ?? "",
+    transmission: saved?.transmission ?? "",
+    city: saved?.city ?? "",
+    sale_price_minor: saved?.sale_price_minor ?? null,
+    sale_currency: saved?.sale_currency ?? "USD",
+    property_city: saved?.property_city ?? "",
+    property_type: saved?.property_type ?? "",
+    cash_minor: saved?.cash_minor ?? null,
+    cash_currency: saved?.cash_currency ?? "USD",
+    monthly_minor: saved?.monthly_minor ?? null,
+    monthly_currency: saved?.monthly_currency ?? "USD",
+  };
+  /** The owner writes the name of the car when the catalogue does not know it. */
+  let freeText = !draft.make && draft.make_model !== "";
+  /** The cities of the market. */
+  let cityCatalogue: { value: string; matches: number }[] = [];
+  let saving = false;
+
+  const chipsHost = element("div", "filter-chips");
+  const counter = element("p", "filter-counter");
+  const status = element("p", "footnote filter-status");
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
-  status.setAttribute("aria-atomic", "true");
-  const form = element("form", "dialogue-form");
-  const label = element("label", "", "Ваш ответ");
-  label.htmlFor = "dialogue-input";
-  const input = element("input", "text-input");
-  input.id = "dialogue-input";
-  input.name = "answer";
-  input.type = "text";
-  input.placeholder = "Напишите ответ…";
-  input.autocomplete = "off";
-  input.maxLength = 2048;
-  input.required = true;
-  const submit = element("button", "button", "Отправить");
-  submit.type = "submit";
-  form.append(label, input, submit);
-  form.hidden = true;
-  const cancel = button("Отменить текущий шаг", () => void send("/cancel"), "back-link");
-  main.append(content, status, cancel);
-  let busy = false;
-  let inputContext = "";
 
-  function runAction(command: string): void {
-    if (busy) return;
-    if (command === "vin-report-example") samplePdfLink().click();
-    else if (command === "/vin") navigate("vin");
-    else if (command === "/start") navigate("home");
-    else if (command === "/filters") navigate("filters");
-    else if ((command === "/sell" || command === "/mycar") && view !== "sell") navigate("sell");
-    else void send(command);
+  const selected = element("section", "panel");
+  selected.append(element("h2", "", "Выбранные условия"), chipsHost);
+
+  const goalPanel = element("section", "panel");
+  const goalHost = element("div", "button-row");
+  const goalButtons: HTMLButtonElement[] = [];
+  for (const option of state.purposes) {
+    const purpose = ownerPurpose(option.value);
+    const control = button(
+      option.label,
+      () => {
+        if (!purpose || draft.purpose === purpose) return;
+        draft.purpose = purpose;
+        renderGoals();
+        renderProperty();
+        renderChips();
+      },
+      "button button-quiet",
+    );
+    goalButtons.push(control);
+    goalHost.append(control);
+  }
+  goalPanel.append(element("h2", "", "Цель"), goalHost);
+
+  const pricePanel = element("section", "panel");
+  const saleCurrencyRow = element("div", "button-row");
+  const saleCurrencyButtons: HTMLButtonElement[] = [];
+  for (const [value, label] of [
+    ["USD", "Доллары США · USD"],
+    ["KGS", "Сомы · KGS"],
+  ] as const) {
+    const control = button(
+      label,
+      () => {
+        if (draft.sale_currency === value) return;
+        draft.sale_currency = value;
+        renderSaleCurrency();
+        renderChips();
+      },
+      "button button-quiet",
+    );
+    saleCurrencyButtons.push(control);
+    saleCurrencyRow.append(control);
+  }
+  const saleInput = numberInput(
+    draft.sale_price_minor === null ? null : draft.sale_price_minor / 100,
+    "15000",
+    (value) => {
+      draft.sale_price_minor =
+        value === null || value <= 0 ? null : Math.max(1, Math.round(value * 100));
+      if (value !== null && draft.sale_price_minor === null) saleInput.value = "";
+      renderChips();
+    },
+  );
+  saleInput.id = "owner-price";
+  pricePanel.append(
+    element("h2", "", "Желаемая цена"),
+    saleCurrencyRow,
+    field("Цена", saleInput),
+    button(
+      "Пока не знаю",
+      () => {
+        draft.sale_price_minor = null;
+        saleInput.value = "";
+        renderChips();
+      },
+      "button button-quiet",
+    ),
+    element(
+      "p",
+      "footnote",
+      "Цена объявления и цена сделки — разные вещи; это пожелание владельца, не оценка.",
+    ),
+  );
+
+  const vehiclePanel = element("section", "panel");
+  const vehicleHost = element("div", "filter-vehicles");
+  const makeModelInput = element("input", "text-input");
+  makeModelInput.id = "owner-make-model";
+  makeModelInput.type = "text";
+  makeModelInput.maxLength = 120;
+  makeModelInput.placeholder = "Toyota Camry";
+  makeModelInput.addEventListener("input", () => {
+    draft.make_model = makeModelInput.value;
+    draft.make = null;
+    draft.model = null;
+    renderChips();
+  });
+  vehiclePanel.append(
+    element("h2", "", "Автомобиль"),
+    vehicleHost,
+    element(
+      "p",
+      "footnote",
+      "Марка и модель из справочника помогают найти сопоставимые объявления.",
+    ),
+  );
+
+  const placePanel = element("section", "panel");
+  const cityHost = element("div", "filter-place");
+  const cityInput = element("input", "text-input");
+  cityInput.id = "owner-city";
+  cityInput.type = "text";
+  cityInput.maxLength = 80;
+  cityInput.placeholder = "Бишкек";
+  const commitCity = (): void => {
+    const value = cityInput.value.trim();
+    if (!value) return;
+    draft.city = value;
+    cityInput.value = "";
+    renderPlaces();
+    renderChips();
+  };
+  cityInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    commitCity();
+  });
+  cityInput.addEventListener("change", commitCity);
+  placePanel.append(
+    element("h2", "", "Место"),
+    cityHost,
+    field("Свой город", cityInput, "Город автомобиля, не адрес доставки."),
+  );
+
+  const traitsPanel = element("section", "panel");
+  const bodySelect = element("select", "text-input");
+  bodySelect.id = "owner-body";
+  const anyBody = element("option", "", "Не указан");
+  anyBody.value = "";
+  bodySelect.append(anyBody);
+  for (const option of state.bodyTypes) {
+    const item = element("option", "", option.label);
+    item.value = option.value;
+    bodySelect.append(item);
+  }
+  bodySelect.value = draft.body_type;
+  bodySelect.addEventListener("change", () => {
+    draft.body_type = bodySelect.value;
+    renderChips();
+  });
+  const transmissionSelect = element("select", "text-input");
+  transmissionSelect.id = "owner-transmission";
+  const anyTransmission = element("option", "", "Не указан");
+  anyTransmission.value = "";
+  transmissionSelect.append(anyTransmission);
+  for (const option of state.transmissions) {
+    const item = element("option", "", option.label);
+    item.value = option.value;
+    transmissionSelect.append(item);
+  }
+  transmissionSelect.value = draft.transmission;
+  transmissionSelect.addEventListener("change", () => {
+    draft.transmission = transmissionSelect.value;
+    renderChips();
+  });
+  const maxYear = new Date().getFullYear() + 1;
+  // The year is checked when the field loses focus: a check on every keystroke
+  // would drop the first digit of the year the owner is typing.
+  const yearInput = numberInput(draft.year, "2018", (value) => {
+    draft.year = value;
+    renderChips();
+  });
+  yearInput.id = "owner-year";
+  yearInput.addEventListener("change", () => {
+    const value = draft.year;
+    if (value === null || (Number.isInteger(value) && value >= MIN_YEAR && value <= maxYear))
+      return;
+    status.textContent = `Год выпуска — целое число от ${MIN_YEAR} до ${maxYear}.`;
+    draft.year = null;
+    yearInput.value = "";
+    renderChips();
+  });
+  const mileageInput = numberInput(draft.mileage_km, "150000", (value) => {
+    draft.mileage_km = value;
+    renderChips();
+  });
+  mileageInput.id = "owner-mileage";
+  mileageInput.addEventListener("change", () => {
+    const value = draft.mileage_km;
+    if (value === null || (Number.isInteger(value) && value >= 0 && value <= MAX_MILEAGE_KM))
+      return;
+    status.textContent = `Пробег — целое число от 0 до ${MAX_MILEAGE_KM} км.`;
+    draft.mileage_km = null;
+    mileageInput.value = "";
+    renderChips();
+  });
+  const pair = (...controls: HTMLElement[]): HTMLElement => {
+    const row = element("div", "filter-pair");
+    row.append(...controls);
+    return row;
+  };
+  traitsPanel.append(
+    element("h2", "", "Характеристики"),
+    field("Кузов", bodySelect),
+    field("Коробка передач", transmissionSelect),
+    pair(field("Год", yearInput), field("Пробег, км", mileageInput)),
+  );
+
+  const propertyPanel = element("section", "panel");
+  const propertyCityInput = element("input", "text-input");
+  propertyCityInput.id = "owner-property-city";
+  propertyCityInput.type = "text";
+  propertyCityInput.maxLength = 80;
+  propertyCityInput.placeholder = "Бишкек";
+  propertyCityInput.value = draft.property_city;
+  propertyCityInput.addEventListener("input", () => {
+    draft.property_city = propertyCityInput.value;
+  });
+  const propertyTypeSelect = element("select", "text-input");
+  propertyTypeSelect.id = "owner-property-type";
+  const anyProperty = element("option", "", "Тип пока не выбран");
+  anyProperty.value = "";
+  propertyTypeSelect.append(anyProperty);
+  for (const option of state.propertyTypes) {
+    const item = element("option", "", option.label);
+    item.value = option.value;
+    propertyTypeSelect.append(item);
+  }
+  propertyTypeSelect.value = draft.property_type;
+  propertyTypeSelect.addEventListener("change", () => {
+    draft.property_type = propertyTypeSelect.value;
+  });
+  /** A money field: the amount in major units and the currency beside it. */
+  const moneyBlock = (
+    labelText: string,
+    inputId: string,
+    amount: () => number | null,
+    setAmount: (minor: number | null) => void,
+    currency: () => OwnerCurrency,
+    setCurrency: (value: OwnerCurrency) => void,
+  ): HTMLElement => {
+    const currencyRow = element("div", "button-row");
+    const currencyButtons: HTMLButtonElement[] = [];
+    for (const [value, label] of [
+      ["USD", "Доллары США · USD"],
+      ["KGS", "Сомы · KGS"],
+    ] as const) {
+      const control = button(
+        label,
+        () => {
+          if (currency() === value) return;
+          setCurrency(value);
+          renderCurrencyButtons(currencyButtons, currency());
+          renderChips();
+        },
+        "button button-quiet",
+      );
+      currencyButtons.push(control);
+      currencyRow.append(control);
+    }
+    renderCurrencyButtons(currencyButtons, currency());
+    const input = numberInput(
+      amount() === null ? null : (amount() ?? 0) / 100,
+      "15000",
+      (value) => {
+        // A down payment of zero is a fact; an empty field stays unknown.
+        const minor = value === null ? null : Math.max(0, Math.round(value * 100));
+        setAmount(minor);
+        renderChips();
+      },
+    );
+    input.id = inputId;
+    const block = field(labelText, input);
+    block.insertBefore(currencyRow, input);
+    return block;
+  };
+  propertyPanel.append(
+    element("h2", "", "Недвижимость"),
+    field("Город недвижимости", propertyCityInput),
+    field("Тип недвижимости", propertyTypeSelect),
+    moneyBlock(
+      "Доплата сейчас",
+      "owner-cash",
+      () => draft.cash_minor,
+      (value) => {
+        draft.cash_minor = value;
+      },
+      () => draft.cash_currency,
+      (value) => {
+        draft.cash_currency = value;
+      },
+    ),
+    moneyBlock(
+      "Платёж в месяц",
+      "owner-monthly",
+      () => draft.monthly_minor,
+      (value) => {
+        draft.monthly_minor = value;
+      },
+      () => draft.monthly_currency,
+      (value) => {
+        draft.monthly_currency = value;
+      },
+    ),
+  );
+
+  const dataPanel = element("section", "panel");
+  const privacy = element("details", "filter-privacy");
+  privacy.append(element("summary", "", "Данные и хранение"));
+  const privacyText = element("div", "reply-text");
+  privacyText.append(richText(state.privacy, null));
+  privacy.append(privacyText);
+  dataPanel.append(privacy);
+
+  const bar = element("div", "filter-bar");
+  const saveButton = button(
+    saved ? "Обновить карточку" : "Сохранить карточку",
+    () => void save(),
+    "button",
+  );
+  bar.append(counter, saveButton);
+
+  main.append(
+    selected,
+    goalPanel,
+    pricePanel,
+    vehiclePanel,
+    placePanel,
+    traitsPanel,
+    propertyPanel,
+    dataPanel,
+    status,
+    bar,
+  );
+
+  const modelCache = new Map<string, { state: "ready" | "loading"; items: FilterChoice[] }>();
+
+  function renderCurrencyButtons(buttons: HTMLButtonElement[], currency: string): void {
+    for (const [index, value] of (["USD", "KGS"] as const).entries()) {
+      buttons[index]?.setAttribute("aria-pressed", String(currency === value));
+    }
   }
 
-  function renderReply(reply: Reply): HTMLElement {
-    const section = element("section", "panel dialogue-reply");
-    section.tabIndex = -1;
-    const text = element("div", "reply-text");
-    text.append(richText(reply.text, null));
-    section.append(text);
-    if (reply.listingId) {
-      section.append(
-        button(
-          "Открыть автомобиль и фото",
-          () => navigate("car", reply.listingId),
-          "button button-quiet",
-        ),
-      );
+  function renderGoals(): void {
+    for (const [index, option] of state.purposes.entries()) {
+      goalButtons[index]?.setAttribute("aria-pressed", String(draft.purpose === option.value));
     }
-    if (reply.miniAppView) {
-      const target = reply.miniAppView;
-      section.append(
-        button(
-          target === "vin" ? "Открыть проверку VIN" : "Открыть",
-          () => navigate(target),
-          "button button-quiet",
-        ),
-      );
-    }
-    const actions = element("div", "dialogue-actions");
-    for (const row of reply.buttons) {
-      const group = element("div", "button-row");
-      for (const [label, command] of row) {
-        const url = safeUrl(command);
-        let control: HTMLButtonElement | HTMLAnchorElement;
-        if (command === "vin-report-example") {
-          control = samplePdfLink();
-        } else if (url) {
-          control = sourceLink(url, label);
-          control.className = "button button-quiet";
-        } else {
-          control = button(label, () => runAction(command), "button button-quiet");
-        }
-        control.dataset.focusLabel = label.replace(/^✓\s*/, "");
-        group.append(control);
-      }
-      if (group.childElementCount) actions.append(group);
-    }
-    section.append(actions);
-    return section;
   }
 
-  function positionInput(replies: Reply[], sections: HTMLElement[]): void {
-    const index = replies.length - 1;
-    const reply = replies[index];
-    const section = sections[index];
-    if (!reply || !section) {
-      form.remove();
+  function renderSaleCurrency(): void {
+    renderCurrencyButtons(saleCurrencyButtons, draft.sale_currency);
+  }
+
+  /** The property questions belong to the goal: only an exchange needs them. */
+  function renderProperty(): void {
+    if (draft.purpose === "sale") {
+      propertyPanel.remove();
       return;
     }
-    const context = reply.input ? JSON.stringify(reply.input) : "";
-    if (!context || context !== inputContext) input.value = "";
-    inputContext = context;
-    form.hidden = !reply.input;
-    label.textContent = reply.input?.label ?? "Ваш ответ";
-    input.placeholder = reply.input?.placeholder ?? "Напишите ответ…";
-    input.type = "text";
-    input.inputMode = reply.input?.mode ?? "text";
-    input.enterKeyHint = "send";
-    input.spellcheck = input.inputMode === "text";
-    submit.textContent = reply.input ? "Применить" : "Отправить";
-    section.insertBefore(form, section.querySelector(".dialogue-actions"));
+    dataPanel.before(propertyPanel);
   }
 
-  async function send(text: string): Promise<void> {
-    if (busy || !text.trim()) return;
-    const focused = document.activeElement;
-    const restoreInput = focused === input || focused === submit;
-    const focusLabel = focused instanceof HTMLElement ? focused.dataset.focusLabel : undefined;
-    busy = true;
-    status.textContent = "Открываем следующий шаг…";
-    content.setAttribute("aria-busy", "true");
-    content.querySelectorAll<HTMLButtonElement>("button").forEach((node) => {
-      node.disabled = true;
-    });
-    input.disabled = true;
-    submit.disabled = true;
-    cancel.disabled = true;
-    try {
-      const result = await request<{ replies: Reply[] }>("/miniapp/api/dialogue", { text });
-      if (started !== generation) return;
-      const sections = result.replies.map(renderReply);
-      content.replaceChildren(...sections);
-      positionInput(result.replies, sections);
-      if (result.replies.length === 0)
-        content.append(
-          element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
+  function renderPlaces(): void {
+    if (!cityCatalogue.length) {
+      cityHost.replaceChildren(
+        element(
+          "p",
+          "footnote",
+          "Города появятся, когда соберём объявления. Свой город можно добавить ниже.",
+        ),
+      );
+      return;
+    }
+    const grid = element("div", "filter-cities");
+    for (const city of cityCatalogue) {
+      const control = choiceButton(city.value, city.matches, () => toggleCity(city.value));
+      control.setAttribute("aria-pressed", String(draft.city === city.value));
+      grid.append(control);
+    }
+    cityHost.replaceChildren(grid);
+  }
+
+  function toggleCity(city: string): void {
+    draft.city = draft.city === city ? "" : city;
+    cityInput.value = "";
+    renderPlaces();
+    renderChips();
+  }
+
+  const isMakeSelected = (make: FilterChoice): boolean => draft.make?.value === make.value;
+
+  function clearMake(): void {
+    draft.make = null;
+    draft.model = null;
+    renderVehicle();
+    renderChips();
+  }
+
+  function pickMake(make: FilterChoice): void {
+    if (isMakeSelected(make)) {
+      clearMake();
+      return;
+    }
+    draft.make = { id: make.id, value: make.value, label: make.label };
+    draft.model = null;
+    draft.make_model = "";
+    freeText = false;
+    renderVehicle();
+    renderChips();
+    void loadModels(draft.make);
+  }
+
+  function pickModel(model: FilterChoice): void {
+    if (!draft.make) return;
+    draft.model = { id: model.id, value: model.value, label: model.label };
+    renderVehicle();
+    renderChips();
+  }
+
+  /** The make buttons, the models of the chosen make and the free text field. */
+  function renderVehicle(): void {
+    if (freeText) {
+      if (makeModelInput.value !== draft.make_model) makeModelInput.value = draft.make_model;
+      const nameBlock = element("div", "filter-block");
+      const nameLabel = element("label", "filter-label", "Марка и модель");
+      nameLabel.htmlFor = makeModelInput.id;
+      nameBlock.append(nameLabel, makeModelInput);
+      vehicleHost.replaceChildren(
+        nameBlock,
+        button(
+          "Выбрать из справочника",
+          () => {
+            freeText = false;
+            draft.make_model = "";
+            makeModelInput.value = "";
+            renderVehicle();
+            renderChips();
+          },
+          "button button-quiet",
+        ),
+      );
+      return;
+    }
+    if (!makeCatalogue) {
+      vehicleHost.replaceChildren(element("p", "footnote", "Загружаем марки…"));
+      return;
+    }
+    const parts: HTMLElement[] = [];
+    const grid = element("div", "filter-makes");
+    const shown = makeCatalogue.items.slice(0, POPULAR_MAKES);
+    const chosen = draft.make;
+    if (chosen && !shown.some((item) => item.value === chosen.value)) shown.push(chosen);
+    for (const make of shown) {
+      const control = choiceButton(make.label, 0, () => pickMake(make));
+      control.setAttribute("aria-pressed", String(isMakeSelected(make)));
+      grid.append(control);
+    }
+    parts.push(
+      element("p", "filter-label", "Марка"),
+      grid,
+      button(
+        "Другие марки",
+        () => {
+          if (!makeCatalogue) return;
+          openMakeSheet(makeCatalogue, pickMake, isMakeSelected);
+        },
+        "button filter-choice filter-choice-all",
+      ),
+    );
+    const make = draft.make;
+    if (make) {
+      const block = element("div", "filter-make-block");
+      const head = element("div", "filter-make-head");
+      head.append(element("span", "filter-make-name", make.label));
+      head.append(button("Убрать", () => clearMake(), "back-link"));
+      block.append(head);
+      const cached = modelCache.get(make.value);
+      if (!cached) block.append(element("p", "footnote", "Загружаем модели…"));
+      else if (cached.state === "loading")
+        block.append(
+          element("p", "footnote", "Готовим справочник. Повторите через несколько секунд."),
         );
-      status.textContent = "Шаг обновлён.";
-      input.disabled = false;
-      const matching = focusLabel
-        ? Array.from(content.querySelectorAll<HTMLElement>("[data-focus-label]")).find(
-            (node) => node.dataset.focusLabel === focusLabel,
-          )
-        : undefined;
-      if (!form.hidden && form.isConnected && restoreInput) {
-        input.focus({ preventScroll: true });
-      } else if (focusLabel) {
-        if (matching instanceof HTMLButtonElement) matching.disabled = false;
-        (matching ?? sections.at(-1))?.focus({ preventScroll: true });
+      else if (!cached.items.length)
+        block.append(
+          element("p", "footnote", "Моделей не нашлось. Напишите марку и модель текстом."),
+        );
+      else {
+        const models = element("div", "filter-models");
+        for (const model of cached.items) {
+          const control = choiceButton(model.label, 0, () => pickModel(model));
+          control.setAttribute("aria-pressed", String(draft.model?.value === model.value));
+          models.append(control);
+        }
+        block.append(element("p", "filter-label", "Модель"), models);
       }
-      if (!focusLabel && !restoreInput) {
-        content.scrollIntoView({
-          block: "start",
-          behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-            ? "auto"
-            : "smooth",
-        });
-      }
-    } catch (error) {
+      parts.push(block);
+    }
+    parts.push(
+      button(
+        "Написать марку и модель текстом",
+        () => {
+          freeText = true;
+          draft.make = null;
+          draft.model = null;
+          makeModelInput.value = "";
+          renderVehicle();
+          renderChips();
+        },
+        "button button-quiet",
+      ),
+    );
+    vehicleHost.replaceChildren(...parts);
+  }
+
+  function renderChips(): void {
+    const chips: { label: string; clear: () => void }[] = [];
+    if (draft.make) {
+      chips.push({
+        label: draft.make.label,
+        clear: () => {
+          draft.make = null;
+          draft.model = null;
+          renderVehicle();
+        },
+      });
+    } else if (draft.make_model.trim()) {
+      chips.push({
+        label: draft.make_model.trim(),
+        clear: () => {
+          draft.make_model = "";
+          makeModelInput.value = "";
+        },
+      });
+    }
+    if (draft.model) {
+      chips.push({
+        label: draft.model.label,
+        clear: () => {
+          draft.model = null;
+          renderVehicle();
+        },
+      });
+    }
+    if (draft.city) {
+      chips.push({
+        label: draft.city,
+        clear: () => {
+          draft.city = "";
+          cityInput.value = "";
+          renderPlaces();
+        },
+      });
+    }
+    if (draft.body_type) {
+      chips.push({
+        label: bodyLabels.get(draft.body_type) ?? draft.body_type,
+        clear: () => {
+          draft.body_type = "";
+          bodySelect.value = "";
+        },
+      });
+    }
+    if (draft.transmission) {
+      chips.push({
+        label: transmissionLabels.get(draft.transmission) ?? draft.transmission,
+        clear: () => {
+          draft.transmission = "";
+          transmissionSelect.value = "";
+        },
+      });
+    }
+    if (draft.year !== null) {
+      chips.push({
+        label: String(draft.year),
+        clear: () => {
+          draft.year = null;
+          yearInput.value = "";
+        },
+      });
+    }
+    if (draft.mileage_km !== null) {
+      chips.push({
+        label: `${new Intl.NumberFormat("ru-RU").format(draft.mileage_km)} км`,
+        clear: () => {
+          draft.mileage_km = null;
+          mileageInput.value = "";
+        },
+      });
+    }
+    if (draft.sale_price_minor !== null) {
+      chips.push({
+        label: moneyLabel(draft.sale_price_minor / 100, draft.sale_currency),
+        clear: () => {
+          draft.sale_price_minor = null;
+          saleInput.value = "";
+        },
+      });
+    }
+    chipsHost.replaceChildren(
+      ...chips.map((chip) => {
+        const control = button(
+          "",
+          () => {
+            chip.clear();
+            renderChips();
+          },
+          "button button-quiet filter-chip",
+        );
+        control.setAttribute("aria-label", `Убрать условие: ${chip.label}`);
+        const remove = element("span", "filter-chip-remove", "×");
+        remove.setAttribute("aria-hidden", "true");
+        control.append(element("span", "", chip.label), remove);
+        return control;
+      }),
+    );
+    counter.textContent = `Заполнено ${chips.length} ${plural(
+      chips.length,
+      "условие",
+      "условия",
+      "условий",
+    )}`;
+  }
+
+  /** The body of the save request: the catalogue travels in flat fields. */
+  const draftBody = (): Record<string, unknown> => ({
+    purpose: draft.purpose,
+    make_id: draft.make?.id ?? "",
+    make_value: draft.make?.value ?? "",
+    make_label: draft.make?.label ?? "",
+    model_id: draft.model?.id ?? "",
+    model_value: draft.model?.value ?? "",
+    model_label: draft.model?.label ?? "",
+    make_model: draft.make_model.trim(),
+    year: draft.year,
+    mileage_km: draft.mileage_km,
+    body_type: draft.body_type,
+    transmission: draft.transmission,
+    city: draft.city,
+    sale_price_minor: draft.sale_price_minor,
+    sale_currency: draft.sale_price_minor === null ? null : draft.sale_currency,
+    property_city: draft.property_city.trim() || null,
+    property_type: draft.property_type || null,
+    cash_minor: draft.cash_minor,
+    cash_currency: draft.cash_minor === null ? null : draft.cash_currency,
+    monthly_minor: draft.monthly_minor,
+    monthly_currency: draft.monthly_minor === null ? null : draft.monthly_currency,
+  });
+
+  function showSavedCard(card: MiniAppOwnerCard): void {
+    const section = element("section", "panel");
+    section.append(
+      element("h2", "", "Карточка сохранена"),
+      element("p", "", "Карточка хранится у вас: мы не публикуем её и не отправляем партнёрам."),
+      element("p", "muted", ownerCardSummary(card)),
+    );
+    const actions = element("div", "button-row");
+    actions.append(
+      button("Изменить", () => void load(), "button"),
+      button("Закрыть", closeCard, "button button-quiet"),
+    );
+    section.append(actions);
+    main.replaceChildren(section);
+  }
+
+  async function save(): Promise<void> {
+    if (saving) return;
+    saving = true;
+    saveButton.disabled = true;
+    status.textContent = "Сохраняем карточку…";
+    try {
+      const result = await request<{ card: MiniAppOwnerCard }>(
+        "/miniapp/api/owner/card",
+        draftBody(),
+      );
       if (started !== generation) return;
-      status.textContent = `${errorText(error)} Ваш последний шаг оставлен на экране. Если ответ успел сохраниться, продолжите с актуального шага в чате.`;
-      if (!content.childElementCount)
-        content.append(button("Открыть шаг заново", () => void send(text), "button button-quiet"));
-      if (focused instanceof HTMLButtonElement || focused instanceof HTMLInputElement) {
-        focused.disabled = false;
-        if (focused.isConnected) focused.focus({ preventScroll: true });
-      }
+      showSavedCard(result.card);
+    } catch (error) {
+      if (started === generation) status.textContent = errorText(error);
     } finally {
-      if (started === generation) {
-        busy = false;
-        content.setAttribute("aria-busy", "false");
-        content.querySelectorAll<HTMLButtonElement>("button").forEach((node) => {
-          node.disabled = false;
-        });
-        input.disabled = false;
-        submit.disabled = false;
-        cancel.disabled = false;
-      }
+      saving = false;
+      if (started === generation) saveButton.disabled = false;
     }
   }
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    runAction(input.value.trim());
-  });
-  void send("/sell");
+
+  async function loadCatalogue(): Promise<void> {
+    if (makeCatalogue) {
+      renderVehicle();
+      return;
+    }
+    vehicleHost.replaceChildren(element("p", "footnote", "Загружаем марки…"));
+    try {
+      const result = await request<MiniAppSuggestions | { state: "loading" }>(
+        "/miniapp/api/filter/suggest?key=make",
+      );
+      if (started !== generation) return;
+      if (result.state !== "ready") {
+        vehicleHost.replaceChildren(
+          element("p", "footnote", "Готовим справочник. Повторите через несколько секунд."),
+        );
+        return;
+      }
+      makeCatalogue = {
+        items: result.items.map((item) => ({ id: item.id, value: item.value, label: item.label })),
+      };
+      renderVehicle();
+    } catch (error) {
+      if (started === generation)
+        vehicleHost.replaceChildren(element("p", "footnote", errorText(error)));
+    }
+  }
+
+  /** The models of one make, cached for the session of the editor. */
+  async function loadModels(make: FilterChoice): Promise<void> {
+    if (modelCache.has(make.value)) {
+      renderVehicle();
+      return;
+    }
+    try {
+      const result = await request<MiniAppSuggestions | { state: "loading" }>(
+        `/miniapp/api/filter/suggest?key=model&parent=${encodeURIComponent(make.id)}`,
+      );
+      if (started !== generation) return;
+      if (result.state !== "ready") {
+        modelCache.set(make.value, { state: "loading", items: [] });
+        renderVehicle();
+        return;
+      }
+      modelCache.set(make.value, {
+        state: "ready",
+        items: result.items.map((item) => ({ id: item.id, value: item.value, label: item.label })),
+      });
+      renderVehicle();
+    } catch (error) {
+      if (started === generation) status.textContent = errorText(error);
+    }
+  }
+
+  async function loadCities(): Promise<void> {
+    try {
+      const result = await request<{ items?: { value: string; matches: number }[] }>(
+        "/miniapp/api/owner/cities",
+      );
+      if (started !== generation) return;
+      cityCatalogue = result.items ?? [];
+      if (draft.city && !cityCatalogue.some((item) => item.value === draft.city))
+        cityInput.value = draft.city;
+      renderPlaces();
+    } catch (error) {
+      if (started === generation) status.textContent = errorText(error);
+    }
+  }
+
+  renderGoals();
+  renderSaleCurrency();
+  renderVehicle();
+  renderPlaces();
+  renderChips();
+  renderProperty();
+  void loadCatalogue();
+  void loadCities();
+  if (draft.make) void loadModels(draft.make);
 }
 
 function gallery(
@@ -3102,7 +3795,7 @@ async function load(): Promise<void> {
     return;
   }
   if (currentView === "sell") {
-    showDialogue("sell");
+    await showSell();
     return;
   }
   if (!id || id.length > 200 || params.getAll("car").length !== 1) {

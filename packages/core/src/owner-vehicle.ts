@@ -1,3 +1,5 @@
+import { BODY_TYPES, TRANSMISSIONS } from "./models.js";
+
 export type OwnerPurpose = "sale" | "property" | "downpayment";
 export type OwnerCurrency = "USD" | "KGS";
 export type PropertyType = "apartment" | "house" | "land" | "commercial" | "any";
@@ -8,8 +10,18 @@ export interface OwnerVehicle {
   chat_id: number;
   purpose: OwnerPurpose;
   make_model: string;
+  /** The catalogue choice of the make and of the model; null when the owner wrote the name. */
+  make_id: string | null;
+  make_value: string | null;
+  make_label: string | null;
+  model_id: string | null;
+  model_value: string | null;
+  model_label: string | null;
   year: number;
   mileage_km: number | null;
+  body_type: string | null;
+  transmission: string | null;
+  city: string | null;
   sale_price_minor: number | null;
   sale_currency: OwnerCurrency | null;
   property_city: string | null;
@@ -35,7 +47,52 @@ export const PROPERTY_TYPES: Record<PropertyType, string> = {
   any: "Тип пока не выбран",
 };
 
-export function validateOwnerVehicle(card: OwnerVehicle): OwnerVehicle {
+/**
+ * A text the owner may or may not have given. An empty value means "unknown",
+ * not a zero and not an empty string.
+ */
+function optionalText(value: unknown, maximum: number): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new Error("Invalid owner text");
+  const text = value.trim();
+  if (!text) return null;
+  if (text.length > maximum) throw new Error("Invalid owner text");
+  return text;
+}
+
+/** The catalogue choice is either fully known or fully absent. */
+function optionalChoice(
+  id: string | null,
+  value: string | null,
+  label: string | null,
+): { id: string; value: string; label: string } | null {
+  if (id === null && value === null && label === null) return null;
+  if (id === null || value === null || label === null)
+    throw new Error("Invalid owner catalogue choice");
+  return { id, value, label };
+}
+
+export function validateOwnerVehicle(input: OwnerVehicle): OwnerVehicle {
+  const card: OwnerVehicle = {
+    ...input,
+    make_id: optionalText(input.make_id, 128),
+    make_value: optionalText(input.make_value, 256),
+    make_label: optionalText(input.make_label, 256),
+    model_id: optionalText(input.model_id, 128),
+    model_value: optionalText(input.model_value, 256),
+    model_label: optionalText(input.model_label, 256),
+    body_type: optionalText(input.body_type, 32),
+    transmission: optionalText(input.transmission, 32),
+    city: optionalText(input.city, 80),
+  };
+  const make = optionalChoice(card.make_id, card.make_value, card.make_label);
+  const model = optionalChoice(card.model_id, card.model_value, card.model_label);
+  card.make_id = make?.id ?? null;
+  card.make_value = make?.value ?? null;
+  card.make_label = make?.label ?? null;
+  card.model_id = model?.id ?? null;
+  card.model_value = model?.value ?? null;
+  card.model_label = model?.label ?? null;
   if (
     !Number.isSafeInteger(card.user_id) ||
     card.user_id <= 0 ||
@@ -57,6 +114,10 @@ export function validateOwnerVehicle(card: OwnerVehicle): OwnerVehicle {
     (!Number.isSafeInteger(card.mileage_km) || card.mileage_km < 0 || card.mileage_km > 10_000_000)
   )
     throw new Error("Invalid owner mileage");
+  if (card.body_type !== null && !Object.hasOwn(BODY_TYPES, card.body_type))
+    throw new Error("Invalid owner body type");
+  if (card.transmission !== null && !Object.hasOwn(TRANSMISSIONS, card.transmission))
+    throw new Error("Invalid owner transmission");
   for (const [amount, currency, positive] of [
     [card.sale_price_minor, card.sale_currency, true],
     [card.cash_minor, card.cash_currency, false],
@@ -103,6 +164,11 @@ export function ownerSaleDescription(card: OwnerVehicle): string {
   const facts = [`${card.make_model}, ${card.year} г.`];
   if (card.mileage_km !== null)
     facts.push(`Пробег: ${card.mileage_km.toLocaleString("ru-RU")} км.`);
+  if (card.body_type !== null)
+    facts.push(`Кузов: ${BODY_TYPES[card.body_type as keyof typeof BODY_TYPES]}.`);
+  if (card.transmission !== null)
+    facts.push(`Коробка: ${TRANSMISSIONS[card.transmission as keyof typeof TRANSMISSIONS]}.`);
+  if (card.city !== null) facts.push(`Город: ${card.city}.`);
   if (card.sale_price_minor !== null)
     facts.push(`Желаемая цена: ${ownerMoney(card.sale_price_minor, card.sale_currency)}.`);
   return facts.join("\n");

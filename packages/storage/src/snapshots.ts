@@ -31,7 +31,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 /** Shape the old catalogue filter keeps after the criteria are dropped. */
 const LEGACY_CATALOG_FILTER = {
   vehicles: [] as unknown[],
@@ -318,7 +318,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION].includes(
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, SCHEMA_VERSION].includes(
         header.schema_version as number,
       ) ||
       JSON.stringify(header.tables) !==
@@ -427,6 +427,24 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
           if (Object.hasOwn(row, "year_max"))
             throw new Error("Unexpected year range in historical snapshot");
           row = { ...row, year_max: null };
+        }
+        if ((header.schema_version as number) < 13 && table === "owner_vehicles") {
+          // The owner conditions came with schema version 13; an older card has
+          // none of them, and an unknown condition stays unknown.
+          const added = [
+            "make_id",
+            "make_value",
+            "make_label",
+            "model_id",
+            "model_value",
+            "model_label",
+            "body_type",
+            "transmission",
+            "city",
+          ];
+          if (added.some((name) => Object.hasOwn(row, name)))
+            throw new Error("Unexpected owner conditions in historical snapshot");
+          row = { ...row, ...Object.fromEntries(added.map((name) => [name, null])) };
         }
         if ((header.schema_version as number) < 6 && table === "listings") {
           if (Object.hasOwn(row, "normalized_title"))

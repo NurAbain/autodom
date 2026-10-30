@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BotSettings } from "@autodom/core";
@@ -343,21 +342,6 @@ export async function runBotService(
         ...(context.assetsDirectory ? { assetsDirectory: context.assetsDirectory } : {}),
         ...(context.checkVin ? { checkVin: context.checkVin } : {}),
         ...(context.getVinArchivePhoto ? { getVinArchivePhoto: context.getVinArchivePhoto } : {}),
-        ...(mode === "full" && context.conversation
-          ? {
-              dialogue: (userId: number, text: string) =>
-                store.tryWithLock(`autodom:user:${userId}`, () => {
-                  bot.clearVinInput(userId);
-                  return context.conversation!.handle(
-                    userId,
-                    userId,
-                    text,
-                    "miniapp",
-                    randomUUID(),
-                  );
-                }),
-            }
-          : {}),
         ready,
         // Request errors can contain private Telegram initData or profile values.
         onError: () => logger.warn("Mini App request failed"),

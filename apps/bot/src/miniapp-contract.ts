@@ -1,3 +1,4 @@
+import type { OwnerCurrency, OwnerPurpose, PropertyType } from "@autodom/core/owner-vehicle";
 import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
 import type { VinCheckResult } from "@autodom/core/vin";
 
@@ -79,6 +80,48 @@ export interface MiniAppFilterSaved {
   revision: string;
   monitoring: boolean;
   matches: number;
+}
+
+/** The catalogue choice of the make or of the model, as the browser sees it. */
+export interface MiniAppOwnerChoice {
+  id: string;
+  value: string;
+  label: string;
+}
+
+/**
+ * The saved card of the owner. It repeats the conditions of the buyer filter,
+ * so one catalogue and one vocabulary serve both the search and the publication.
+ */
+export interface MiniAppOwnerCard {
+  purpose: OwnerPurpose;
+  make: MiniAppOwnerChoice | null;
+  model: MiniAppOwnerChoice | null;
+  make_model: string;
+  year: number;
+  mileage_km: number | null;
+  body_type: string;
+  transmission: string;
+  city: string;
+  sale_price_minor: number | null;
+  sale_currency: OwnerCurrency | null;
+  property_city: string | null;
+  property_type: PropertyType | null;
+  cash_minor: number | null;
+  cash_currency: OwnerCurrency | null;
+  monthly_minor: number | null;
+  monthly_currency: OwnerCurrency | null;
+  updated_at: number;
+}
+
+/** The editor state the Mini App loads before the first save. */
+export interface MiniAppOwnerState {
+  privacy: string;
+  card: MiniAppOwnerCard | null;
+  purposes: { value: string; label: string }[];
+  propertyTypes: { value: string; label: string }[];
+  bodyTypes: { value: string; label: string }[];
+  transmissions: { value: string; label: string }[];
 }
 
 /** A city of the market with the number of ads behind it. */
