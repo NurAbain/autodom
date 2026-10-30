@@ -83,15 +83,13 @@ describe("SellerConversation", () => {
     );
   });
 
-  it("asks the conditions in the order of the shared filter", async () => {
+  it("asks the conditions of the car first and the price last", async () => {
     const store = new OwnerStore();
     const conversation = seller(store);
     let replies = (await conversation.handle(1, 1, "/sell")) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Согласен"))) ?? [];
     expect(text(replies)).toContain("Что хотите сделать со своим автомобилем?");
     replies = (await conversation.handle(1, 1, action(replies, "Продать автомобиль"))) ?? [];
-    expect(text(replies)).toContain("За сколько хотели бы продать авто?");
-    replies = (await conversation.handle(1, 1, "15000 USD")) ?? [];
     expect(text(replies)).toContain("Какая марка автомобиля?");
     expect(labels(replies)).toEqual(expect.arrayContaining(["Toyota", "Kia", "Все марки"]));
     replies = (await conversation.handle(1, 1, action(replies, "Toyota"))) ?? [];
@@ -110,6 +108,8 @@ describe("SellerConversation", () => {
       (await conversation.handle(1, 1, action(replies, String(new Date().getUTCFullYear())))) ?? [];
     expect(text(replies)).toContain("Какой пробег, в километрах?");
     replies = (await conversation.handle(1, 1, "120000")) ?? [];
+    expect(text(replies)).toContain("За сколько хотели бы продать авто?");
+    replies = (await conversation.handle(1, 1, "15000 USD")) ?? [];
     expect(text(replies)).toContain("Проверьте перед сохранением");
   });
 
@@ -119,7 +119,6 @@ describe("SellerConversation", () => {
     let replies = (await conversation.handle(1, 1, "/sell")) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Согласен"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Продать автомобиль"))) ?? [];
-    replies = (await conversation.handle(1, 1, "15000 USD")) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Toyota"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Camry"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Бишкек"))) ?? [];
@@ -128,6 +127,7 @@ describe("SellerConversation", () => {
     replies =
       (await conversation.handle(1, 1, action(replies, String(new Date().getUTCFullYear())))) ?? [];
     replies = (await conversation.handle(1, 1, "120000")) ?? [];
+    replies = (await conversation.handle(1, 1, "15000 USD")) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Сохранить карточку"))) ?? [];
     expect(text(replies)).toContain("Сохранённая карточка");
     expect(store.card).toMatchObject({
@@ -156,7 +156,6 @@ describe("SellerConversation", () => {
     replies = (await conversation.handle(1, 1, action(replies, "Согласен"))) ?? [];
     replies =
       (await conversation.handle(1, 1, action(replies, "Обменять авто на недвижимость"))) ?? [];
-    replies = (await conversation.handle(1, 1, action(replies, "Пока не знаю"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Toyota"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Camry"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Бишкек"))) ?? [];
@@ -173,6 +172,8 @@ describe("SellerConversation", () => {
     replies = (await conversation.handle(1, 1, "5000 USD")) ?? [];
     expect(text(replies)).toContain("Какой будущий платёж в месяц вам подходит?");
     replies = (await conversation.handle(1, 1, "30000 KGS")) ?? [];
+    expect(text(replies)).toContain("За сколько хотели бы продать авто?");
+    replies = (await conversation.handle(1, 1, "15000 USD")) ?? [];
     expect(text(replies)).toContain("Проверьте перед сохранением");
     expect(text(replies)).toContain("Город: Бишкек. Тип: Квартира.");
   });
@@ -188,7 +189,6 @@ describe("SellerConversation", () => {
     let replies = (await conversation.handle(1, 1, "/sell")) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Согласен"))) ?? [];
     replies = (await conversation.handle(1, 1, action(replies, "Продать автомобиль"))) ?? [];
-    replies = (await conversation.handle(1, 1, "15000 USD")) ?? [];
     expect(text(replies)).toContain("Справочник марок и моделей временно недоступен");
     replies = (await conversation.handle(1, 1, action(replies, "Написать марку текстом"))) ?? [];
     expect(text(replies)).toContain("Напишите марку и модель автомобиля");

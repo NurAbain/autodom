@@ -69,7 +69,6 @@ interface Draft {
 }
 const EDIT_FIELDS: readonly (readonly [string, Step])[] = [
   ["Цель", "purpose"],
-  ["Желаемая цена", "price"],
   ["Марка", "make"],
   ["Модель", "model"],
   ["Город автомобиля", "city"],
@@ -77,6 +76,7 @@ const EDIT_FIELDS: readonly (readonly [string, Step])[] = [
   ["Коробка", "transmission"],
   ["Год", "year"],
   ["Пробег", "mileage"],
+  ["Желаемая цена", "price"],
 ];
 const PROPERTY_FIELDS: readonly (readonly [string, Step])[] = [
   ["Город недвижимости", "property_city"],
@@ -429,8 +429,7 @@ export class SellerConversation {
       return this.prompt(draft);
     }
     const next: Partial<Record<Step, Step>> = {
-      purpose: "price",
-      price: "make",
+      purpose: "make",
       // A name written by hand carries the model already.
       make: draft.data.make_id ? "model" : "city",
       model: "city",
@@ -438,11 +437,13 @@ export class SellerConversation {
       body: "transmission",
       transmission: "year",
       year: "mileage",
-      mileage: draft.data.purpose === "sale" ? "review" : "property_city",
+      mileage: draft.data.purpose === "sale" ? "price" : "property_city",
       property_city: "property_type",
       property_type: "cash",
       cash: "monthly",
-      monthly: "review",
+      monthly: "price",
+      // The price is the last question before the review.
+      price: "review",
     };
     const step = next[draft.step] ?? "review";
     if (step === "review") draft.data.updated_at = Date.now() / 1000;

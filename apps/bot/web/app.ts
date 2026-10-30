@@ -2165,11 +2165,11 @@ async function showSell(): Promise<void> {
   main.append(
     selected,
     goalPanel,
-    pricePanel,
     vehiclePanel,
     placePanel,
     traitsPanel,
     propertyPanel,
+    pricePanel,
     dataPanel,
     status,
     bar,
@@ -2199,7 +2199,8 @@ async function showSell(): Promise<void> {
       propertyPanel.remove();
       return;
     }
-    dataPanel.before(propertyPanel);
+    // The price is the last question, so the property wishes stay before it.
+    pricePanel.before(propertyPanel);
   }
 
   function renderPlaces(): void {
