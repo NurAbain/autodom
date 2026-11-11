@@ -41,6 +41,8 @@ const ownerCard = (): OwnerVehicle => ({
   make_model: "Toyota Camry",
   year: 2018,
   mileage_km: null,
+  body_type: null,
+  transmission: null,
   sale_price_minor: null,
   sale_currency: null,
   property_city: "Бишкек",
@@ -124,6 +126,13 @@ async function rewriteSnapshot(
     for (const record of records) {
       const row = record.row as Record<string, unknown> | undefined;
       if (row && record.table === "profiles") delete row.year_max;
+    }
+  }
+  if (Number(records[0]?.schema_version) < 13) {
+    for (const record of records) {
+      const row = record.row as Record<string, unknown> | undefined;
+      if (row && record.table === "owner_vehicles")
+        for (const key of ["body_type", "transmission", "photos"]) delete row[key];
     }
   }
   if (Number(records[0]?.schema_version) < 8) {
@@ -1925,6 +1934,27 @@ describe("PostgreSQL Store", () => {
     expect(await db.getOwnerVehicle(1)).toBeNull();
     expect(await db.getProfile(1)).toEqual(buyer);
     expect(await db.getDraft(1)).toEqual(["budget", { minimum: 100 }]);
+  });
+  it("preserves private owner photos across edits and snapshots, and deletes them with the card", async () => {
+    const owner = { ...ownerCard(), body_type: "sedan", transmission: "automatic" };
+    const photo = "data:image/png;base64,iVBORw0KGgo=";
+    await db.saveOwnerVehicle(owner);
+    expect(await db.setOwnerPhotos(1, [photo])).toBe(true);
+    await db.saveOwnerVehicle({ ...owner, year: 2019 });
+    expect(await db.getOwnerPhotos(1)).toEqual([photo]);
+    const path = join(directory, "owner-photos.ndjson");
+    await backup(db, path);
+    const restoredUrl = await database();
+    await restore(path, restoredUrl);
+    const restored = await open(restoredUrl);
+    expect(await restored.getOwnerPhotos(1)).toEqual([photo]);
+    expect(await restored.getOwnerVehicle(1)).toMatchObject({
+      year: 2019,
+      body_type: "sedan",
+      transmission: "automatic",
+    });
+    await restored.deleteOwnerVehicle(1);
+    expect(await restored.getOwnerPhotos(1)).toBeNull();
   });
   it("lets another user progress while same-user lock waiters remain stalled and ordered", async () => {
     const entered = Promise.withResolvers<void>();

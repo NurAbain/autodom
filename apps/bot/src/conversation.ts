@@ -30,7 +30,13 @@ export interface Reply {
   listingId?: string;
   richHtml?: string;
   miniAppView?: "vin" | "filters" | "orders";
-  input?: { label: string; placeholder: string; mode: "text" | "numeric" | "decimal" };
+  input?: {
+    label: string;
+    placeholder: string;
+    mode: "text" | "numeric" | "decimal";
+    vehicle?: boolean;
+  };
+  ownerPhotos?: "select" | "saved";
 }
 export type ConversationStore = Pick<
   Store,

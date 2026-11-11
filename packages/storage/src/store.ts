@@ -378,6 +378,7 @@ export class Store {
         "0013_vin_photos.sql",
         "0014_buyer_filter.sql",
         "0015_search_text_index.sql",
+        "0016_owner_vehicle_details.sql",
       ].map(async (name, index) => {
         const statement = await readFile(resolve(directory, name), "utf8");
         return {
@@ -881,7 +882,9 @@ export class Store {
       .select()
       .from(ownerVehicles)
       .where(eq(ownerVehicles.user_id, userId));
-    return row ? validateOwnerVehicle(row) : null;
+    if (!row) return null;
+    const { photos: _photos, ...card } = row;
+    return validateOwnerVehicle(card);
   }
   async saveOwnerVehicle(input: OwnerVehicle): Promise<OwnerVehicle> {
     const card = validateOwnerVehicle(input);
@@ -891,8 +894,24 @@ export class Store {
         .values(card)
         .onConflictDoUpdate({ target: ownerVehicles.user_id, set: card })
         .returning();
-      return saved!;
+      const { photos: _photos, ...result } = saved!;
+      return result;
     });
+  }
+  async getOwnerPhotos(userId: number): Promise<string[] | null> {
+    const [row] = await this.database
+      .select({ photos: ownerVehicles.photos })
+      .from(ownerVehicles)
+      .where(eq(ownerVehicles.user_id, userId));
+    return row?.photos ?? null;
+  }
+  async setOwnerPhotos(userId: number, photos: string[]): Promise<boolean> {
+    const rows = await this.database
+      .update(ownerVehicles)
+      .set({ photos })
+      .where(eq(ownerVehicles.user_id, userId))
+      .returning({ user_id: ownerVehicles.user_id });
+    return rows.length !== 0;
   }
   async deleteOwnerVehicle(userId: number): Promise<void> {
     await this.transaction(async () => {

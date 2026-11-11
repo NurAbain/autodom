@@ -31,6 +31,7 @@ const storageError = new Error("database password=private-connection-secret");
 const analyticsEvents: AnalyticsEvent[] = [];
 let rejectAnalytics = false;
 const savedProfiles = new Map<number, ReturnType<typeof makeProfile>>();
+const ownerPhotos = new Map<number, string[]>();
 const profile = makeProfile({
   user_id: 42,
   chat_id: 42,
@@ -122,6 +123,7 @@ const paidPhotoAccess = vi.fn<PaymentService["hasPhotoAccess"]>(
 beforeEach(() => {
   vi.spyOn(photoPayments, "hasPhotoAccess").mockImplementation(paidPhotoAccess);
   savedProfiles.clear();
+  ownerPhotos.clear();
 });
 
 function authorization(userId = 42): string {
@@ -184,6 +186,14 @@ beforeAll(async () => {
       },
     },
     store: {
+      async getOwnerPhotos(id) {
+        return ownerPhotos.get(id) ?? null;
+      },
+      async setOwnerPhotos(id, photos) {
+        if (!ownerPhotos.has(id)) return false;
+        ownerPhotos.set(id, photos);
+        return true;
+      },
       async getProfile(id) {
         if (id === 42) return profile;
         if (id === 43) return { ...profile, user_id: 43, chat_id: -100 };
@@ -1672,4 +1682,29 @@ describe("buyer filter editor", () => {
       });
     }
   });
+});
+
+it("keeps owner photos private, validates uploads, and replaces or removes them", async () => {
+  const endpoint = `${base}/miniapp/api/owner/photos`;
+  const headers = { Authorization: authorization(42), "Content-Type": "application/json" };
+  const photo = `data:image/png;base64,${photoBytes.toString("base64")}`;
+  const post = (photos: string[], auth = authorization(42)) =>
+    fetch(endpoint, {
+      method: "POST",
+      headers: { ...headers, Authorization: auth },
+      body: JSON.stringify({ photos }),
+    });
+  expect((await post([photo])).status).toBe(404);
+  ownerPhotos.set(42, []);
+  expect((await post(["data:image/png;base64,aGVsbG8="])).status).toBe(400);
+  expect((await post([photo, photo, photo, photo])).status).toBe(400);
+  expect((await post([photo])).status).toBe(200);
+  const own = await fetch(endpoint, { headers });
+  expect(await own.json()).toEqual({ photos: [photo] });
+  expect((await fetch(endpoint, { headers: { Authorization: authorization(43) } })).status).toBe(
+    404,
+  );
+  expect((await post([], authorization(43))).status).toBe(404);
+  expect((await post([])).status).toBe(200);
+  expect(await (await fetch(endpoint, { headers })).json()).toEqual({ photos: [] });
 });

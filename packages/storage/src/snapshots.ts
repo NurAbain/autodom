@@ -31,7 +31,7 @@ import { Store, validateProfile, validateQuietHours } from "./store.js";
 
 const FORMAT = "autodom-postgresql";
 const VERSION = 1;
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 /** Shape the old catalogue filter keeps after the criteria are dropped. */
 const LEGACY_CATALOG_FILTER = {
   vehicles: [] as unknown[],
@@ -65,7 +65,14 @@ export async function insertSnapshotRow(
       continue;
     }
     if (column.dataType === "json") {
-      if (!object(value)) throw new Error(`Invalid ${table}.${name} JSON`);
+      if (table === "owner_vehicles" && name === "photos") {
+        if (
+          !Array.isArray(value) ||
+          value.length > 3 ||
+          value.some((item) => typeof item !== "string" || item.length > 1_398_150)
+        )
+          throw new Error("Invalid owner photos JSON");
+      } else if (!object(value)) throw new Error(`Invalid ${table}.${name} JSON`);
     } else if (column.dataType === "boolean") {
       if (typeof value !== "boolean") throw new Error(`Invalid ${table}.${name} boolean`);
     } else if (column.dataType === "bigint" || column.columnType === "PgBigInt53") {
@@ -261,7 +268,11 @@ export async function backup(store: Store, destination: string): Promise<void> {
         );
         try {
           for (;;) {
-            const result = await store.database.execute(sql`FETCH FORWARD 200 FROM snapshot_rows`);
+            const result = await store.database.execute(
+              table === "owner_vehicles"
+                ? sql`FETCH FORWARD 1 FROM snapshot_rows`
+                : sql`FETCH FORWARD 200 FROM snapshot_rows`,
+            );
             if (result.rows.length === 0) break;
             for (const row of result.rows) {
               if (table === "payment_orders" && row.product === "vin_report")
@@ -318,7 +329,7 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
       !object(header) ||
       header.format !== FORMAT ||
       header.version !== VERSION ||
-      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, SCHEMA_VERSION].includes(
+      ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, SCHEMA_VERSION].includes(
         header.schema_version as number,
       ) ||
       JSON.stringify(header.tables) !==
@@ -411,6 +422,11 @@ export async function restore(snapshot: string, databaseUrl: string): Promise<vo
         if (index < lastTable) throw new Error("Snapshot tables are out of order");
         lastTable = index;
         let row = record.row;
+        if ((header.schema_version as number) < 13 && table === "owner_vehicles") {
+          if (["body_type", "transmission", "photos"].some((name) => Object.hasOwn(row, name)))
+            throw new Error("Unexpected owner vehicle columns in historical snapshot");
+          row = { ...row, body_type: null, transmission: null, photos: [] };
+        }
         if (header.schema_version === 2 && table === "profiles") {
           // Validate the historical column before discarding it from the current profile.
           if (typeof row.ads_consent !== "boolean")
