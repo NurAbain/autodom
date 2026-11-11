@@ -1,4 +1,5 @@
 import type { PaymentOrder, VinReportKind } from "@autodom/core/payments";
+import { BODY_TYPES, TRANSMISSIONS } from "@autodom/core/vehicle-options";
 import { isEncarPhotoUrl, normalizeVin } from "@autodom/core/vin";
 import {
   groupVinArchiveLots,
@@ -1751,13 +1752,290 @@ function showDialogue(view: "sell"): void {
   submit.type = "submit";
   form.append(label, input, submit);
   form.hidden = true;
+  const vehicleForm = element("form", "dialogue-form");
+  const makeSelect = element("select", "text-input");
+  makeSelect.id = "seller-make";
+  makeSelect.required = true;
+  const modelSelect = element("select", "text-input");
+  modelSelect.id = "seller-model";
+  modelSelect.required = true;
+  const yearInput = element("input", "text-input");
+  yearInput.id = "seller-year";
+  yearInput.type = "number";
+  yearInput.min = "1900";
+  yearInput.max = String(new Date().getUTCFullYear() + 1);
+  yearInput.required = true;
+  yearInput.placeholder = "2018";
+  const mileageInput = element("input", "text-input");
+  mileageInput.id = "seller-mileage";
+  mileageInput.type = "number";
+  mileageInput.min = "0";
+  mileageInput.max = "10000000";
+  mileageInput.placeholder = "Необязательно";
+  const bodySelect = element("select", "text-input");
+  bodySelect.id = "seller-body";
+  const transmissionSelect = element("select", "text-input");
+  transmissionSelect.id = "seller-transmission";
+  for (const [select, choices] of [
+    [bodySelect, BODY_TYPES],
+    [transmissionSelect, TRANSMISSIONS],
+  ] as const) {
+    const empty = element("option", "", "Не указано");
+    empty.value = "";
+    select.append(empty);
+    for (const [value, title] of Object.entries(choices)) {
+      const option = element("option", "", title);
+      option.value = value;
+      select.append(option);
+    }
+  }
+  const vehicleStatus = element("p", "footnote");
+  vehicleStatus.setAttribute("role", "status");
+  const vehicleSubmit = element("button", "button", "Продолжить");
+  vehicleSubmit.type = "submit";
+  const vehicleField = (title: string, control: HTMLElement): HTMLElement => {
+    const block = element("div", "filter-block");
+    const fieldLabel = element("label", "filter-label", title);
+    fieldLabel.htmlFor = control.id;
+    block.append(fieldLabel, control);
+    return block;
+  };
+  const manualVehicle = button(
+    "Ввести автомобиль текстом",
+    () => {
+      const section = vehicleForm.parentElement;
+      vehicleForm.remove();
+      form.hidden = false;
+      if (section) section.insertBefore(form, section.querySelector(".dialogue-actions"));
+      input.focus();
+    },
+    "back-link",
+  );
+  vehicleForm.append(
+    vehicleField("Марка", makeSelect),
+    vehicleField("Модель", modelSelect),
+    vehicleField("Год выпуска", yearInput),
+    vehicleField("Пробег, км", mileageInput),
+    vehicleField("Кузов", bodySelect),
+    vehicleField("Коробка передач", transmissionSelect),
+    vehicleStatus,
+    vehicleSubmit,
+    manualVehicle,
+  );
+  let makes: FilterChoice[] = [];
+  let models: FilterChoice[] = [];
+  let vehicleLoad = 0;
+  function setChoices(select: HTMLSelectElement, items: FilterChoice[], placeholder: string): void {
+    const initial = element("option", "", placeholder);
+    initial.value = "";
+    select.replaceChildren(initial);
+    for (const item of items) {
+      const option = element("option", "", item.label);
+      option.value = item.id;
+      select.append(option);
+    }
+  }
+  async function loadSellerChoices(key: "make" | "model", parent?: string): Promise<void> {
+    const sequence = ++vehicleLoad;
+    const select = key === "make" ? makeSelect : modelSelect;
+    select.disabled = true;
+    vehicleStatus.textContent = "Загружаем справочник…";
+    try {
+      const query = key === "make" ? "key=make" : `key=model&parent=${encodeURIComponent(parent!)}`;
+      const result = await request<MiniAppSuggestions | { state: "loading" }>(
+        `/miniapp/api/filter/suggest?${query}`,
+      );
+      if (started !== generation || sequence !== vehicleLoad) return;
+      if (result.state !== "ready") throw new Error("Справочник загружается. Повторите попытку.");
+      const items = [...result.items].sort((a, b) => a.label.localeCompare(b.label, "ru"));
+      if (key === "make") makes = items;
+      else models = items;
+      setChoices(select, items, key === "make" ? "Выберите марку" : "Выберите модель");
+      select.disabled = false;
+      vehicleStatus.textContent = items.length ? "" : "В справочнике нет вариантов.";
+    } catch (error) {
+      if (started !== generation || sequence !== vehicleLoad) return;
+      vehicleStatus.replaceChildren(
+        document.createTextNode(`${errorText(error)} `),
+        button("Повторить", () => void loadSellerChoices(key, parent), "back-link"),
+      );
+    }
+  }
+  makeSelect.addEventListener("change", () => {
+    models = [];
+    setChoices(modelSelect, [], "Выберите модель");
+    modelSelect.disabled = true;
+    if (makeSelect.value) void loadSellerChoices("model", makeSelect.value);
+    else vehicleLoad++;
+  });
+  vehicleForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const make = makes.find((item) => item.id === makeSelect.value);
+    const model = models.find((item) => item.id === modelSelect.value);
+    if (!make || !model) return;
+    void send(
+      `${make.value} ${model.value}, ${yearInput.value}, ${mileageInput.value}, ${bodySelect.value}, ${transmissionSelect.value}`,
+    );
+  });
   const cancel = button("Отменить текущий шаг", () => void send("/cancel"), "back-link");
   main.append(content, status, cancel);
   let busy = false;
   let inputContext = "";
+  // Photos remain in the browser until the owner confirms saving the card.
+  let pendingPhotos: string[] | null = null;
+  let readingPhotos = false;
+
+  async function saveOwnerPhotos(): Promise<void> {
+    if (pendingPhotos === null) return;
+    await request("/miniapp/api/owner/photos", { photos: pendingPhotos });
+    pendingPhotos = null;
+  }
+
+  function photoEditor(mode: "select" | "saved"): HTMLElement {
+    const host = element("div", "filter-block");
+    const label = element("label", "filter-label", "Фотографии автомобиля");
+    const picker = element("input", "text-input");
+    picker.type = "file";
+    picker.accept = "image/jpeg,image/png,image/webp";
+    picker.multiple = true;
+    picker.id = "seller-photos";
+    label.htmlFor = picker.id;
+    const hint = element(
+      "p",
+      "footnote",
+      "До 3 фото JPEG, PNG или WebP, каждое до 1 МБ. При выборе новых фото предыдущий набор заменяется.",
+    );
+    const preview = element("div", "filter-makes");
+    const message = element("p", "footnote");
+    message.setAttribute("role", "status");
+    const save = button("Сохранить фотографии", () => void upload(), "button button-quiet");
+    save.hidden = mode !== "saved" || pendingPhotos === null;
+    let current: string[] = pendingPhotos ?? [];
+    const previewUrls: string[] = [];
+    const render = (): void => {
+      for (const url of previewUrls.splice(0)) {
+        URL.revokeObjectURL(url);
+        reportUrls.delete(url);
+      }
+      preview.replaceChildren();
+      for (const [index, data] of current.entries()) {
+        const match = /^data:(image\/(?:jpeg|png|webp));base64,(.+)$/u.exec(data);
+        if (!match) continue;
+        const bytes = Uint8Array.from(atob(match[2]!), (char) => char.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: match[1]! }));
+        reportUrls.add(url);
+        previewUrls.push(url);
+        const item = element("div", "filter-block");
+        const image = element("img");
+        image.src = url;
+        image.alt = `Фото автомобиля ${index + 1}`;
+        image.width = 120;
+        item.append(
+          image,
+          button(
+            "Убрать",
+            () => {
+              current = current.filter((_, i) => i !== index);
+              pendingPhotos = current;
+              save.hidden = mode !== "saved";
+              render();
+            },
+            "back-link",
+          ),
+        );
+        preview.append(item);
+      }
+    };
+    async function upload(): Promise<void> {
+      save.disabled = true;
+      picker.disabled = true;
+      readingPhotos = true;
+      preview.querySelectorAll("button").forEach((control) => {
+        control.disabled = true;
+      });
+      try {
+        await saveOwnerPhotos();
+        message.textContent = "Фотографии сохранены.";
+        save.hidden = true;
+      } catch (error) {
+        message.textContent = `${errorText(error)} Фотографии не сохранены; повторите попытку.`;
+      } finally {
+        save.disabled = false;
+        picker.disabled = false;
+        readingPhotos = false;
+        preview.querySelectorAll("button").forEach((control) => {
+          control.disabled = false;
+        });
+      }
+    }
+    picker.addEventListener("change", () => {
+      const files = Array.from(picker.files ?? []);
+      if (!files.length) return;
+      if (
+        files.length > 3 ||
+        files.some(
+          (file) =>
+            file.size === 0 ||
+            file.size > 1024 * 1024 ||
+            !["image/jpeg", "image/png", "image/webp"].includes(file.type),
+        )
+      ) {
+        message.textContent = "Выберите не более трёх фото указанных форматов, каждое до 1 МБ.";
+        picker.value = "";
+        return;
+      }
+      picker.disabled = true;
+      readingPhotos = true;
+      void Promise.all(
+        files.map(
+          (file) =>
+            // Telegram's embedded browsers may not support Promise.withResolvers yet.
+            new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () =>
+                typeof reader.result === "string"
+                  ? resolve(reader.result)
+                  : reject(new Error("Не удалось прочитать фото."));
+              reader.onerror = () => reject(new Error("Не удалось прочитать фото."));
+              reader.readAsDataURL(file);
+            }),
+        ),
+      )
+        .then((photos) => {
+          current = photos;
+          pendingPhotos = photos;
+          save.hidden = mode !== "saved";
+          message.textContent =
+            mode === "select"
+              ? "Фото будут загружены после сохранения карточки."
+              : "Сохраните изменения фотографий.";
+          render();
+        })
+        .catch((error) => {
+          message.textContent = errorText(error);
+        })
+        .finally(() => {
+          picker.disabled = false;
+          readingPhotos = false;
+        });
+    });
+    host.append(label, picker, hint, preview, message, save);
+    if (mode === "saved" && pendingPhotos === null) {
+      void request<{ photos: string[] }>("/miniapp/api/owner/photos")
+        .then((result) => {
+          if (started !== generation || !host.isConnected || pendingPhotos !== null) return;
+          current = result.photos;
+          render();
+        })
+        .catch((error) => {
+          if (host.isConnected) message.textContent = errorText(error);
+        });
+    } else render();
+    return host;
+  }
 
   function runAction(command: string): void {
-    if (busy) return;
+    if (busy || readingPhotos) return;
     if (command === "vin-report-example") samplePdfLink().click();
     else if (command === "/vin") navigate("vin");
     else if (command === "/start") navigate("home");
@@ -1791,6 +2069,7 @@ function showDialogue(view: "sell"): void {
         ),
       );
     }
+    if (reply.ownerPhotos) section.append(photoEditor(reply.ownerPhotos));
     const actions = element("div", "dialogue-actions");
     for (const row of reply.buttons) {
       const group = element("div", "button-row");
@@ -1820,11 +2099,20 @@ function showDialogue(view: "sell"): void {
     const section = sections[index];
     if (!reply || !section) {
       form.remove();
+      vehicleForm.remove();
       return;
     }
     const context = reply.input ? JSON.stringify(reply.input) : "";
     if (!context || context !== inputContext) input.value = "";
     inputContext = context;
+    vehicleForm.hidden = !reply.input?.vehicle;
+    if (reply.input?.vehicle) {
+      form.remove();
+      section.insertBefore(vehicleForm, section.querySelector(".dialogue-actions"));
+      if (!makes.length) void loadSellerChoices("make");
+      return;
+    }
+    vehicleForm.remove();
     form.hidden = !reply.input;
     label.textContent = reply.input?.label ?? "Ваш ответ";
     input.placeholder = reply.input?.placeholder ?? "Напишите ответ…";
@@ -1837,7 +2125,7 @@ function showDialogue(view: "sell"): void {
   }
 
   async function send(text: string): Promise<void> {
-    if (busy || !text.trim()) return;
+    if (busy || readingPhotos || !text.trim()) return;
     const focused = document.activeElement;
     const restoreInput = focused === input || focused === submit;
     const focusLabel = focused instanceof HTMLElement ? focused.dataset.focusLabel : undefined;
@@ -1853,6 +2141,26 @@ function showDialogue(view: "sell"): void {
     try {
       const result = await request<{ replies: Reply[] }>("/miniapp/api/dialogue", { text });
       if (started !== generation) return;
+      if (
+        text === "/cancel" ||
+        (text.startsWith("seller:") &&
+          (text.endsWith(":cancel") || text.endsWith(":confirm-delete")))
+      )
+        pendingPhotos = null;
+      let photoError = "";
+      if (
+        text.startsWith("seller:") &&
+        text.endsWith(":save") &&
+        pendingPhotos !== null &&
+        result.replies.some((reply) => reply.ownerPhotos === "saved")
+      ) {
+        try {
+          await saveOwnerPhotos();
+        } catch (error) {
+          photoError = `${errorText(error)} Карточка сохранена, фотографии — нет. Повторите сохранение фотографий ниже.`;
+        }
+      }
+      if (started !== generation) return;
       const sections = result.replies.map(renderReply);
       content.replaceChildren(...sections);
       positionInput(result.replies, sections);
@@ -1860,7 +2168,7 @@ function showDialogue(view: "sell"): void {
         content.append(
           element("p", "", "Ответ принят. Продолжите в чате или выберите другую цель."),
         );
-      status.textContent = "Шаг обновлён.";
+      status.textContent = photoError || "Шаг обновлён.";
       input.disabled = false;
       const matching = focusLabel
         ? Array.from(content.querySelectorAll<HTMLElement>("[data-focus-label]")).find(

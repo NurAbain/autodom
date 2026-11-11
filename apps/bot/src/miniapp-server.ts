@@ -29,7 +29,7 @@ import {
 } from "./analytics-contract.js";
 import type { BotMode } from "./bot-mode.js";
 import { listingText, privacyText, type Reply } from "./conversation.js";
-import { RequestError, readFlatJson } from "./http-body.js";
+import { RequestError, readFlatJson, readJsonText } from "./http-body.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
 import { listingPhotoUrls } from "./media.js";
 import { validateMiniAppData } from "./miniapp-auth.js";
@@ -107,6 +107,35 @@ async function readDialogueRequest(request: IncomingMessage): Promise<string> {
     throw new RequestError(400, "Нужен один непустой ответ text, не длиннее 2048 символов.");
   return value.text.trim();
 }
+const OWNER_PHOTO_LIMIT = 1024 * 1024;
+const ownerPhotoBody = z.object({ photos: z.array(z.string()).max(3) }).strict();
+
+function validOwnerPhoto(value: string): boolean {
+  const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/u.exec(value);
+  if (!match || match[2]!.length > Math.ceil(OWNER_PHOTO_LIMIT / 3) * 4) return false;
+  const bytes = Buffer.from(match[2]!, "base64");
+  if (!bytes.length || bytes.length > OWNER_PHOTO_LIMIT || bytes.toString("base64") !== match[2])
+    return false;
+  if (match[1] === "jpeg")
+    return (
+      bytes.length >= 4 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff &&
+      bytes[bytes.length - 2] === 0xff &&
+      bytes[bytes.length - 1] === 0xd9
+    );
+  if (match[1] === "png")
+    return (
+      bytes.length >= 8 &&
+      bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+    );
+  return (
+    bytes.length >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  );
+}
 
 function carView(listing: Listing, currency: string): MiniAppCar {
   const price = listingPrice(listing, currency);
@@ -156,7 +185,8 @@ export interface MiniAppServerOptions {
     | "countMakes"
     | "search"
     | "searchModelRows"
-  >;
+  > &
+    Partial<Pick<Store, "getOwnerPhotos" | "setOwnerPhotos">>;
   token: string;
   publicUrl: string;
   host: string;
@@ -238,6 +268,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
     "/miniapp/api/vin",
     "/miniapp/api/vin/archive-photo",
     "/miniapp/api/dialogue",
+    "/miniapp/api/owner/photos",
     "/miniapp/api/orders",
     "/miniapp/api/orders/checkout",
     "/miniapp/api/orders/cancel",
@@ -470,6 +501,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           mode === "vin" &&
           (url.pathname === "/miniapp/api/car" ||
             url.pathname === "/miniapp/api/dialogue" ||
+            url.pathname === "/miniapp/api/owner/photos" ||
             url.pathname.startsWith("/miniapp/api/filter"))
         )
           throw new RequestError(404, "В этом боте доступна только проверка VIN и отчёты.");
@@ -670,6 +702,41 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             return;
           }
           await handlePaymentRequest(request, response, url, user.id, payments);
+          return;
+        }
+        if (url.pathname === "/miniapp/api/owner/photos") {
+          if (!options.store.getOwnerPhotos || !options.store.setOwnerPhotos)
+            throw new RequestError(503, "Фотографии временно недоступны.");
+          if (url.search) throw new RequestError(400, "Недопустимый запрос фотографий.");
+          if (request.method === "GET") {
+            const photos = await options.store.getOwnerPhotos(user.id);
+            if (photos === null)
+              throw new RequestError(404, "Сначала сохраните карточку автомобиля.");
+            respond(response, 200, { photos });
+            return;
+          }
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "GET, POST");
+            throw new RequestError(405, "Недопустимый метод.");
+          }
+          let body: unknown;
+          try {
+            body = JSON.parse(
+              await readJsonText(request, 3 * Math.ceil(OWNER_PHOTO_LIMIT / 3) * 4 + 4096),
+            );
+          } catch (error) {
+            if (error instanceof RequestError) throw error;
+            throw new RequestError(400, "Неверный формат фотографий.");
+          }
+          const parsed = ownerPhotoBody.safeParse(body);
+          if (!parsed.success || !parsed.data.photos.every(validOwnerPhoto))
+            throw new RequestError(
+              400,
+              "Можно добавить до трёх фото JPEG, PNG или WebP, каждое не более 1 МБ.",
+            );
+          if (!(await options.store.setOwnerPhotos(user.id, parsed.data.photos)))
+            throw new RequestError(404, "Сначала сохраните карточку автомобиля.");
+          respond(response, 200, { saved: true });
           return;
         }
         if (url.pathname === "/miniapp/api/dialogue") {
