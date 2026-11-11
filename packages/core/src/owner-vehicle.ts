@@ -1,3 +1,5 @@
+import { BODY_TYPES, TRANSMISSIONS } from "./vehicle-options.js";
+
 export type OwnerPurpose = "sale" | "property" | "downpayment";
 export type OwnerCurrency = "USD" | "KGS";
 export type PropertyType = "apartment" | "house" | "land" | "commercial" | "any";
@@ -10,6 +12,8 @@ export interface OwnerVehicle {
   make_model: string;
   year: number;
   mileage_km: number | null;
+  body_type?: string | null;
+  transmission?: string | null;
   sale_price_minor: number | null;
   sale_currency: OwnerCurrency | null;
   property_city: string | null;
@@ -57,6 +61,10 @@ export function validateOwnerVehicle(card: OwnerVehicle): OwnerVehicle {
     (!Number.isSafeInteger(card.mileage_km) || card.mileage_km < 0 || card.mileage_km > 10_000_000)
   )
     throw new Error("Invalid owner mileage");
+  if (card.body_type != null && !Object.hasOwn(BODY_TYPES, card.body_type))
+    throw new Error("Invalid owner body type");
+  if (card.transmission != null && !Object.hasOwn(TRANSMISSIONS, card.transmission))
+    throw new Error("Invalid owner transmission");
   for (const [amount, currency, positive] of [
     [card.sale_price_minor, card.sale_currency, true],
     [card.cash_minor, card.cash_currency, false],
@@ -103,6 +111,12 @@ export function ownerSaleDescription(card: OwnerVehicle): string {
   const facts = [`${card.make_model}, ${card.year} г.`];
   if (card.mileage_km !== null)
     facts.push(`Пробег: ${card.mileage_km.toLocaleString("ru-RU")} км.`);
+  if (card.body_type)
+    facts.push(`Кузов: ${BODY_TYPES[card.body_type as keyof typeof BODY_TYPES]}.`);
+  if (card.transmission)
+    facts.push(
+      `Коробка передач: ${TRANSMISSIONS[card.transmission as keyof typeof TRANSMISSIONS]}.`,
+    );
   if (card.sale_price_minor !== null)
     facts.push(`Желаемая цена: ${ownerMoney(card.sale_price_minor, card.sale_currency)}.`);
   return facts.join("\n");

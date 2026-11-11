@@ -11,23 +11,7 @@ export const BUDGET_SCOPES = {
   car: "Только автомобиль",
   total: "Весь бюджет, включая доставку и оформление",
 } as const;
-export const BODY_TYPES = {
-  sedan: "Седан",
-  suv: "Внедорожник / кроссовер",
-  hatchback: "Хэтчбек",
-  wagon: "Универсал",
-  minivan: "Минивэн",
-  pickup: "Пикап",
-  coupe: "Купе",
-  convertible: "Кабриолет",
-  van: "Фургон",
-} as const;
-export const TRANSMISSIONS = {
-  manual: "Механика",
-  automatic: "Автомат",
-  cvt: "Вариатор",
-  robot: "Робот",
-} as const;
+export { BODY_TYPES, TRANSMISSIONS } from "./vehicle-options.js";
 export const USE_CASES = {
   city: "Город",
   family: "Семья",

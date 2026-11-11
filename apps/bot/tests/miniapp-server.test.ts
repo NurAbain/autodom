@@ -31,6 +31,7 @@ const storageError = new Error("database password=private-connection-secret");
 const analyticsEvents: AnalyticsEvent[] = [];
 let rejectAnalytics = false;
 const savedProfiles = new Map<number, ReturnType<typeof makeProfile>>();
+const ownerPhotos = new Map<number, string[]>();
 const profile = makeProfile({
   user_id: 42,
   chat_id: 42,
@@ -122,6 +123,7 @@ const paidPhotoAccess = vi.fn<PaymentService["hasPhotoAccess"]>(
 beforeEach(() => {
   vi.spyOn(photoPayments, "hasPhotoAccess").mockImplementation(paidPhotoAccess);
   savedProfiles.clear();
+  ownerPhotos.clear();
 });
 
 function authorization(userId = 42): string {
@@ -184,6 +186,14 @@ beforeAll(async () => {
       },
     },
     store: {
+      async getOwnerPhotos(id) {
+        return ownerPhotos.get(id) ?? null;
+      },
+      async setOwnerPhotos(id, photos) {
+        if (!ownerPhotos.has(id)) return false;
+        ownerPhotos.set(id, photos);
+        return true;
+      },
       async getProfile(id) {
         if (id === 42) return profile;
         if (id === 43) return { ...profile, user_id: 43, chat_id: -100 };
@@ -202,6 +212,15 @@ beforeAll(async () => {
         return [listing, lalafoListing].filter((item) =>
           words.every((word) => item.title.toLowerCase().includes(word)),
         ).length;
+      },
+      async countCities() {
+        return [
+          { city: "Бишкек", matches: 2 },
+          { city: "Ош", matches: 1 },
+        ];
+      },
+      async countMakes() {
+        return new Map([["Toyota", 2]]);
       },
       async searchModelRows(input, limit = 2000) {
         const words = input.query
@@ -573,6 +592,8 @@ it("creates the requested report from recent actor evidence without another VIN 
     countMatches: async () => 0,
     search: async () => [],
     searchModelRows: async () => [],
+    countCities: async () => [],
+    countMakes: async () => new Map(),
     withLock: async <T>(_key: string, action: () => Promise<T>) => action(),
   };
   const payments = new PaymentService(store as unknown as Store);
@@ -758,6 +779,8 @@ it("reports an unconfigured VIN service without fabricating observations", async
       countMatches: async () => 0,
       search: async () => [],
       searchModelRows: async () => [],
+      countCities: async () => [],
+      countMakes: async () => new Map(),
     },
   });
   try {
@@ -868,6 +891,8 @@ it("reports refused dialogue admission as retryable without confusing an empty s
       countMatches: async () => 0,
       search: async () => [],
       searchModelRows: async () => [],
+      countCities: async () => [],
+      countMakes: async () => new Map(),
     },
     dialogue: async () => (busy ? null : []),
   });
@@ -1170,6 +1195,8 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
       countMatches: async () => 0,
       search: async () => [],
       searchModelRows: async () => [],
+      countCities: async () => [],
+      countMakes: async () => new Map(),
     },
     analytics: {
       async record(event) {
@@ -1333,7 +1360,7 @@ describe("buyer filter editor", () => {
       query: "Honda Fit",
       budget_max_minor: 100,
     });
-    expect(state.privacy).toContain("После вашего согласия на хранение");
+    expect(state.privacy).toContain("После сохранения условий");
     expect(state.bodyTypes).toContainEqual({ value: "sedan", label: "Седан" });
     expect(state.transmissions).toContainEqual({ value: "automatic", label: "Автомат" });
   });
@@ -1356,7 +1383,7 @@ describe("buyer filter editor", () => {
   });
 
   it("saves the conditions without notifications and with notifications as separate choices", async () => {
-    const silent = await post({ ...draft, monitoring: false, consent: true });
+    const silent = await post({ ...draft, monitoring: false });
     expect(silent.status).toBe(200);
     const silentBody = await silent.json();
     expect(silentBody.monitoring).toBe(false);
@@ -1373,22 +1400,24 @@ describe("buyer filter editor", () => {
       monitoring: false,
       market: "KG",
     });
-    const loud = await post({ ...draft, monitoring: true, consent: true });
+    const loud = await post({ ...draft, monitoring: true });
     expect(loud.status).toBe(200);
     expect(await loud.json()).toMatchObject({ monitoring: true });
     expect(savedProfiles.get(42)?.monitoring).toBe(true);
   });
 
-  it("refuses to save without the storage consent or with unusable conditions", async () => {
-    const withoutConsent = await post({ ...draft, monitoring: false });
-    expect(withoutConsent.status).toBe(400);
-    expect((await withoutConsent.json()).error).toContain("согласие");
+  it("saves several cities at once and refuses unusable conditions", async () => {
+    const several = await post({ ...draft, city: "Бишкек, Ош", monitoring: false });
+    expect(several.status).toBe(200);
+    expect(savedProfiles.get(42)?.city).toBe("Бишкек, Ош");
+    savedProfiles.clear();
     for (const invalid of [
-      { ...draft, consent: true, body_type: "spaceship" },
-      { ...draft, consent: true, budget_min_minor: 2_000_000 },
-      { ...draft, consent: true, year_max: 2000 },
-      { ...draft, consent: true, query: "a, b, c, d, e, f" },
-      { ...draft, consent: true, city: "123" },
+      { ...draft, body_type: "spaceship" },
+      { ...draft, budget_min_minor: 2_000_000 },
+      { ...draft, year_max: 2000 },
+      { ...draft, query: "a, b, c, d, e, f" },
+      { ...draft, city: "123" },
+      { ...draft, city: "Бишкек,,Ош" },
     ]) {
       const response = await post(invalid);
       expect(response.status).toBe(400);
@@ -1422,6 +1451,35 @@ describe("buyer filter editor", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ matches: 2 });
+  });
+
+  it("ranks the makes with ads and offers the cities of the market", async () => {
+    const makes = await fetch(`${base}/miniapp/api/filter/makes`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    expect(makes.status).toBe(200);
+    expect(await makes.json()).toEqual({
+      items: [{ id: "1", value: "toyota", label: "Toyota", matches: 2 }],
+    });
+    const cities = await fetch(`${base}/miniapp/api/filter/cities`, {
+      method: "POST",
+      headers: { Authorization: authorization(), "Content-Type": "application/json" },
+      body: JSON.stringify(draft),
+    });
+    expect(cities.status).toBe(200);
+    expect(await cities.json()).toEqual({
+      items: [
+        { value: "Бишкек", matches: 2 },
+        { value: "Ош", matches: 1 },
+      ],
+    });
+    const wrongMethod = await fetch(`${base}/miniapp/api/filter/cities`, {
+      headers: { Authorization: authorization() },
+    });
+    expect(wrongMethod.status).toBe(405);
+    expect(wrongMethod.headers.get("allow")).toBe("POST");
   });
 
   it("suggests makes and models from the catalogue and refuses unknown requests", async () => {
@@ -1471,6 +1529,8 @@ describe("buyer filter editor", () => {
         countMatches: async () => 0,
         search: async () => [],
         searchModelRows: async () => [],
+        countCities: async () => [],
+        countMakes: async () => new Map(),
       },
     });
     try {
@@ -1547,6 +1607,8 @@ describe("buyer filter editor", () => {
             model: item.catalog_attributes.model ?? "",
           }));
         },
+        countCities: async () => [{ city: "Бишкек", matches: 2 }],
+        countMakes: async () => new Map([["Toyota", 2]]),
       },
     });
     try {
@@ -1602,6 +1664,8 @@ describe("buyer filter editor", () => {
         countMatches: async () => 0,
         search: async () => [],
         searchModelRows: async () => [],
+        countCities: async () => [],
+        countMakes: async () => new Map(),
       },
     });
     try {
@@ -1618,4 +1682,29 @@ describe("buyer filter editor", () => {
       });
     }
   });
+});
+
+it("keeps owner photos private, validates uploads, and replaces or removes them", async () => {
+  const endpoint = `${base}/miniapp/api/owner/photos`;
+  const headers = { Authorization: authorization(42), "Content-Type": "application/json" };
+  const photo = `data:image/png;base64,${photoBytes.toString("base64")}`;
+  const post = (photos: string[], auth = authorization(42)) =>
+    fetch(endpoint, {
+      method: "POST",
+      headers: { ...headers, Authorization: auth },
+      body: JSON.stringify({ photos }),
+    });
+  expect((await post([photo])).status).toBe(404);
+  ownerPhotos.set(42, []);
+  expect((await post(["data:image/png;base64,aGVsbG8="])).status).toBe(400);
+  expect((await post([photo, photo, photo, photo])).status).toBe(400);
+  expect((await post([photo])).status).toBe(200);
+  const own = await fetch(endpoint, { headers });
+  expect(await own.json()).toEqual({ photos: [photo] });
+  expect((await fetch(endpoint, { headers: { Authorization: authorization(43) } })).status).toBe(
+    404,
+  );
+  expect((await post([], authorization(43))).status).toBe(404);
+  expect((await post([])).status).toBe(200);
+  expect(await (await fetch(endpoint, { headers })).json()).toEqual({ photos: [] });
 });

@@ -49,6 +49,18 @@ export function queryGroups(query: string): string[][] {
     .filter((group) => group.length > 0);
 }
 /**
+ * The cities of a profile. The buyer filter lets the user pick several cities, so
+ * the field holds a comma-separated list; one city stays a single name.
+ */
+export function cityAlternatives(city: string): string[] {
+  const values = new Set<string>();
+  for (const part of city.split(",")) {
+    const value = normalizeCity(part);
+    if (value) values.add(value);
+  }
+  return [...values];
+}
+/**
  * The make and the model as the marketplace states them. Mashina keeps them in the
  * catalogue attributes, the other marketplaces only name the car in the title.
  */
@@ -81,7 +93,7 @@ export function matches(profile: Profile, listing: Listing, now = Date.now() / 1
     (profile.market !== "ALL" && listing.market !== profile.market) ||
     (listing.market !== "KG" &&
       (profile.allow_import === false || profile.budget_scope === "total")) ||
-    (profile.city && normalizeCity(listing.city) !== normalizeCity(profile.city)) ||
+    (profile.city && !cityAlternatives(profile.city).includes(normalizeCity(listing.city))) ||
     (profile.body_type && normalizeBodyType(listing.body_type) !== profile.body_type) ||
     (profile.transmission &&
       normalizeTransmission(listing.transmission) !== profile.transmission) ||

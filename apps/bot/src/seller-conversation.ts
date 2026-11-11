@@ -10,6 +10,7 @@ import {
   type PropertyType,
   validateOwnerVehicle,
 } from "@autodom/core/owner-vehicle";
+import { BODY_TYPES, TRANSMISSIONS } from "@autodom/core/vehicle-options";
 import type { Store } from "@autodom/storage";
 import type { AnalyticsEvent } from "./analytics-contract.js";
 import type { Button, Buttons, Reply } from "./conversation.js";
@@ -22,6 +23,7 @@ type Step =
   | "purpose"
   | "vehicle"
   | "price"
+  | "photos"
   | "city"
   | "property_type"
   | "cash"
@@ -134,7 +136,7 @@ export class SellerConversation {
     switch (draft.step) {
       case "consent":
         text =
-          "<b>Один автомобиль — продажа, обмен или взнос</b>\nСохраним вашу карточку автомобиля и пожелания вместе с Telegram ID и ID чата. Контакт не запрашиваем и никому ничего не отправляем. Данные хранятся отдельно от поиска покупки; карточку можно изменить или удалить через /mycar.\n\nЧерновик живёт только в памяти до 30 минут бездействия; при перезапуске или смене раздела он исчезает. В базу карточка попадёт только после проверки и нажатия «Сохранить». Удаление из резервных копий зависит от срока их хранения.\n\nСогласны на обработку и хранение этих данных?";
+          "<b>Один автомобиль — продажа, обмен или взнос</b>\nСохраним вашу карточку автомобиля, фотографии и пожелания вместе с Telegram ID и ID чата. Контакт не запрашиваем и никому ничего не отправляем. Данные хранятся отдельно от поиска покупки; карточку и фотографии можно изменить или удалить через /mycar.\n\nЧерновик живёт только в памяти до 30 минут бездействия; при перезапуске или смене раздела он исчезает. В базу карточка попадёт только после проверки и нажатия «Сохранить»; выбранные фотографии загружаются после сохранения карточки. Удаление из резервных копий зависит от срока их хранения.\n\nСогласны на обработку и хранение этих данных?";
         buttons = [[choice("Согласен — продолжить", "consent")]];
         break;
       case "purpose":
@@ -150,6 +152,11 @@ export class SellerConversation {
         text =
           "За сколько хотели бы продать авто? Укажите сумму и валюту: <b>15000 USD</b> или <b>1300000 KGS</b>. Это ваше пожелание, не оценка автомобиля.\nЕсли цены пока нет, нажмите «Пока не знаю».";
         buttons = [[choice("Пока не знаю", "skip")]];
+        break;
+      case "photos":
+        text =
+          "Добавьте до трёх фотографий автомобиля в Mini App после выбора цены. Карточка и фото сохраняются только для вас; фотографии можно пропустить или изменить позднее.";
+        buttons = [[choice("Продолжить", "continue")]];
         break;
       case "city":
         text =
@@ -205,7 +212,29 @@ export class SellerConversation {
     if (draft.history.length || draft.returnReview)
       buttons = [...buttons, [choice("Назад — без изменения", "back")]];
     buttons = [...buttons, [choice(draft.step === "saved" ? "Закрыть" : "Отмена", "cancel")]];
-    return [{ text: (error ? `${escapeHtml(error)}\n\n` : "") + text, buttons }];
+    const inputs: Partial<Record<Step, NonNullable<Reply["input"]>>> = {
+      vehicle: {
+        label: "Автомобиль",
+        placeholder: "Toyota Camry, 2018, 120000",
+        mode: "text",
+        vehicle: true,
+      },
+      price: { label: "Желаемая цена", placeholder: "15000 USD", mode: "text" },
+      city: { label: "Город недвижимости", placeholder: "Бишкек", mode: "text" },
+      cash: { label: "Доплата", placeholder: "5000 USD", mode: "text" },
+      monthly: { label: "Платёж в месяц", placeholder: "30000 KGS", mode: "text" },
+    };
+    const input = inputs[draft.step];
+    const ownerPhotos =
+      draft.step === "photos" ? "select" : draft.step === "saved" ? "saved" : undefined;
+    return [
+      {
+        text: (error ? `${escapeHtml(error)}\n\n` : "") + text,
+        buttons,
+        ...(input ? { input } : {}),
+        ...(ownerPhotos ? { ownerPhotos } : {}),
+      },
+    ];
   }
 
   private move(draft: Draft, step: Step): Reply[] {
@@ -229,7 +258,8 @@ export class SellerConversation {
     const next: Partial<Record<Step, Step>> = {
       purpose: "vehicle",
       vehicle: "price",
-      price: draft.data.purpose === "sale" ? "review" : "city",
+      price: "photos",
+      photos: draft.data.purpose === "sale" ? "review" : "city",
       city: "property_type",
       property_type: "cash",
       cash: "monthly",
@@ -385,6 +415,7 @@ export class SellerConversation {
       draft.data.property_type = action as PropertyType;
       return this.advance(draft);
     }
+    if (draft.step === "photos" && action === "continue") return this.advance(draft);
     if (["price", "cash", "monthly"].includes(draft.step)) {
       const parsed =
         action === "skip" ? null : callback ? undefined : money(text, draft.step !== "price");
@@ -407,22 +438,25 @@ export class SellerConversation {
     }
     if (!callback && draft.step === "vehicle") {
       const parts = text.split(",").map((part) => part.trim());
-      const [name = "", yearText = "", mileageText] = parts;
+      const [name = "", yearText = "", mileageText, bodyType = "", transmission = ""] = parts;
       const year = Number(yearText);
-      const mileage = mileageText === undefined ? null : Number(mileageText.replaceAll(/\s/gu, ""));
+      const mileage = !mileageText ? null : Number(mileageText.replaceAll(/\s/gu, ""));
       if (
         parts.length < 2 ||
-        parts.length > 3 ||
+        parts.length > 5 ||
         !name ||
         name.length > 120 ||
         !/^\d{4}$/u.test(yearText) ||
         year < 1900 ||
         year > new Date().getUTCFullYear() + 1 ||
         (mileageText !== undefined &&
+          mileageText !== "" &&
           (!/^\d[\d\s]*$/u.test(mileageText) ||
             !Number.isSafeInteger(mileage) ||
             mileage! < 0 ||
-            mileage! > 10_000_000))
+            mileage! > 10_000_000)) ||
+        (bodyType !== "" && !Object.hasOwn(BODY_TYPES, bodyType)) ||
+        (transmission !== "" && !Object.hasOwn(TRANSMISSIONS, transmission))
       )
         return this.prompt(
           draft,
@@ -431,6 +465,8 @@ export class SellerConversation {
       draft.data.make_model = name;
       draft.data.year = year;
       draft.data.mileage_km = mileage;
+      draft.data.body_type = bodyType || null;
+      draft.data.transmission = transmission || null;
       return this.advance(draft);
     }
     if (!callback && draft.step === "city") {

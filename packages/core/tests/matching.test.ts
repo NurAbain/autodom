@@ -94,6 +94,15 @@ it("requires exact known hard fields but does not filter advisory preferences", 
   expect(normalizeMileageKm("999999999999999999999999 km")).toBeNull();
 });
 
+it("matches a listing from any of the chosen cities", () => {
+  const selected = { ...profile, city: "Бишкек, Ош" };
+  expect(matches(selected, { ...car, city: "Бишкек" })).toBe(true);
+  expect(matches(selected, { ...car, city: "Ош" })).toBe(true);
+  expect(matches(selected, { ...car, city: "Ош", body_type: "Седан" })).toBe(true);
+  expect(matches(selected, { ...car, city: "Каракол" })).toBe(false);
+  expect(matches({ ...profile, city: "Бишкек, Бишкек" }, { ...car, city: "Бишкек" })).toBe(true);
+});
+
 it("keeps the year range closed and rejects an unknown year", () => {
   const selected = { ...profile, year_min: 2018, year_max: 2021 };
   expect(matches(selected, { ...car, year: 2018 })).toBe(true);

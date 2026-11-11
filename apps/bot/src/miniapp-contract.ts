@@ -42,7 +42,7 @@ export interface MiniAppFilterProfile {
   budget_min_minor: number;
   budget_max_minor: number;
   query: string;
-  city: string;
+  cities: string[];
   body_type: string;
   transmission: string;
   year_min: number | null;
@@ -73,12 +73,26 @@ export interface MiniAppFilterDraft {
   year_max: number | null;
   mileage_max_km: number | null;
   monitoring: boolean;
-  consent: boolean;
 }
 
 export interface MiniAppFilterSaved {
   revision: string;
   monitoring: boolean;
+  matches: number;
+}
+
+/** A city of the market with the number of ads behind it. */
+export interface MiniAppCityChoice {
+  /** The city as the marketplace writes it. */
+  value: string;
+  matches: number;
+}
+
+/** A make or a model of the catalogue with the number of ads behind it. */
+export interface MiniAppChoice {
+  id: string;
+  value: string;
+  label: string;
   matches: number;
 }
 
