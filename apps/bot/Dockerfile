@@ -8,6 +8,9 @@ RUN npm install --global --ignore-scripts pnpm@10.34.5
 WORKDIR /app
 
 FROM base AS build
+ENV npm_config_network_concurrency=4 \
+    npm_config_fetch_timeout=300000 \
+    npm_config_fetch_retries=4
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc tsconfig.json tsup.config.ts ./
 COPY patches ./patches
 COPY packages/core ./packages/core
@@ -17,6 +20,9 @@ COPY apps/bot ./apps/bot
 RUN pnpm install --frozen-lockfile && pnpm build:bot && pnpm build:runtime
 
 FROM base AS production-dependencies
+ENV npm_config_network_concurrency=4 \
+    npm_config_fetch_timeout=300000 \
+    npm_config_fetch_retries=4
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
 COPY patches ./patches
 COPY packages/core/package.json ./packages/core/package.json
