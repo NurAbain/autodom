@@ -8,7 +8,7 @@ describe("seller vehicle flow", () => {
     it(`keeps characteristics and asks for photos after price for ${purpose}`, async () => {
       let saved: OwnerVehicle | null = null;
       const flow = new SellerConversation({
-        getOwnerVehicle: async () => null,
+        getOwnerVehicle: async () => saved,
         saveOwnerVehicle: async (card) => (saved = card),
         deleteOwnerVehicle: async () => {},
       });
@@ -29,7 +29,13 @@ describe("seller vehicle flow", () => {
       expect(replies[0]!.ownerPhotos).toBe("select");
       replies = await choose("continue");
       if (purpose === "property") {
-        replies = (await flow.handle(1, 1, "Бишкек"))!;
+        expect(replies[0]!.input).toBeUndefined();
+        replies = await choose("city-done");
+        expect(replies[0]!.text).toContain("Выберите хотя бы один город");
+        replies = await choose("city.0");
+        replies = await choose("city.1");
+        expect(replies[0]!.buttons.flat().map(([label]) => label)).toContain("✓ Ош");
+        replies = await choose("city-done");
         replies = await choose("apartment");
         replies = await choose("skip");
         replies = await choose("skip");
@@ -43,6 +49,23 @@ describe("seller vehicle flow", () => {
         transmission: "automatic",
       });
       expect(replies[0]!.ownerPhotos).toBe("saved");
+      if (purpose === "property") {
+        expect(saved!.property_city).toBe("Бишкек, Ош");
+        replies = await choose("edit.city");
+        expect(replies[0]!.buttons.flat().map(([label]) => label)).toContain("✓ Бишкек");
+        replies = await choose("city.0");
+        replies = await choose("back");
+        expect(replies[0]!.text).toContain("Бишкек, Ош");
+        expect(saved!.property_city).toBe("Бишкек, Ош");
+        saved!.property_city = "Сокулук";
+        replies = (await flow.handle(1, 1, "/mycar"))!;
+        replies = await choose("edit.city");
+        expect(replies[0]!.buttons.flat().map(([label]) => label)).toContain("✓ Сокулук");
+        replies = await choose("city.0");
+        replies = await choose("city-done");
+        replies = await choose("save");
+        expect(saved!.property_city).toBe("Сокулук, Бишкек");
+      }
       flow.clear(1);
     });
   }
