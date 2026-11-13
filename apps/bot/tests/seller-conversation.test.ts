@@ -11,6 +11,14 @@ describe("seller vehicle flow", () => {
         getOwnerVehicle: async () => saved,
         saveOwnerVehicle: async (card) => (saved = card),
         deleteOwnerVehicle: async () => {},
+        estimateOwnerPrice: async () => ({
+          currency: "USD",
+          medianMinor: 1_500_000,
+          lowMinor: 1_400_000,
+          highMinor: 1_600_000,
+          sampleSize: 6,
+          observedAt: 1_780_000_000,
+        }),
       });
       let replies = (await flow.handle(1, 1, "/sell"))!;
       const choose = async (value: string): Promise<Reply[]> => {

@@ -302,3 +302,7 @@ details[open] > summary { margin-bottom: 14px; }
   border-top: 1px solid var(--line);
 }
 .filter-bar > .button { width: 100%; }
+.comparison { overflow-x: auto; }
+.comparison table { width: 100%; border-collapse: collapse; }
+.comparison th, .comparison td { padding: 8px; text-align: left; border-bottom: 1px solid var(--line); }
+.favorites .panel label { display: block; margin-top: 12px; }

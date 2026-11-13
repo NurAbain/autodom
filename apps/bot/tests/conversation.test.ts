@@ -24,6 +24,7 @@ import {
 class InteractionStore {
   profiles = new Map<number, Profile>();
   drafts = new Map<number, [string, Record<string, unknown>]>();
+  metadata = new Map<string, string>();
   listings: Listing[] = [];
   revision = 1_789_000_000_000_000_000n;
   locks: string[] = [];
@@ -67,11 +68,13 @@ class InteractionStore {
   async search(profile: Profile, limit = 5, offset = 0) {
     return this.listings.filter((item) => matches(profile, item)).slice(offset, offset + limit);
   }
-  async getMeta(_key: string, fallback: string | null = null) {
-    return fallback;
+  async getMeta(key: string, fallback: string | null = null) {
+    return this.metadata.get(key) ?? fallback;
   }
-  async setMeta(_key: string, _value: string) {
-    throw new Error("Conversation must not mutate catalog metadata");
+  async setMeta(key: string, value: string) {
+    if (!key.startsWith("autodom:buyout:"))
+      throw new Error("Conversation must not mutate catalog metadata");
+    this.metadata.set(key, value);
   }
   async sourceStats() {
     return {};
@@ -236,6 +239,19 @@ describe("explicit consent and save safety", () => {
     expect((await store.getProfile(1))?.monitoring).toBe(false);
     await conversation.handle(1, 1, resume);
     expect((await store.getProfile(1))?.monitoring).toBe(false);
+  });
+  it("enables the buyout filter only for the owner and only while monitoring is enabled", async () => {
+    await saveProfile(1);
+    const offer = await conversation.handle(1, 1, "/buyout");
+    const enable = button(offer, "Включить режим скупки");
+    await conversation.handle(2, 2, enable);
+    expect(store.metadata.size).toBe(0);
+    const enabled = await conversation.handle(1, 1, enable);
+    expect(rendered(enabled)).toContain("15%");
+    expect(store.metadata.get("autodom:buyout:1")).toBe("1");
+    expect((await store.getProfile(1))?.monitoring).toBe(false);
+    await conversation.handle(1, 1, button(enabled, "Выключить режим скупки"));
+    expect(store.metadata.get("autodom:buyout:1")).toBe("0");
   });
   it("persists nothing before current explicit consent, including on restart", async () => {
     const old = button(await conversation.handle(1, 1, "/filters"), "Согласен");

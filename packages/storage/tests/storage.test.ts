@@ -188,6 +188,61 @@ afterAll(async () => {
   await container?.stop();
 });
 
+it("persists private favorites and preserves observed history and price references", async () => {
+  const vehicle = car({
+    id: "target",
+    year: 2018,
+    mileage: "100000 км",
+    vin: "KMHDU41DBAU123456",
+    catalog_attributes: { make: "Toyota", model: "Camry" },
+  });
+  const similar = Array.from({ length: 5 }, (_, index) =>
+    car({
+      id: `similar-${index}`,
+      year: 2018,
+      mileage: "100000 км",
+      price_usd_minor: 110 + index * 10,
+      catalog_attributes: { make: "Toyota", model: "Camry" },
+    }),
+  );
+  const duplicate = car({
+    ...vehicle,
+    id: "duplicate",
+    price_usd_minor: 20,
+  });
+  await db.upsertListings([vehicle, duplicate, ...similar], NOW - 30);
+  await db.upsertListings([{ ...vehicle, price_usd_minor: 80 }], NOW - 20);
+  await db.upsertListings([{ ...vehicle, price_usd_minor: 120 }], NOW - 10);
+  expect(await db.listingFirstSeen(vehicle.id)).toBe(NOW - 30);
+  expect((await db.priceHistory(vehicle.id)).map((point) => point.price_usd_minor)).toEqual([
+    100, 80, 120,
+  ]);
+  expect((await db.listingDuplicates(vehicle)).map((item) => item.id)).toEqual(["duplicate"]);
+  expect(await db.estimatePrice(vehicle, "USD")).toMatchObject({ medianMinor: 130, sampleSize: 5 });
+  expect(await db.estimateOwnerPrice(ownerCard())).toMatchObject({
+    medianMinor: 125,
+    sampleSize: 6,
+    currency: "USD",
+  });
+  await db.saveProfile({ ...profile(), chat_id: 1 });
+  await db.saveProfile({ ...profile(), user_id: 2, chat_id: 2 });
+  await db.setFavorite(1, vehicle.id, true);
+  expect((await db.favoriteState(1)).items.map((item) => item.id)).toEqual([vehicle.id]);
+  expect((await db.favoriteState(2)).items).toEqual([]);
+  expect((await db.favoriteProfiles()).map((item) => item.user_id)).toEqual([1]);
+  await expect(db.setFavorite(2, "missing", true)).rejects.toThrow();
+  const snapshot = join(directory, "favorites.ndjson");
+  await backup(db, snapshot);
+  const restoredUrl = await database();
+  await restore(snapshot, restoredUrl);
+  const restored = await open(restoredUrl);
+  expect((await restored.favoriteListings(1))[0]?.listing?.id).toBe(vehicle.id);
+  await restored.deleteUser(1);
+  expect((await restored.favoriteState(1)).items).toEqual([]);
+  expect(await restored.getListing(vehicle.id)).not.toBeNull();
+  expect(await restored.getProfile(2)).not.toBeNull();
+});
+
 const inspectionOffer = (userId = 1): PaymentOfferInput => ({
   userId,
   product: "inspection",
