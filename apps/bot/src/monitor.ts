@@ -103,7 +103,10 @@ export async function notifyOnce(
             "<b>Бесплатный мониторинг Autodom</b>\nОбновления по вашему сохранённому поиску.";
           if (count > shown)
             header += ` Ещё подходящих обновлений: ${count - shown} — смотрите /search.`;
-          cards[cards.length - 1]!.buttons = menu(profile);
+          cards[cards.length - 1]!.buttons = [
+            ...cards[cards.length - 1]!.buttons,
+            ...menu(profile),
+          ];
           try {
             await send(profile.chat_id, [...packReplies(header, []), ...cards]);
           } catch (error) {

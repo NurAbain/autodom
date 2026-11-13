@@ -13,6 +13,7 @@ import {
   TRANSMISSIONS,
   USE_CASES,
 } from "@autodom/core";
+import { normalizeVin } from "@autodom/core/vin";
 import type { Store } from "@autodom/storage";
 import type { AnalyticsEvent, AnalyticsRecorder, AnalyticsSurface } from "./analytics-contract.js";
 import { NO_BUDGET_LIMIT_MINOR } from "./budget-limit.js";
@@ -306,7 +307,12 @@ export function listingReplies(
   buttons: Buttons = [],
   heading = "",
 ): Reply[] {
-  const replies = packReplies(heading, [listingText(listing, currency)], buttons);
+  const vin = normalizeVin(listing.vin ?? "");
+  const replies = packReplies(
+    heading,
+    [listingText(listing, currency)],
+    [...buttons, [["Проверить VIN", `vin-card:${vin ?? ""}`]]],
+  );
   // Bot API rich HTML supports semantic headings and paragraphs; the ordinary
   // HTML remains complete for servers that have not enabled sendRichMessage.
   for (const reply of replies) {
