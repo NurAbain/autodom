@@ -18,6 +18,42 @@ import { escapeHtml } from "./html.js";
 
 const TTL_MS = 30 * 60 * 1000;
 const MAX_DRAFTS = 2048;
+const PROPERTY_CITIES = [
+  "Бишкек",
+  "Ош",
+  "Джалал-Абад",
+  "Каракол",
+  "Токмок",
+  "Кант",
+  "Талас",
+  "Нарын",
+  "Балыкчы",
+  "Баткен",
+  "Кара-Балта",
+  "Узген",
+  "Кызыл-Кия",
+  "Кара-Суу",
+  "Таш-Кумыр",
+  "Кок-Жангак",
+  "Майлуу-Суу",
+  "Кара-Куль",
+  "Кочкор-Ата",
+  "Кербен",
+  "Ноокат",
+  "Сулюкта",
+  "Раззаков",
+  "Айдаркен",
+  "Кадамжай",
+  "Кемин",
+  "Орловка",
+  "Шопоков",
+  "Каинды",
+  "Чолпон-Ата",
+  "Токтогул",
+  "Кочкор",
+  "Ат-Башы",
+];
+const POPULAR_CITY_COUNT = 8;
 type Step =
   | "consent"
   | "purpose"
@@ -43,6 +79,8 @@ interface Draft {
   expires: number;
   returnReview: boolean;
   history: Step[];
+  selectedCities: string[];
+  moreCities: boolean;
 }
 const EDIT_FIELDS: readonly (readonly [string, Step])[] = [
   ["Цель", "purpose"],
@@ -108,6 +146,8 @@ export class SellerConversation {
       expires: 0,
       returnReview: false,
       history: [],
+      selectedCities: [],
+      moreCities: false,
     };
     this.clear(userId);
     this.drafts.set(userId, draft);
@@ -158,10 +198,34 @@ export class SellerConversation {
           "Добавьте до трёх фотографий автомобиля в Mini App после выбора цены. Карточка и фото сохраняются только для вас; фотографии можно пропустить или изменить позднее.";
         buttons = [[choice("Продолжить", "continue")]];
         break;
-      case "city":
+      case "city": {
         text =
-          "В каком городе нужна недвижимость? Например: <b>Бишкек</b>. Это пожелание, а не поиск подключённых объектов.";
+          "В каких городах нужна недвижимость? Выберите один или несколько. Это пожелание, а не поиск подключённых объектов.";
+        const cities = [
+          ...PROPERTY_CITIES,
+          ...draft.selectedCities.filter((city) => !PROPERTY_CITIES.includes(city)),
+        ];
+        const popular = cities.slice(0, POPULAR_CITY_COUNT);
+        const visible = draft.moreCities
+          ? cities
+          : [...popular, ...draft.selectedCities.filter((city) => !popular.includes(city))];
+        const rows: Button[][] = [];
+        for (const city of visible) {
+          const index = cities.indexOf(city);
+          const control = choice(
+            `${draft.selectedCities.includes(city) ? "✓ " : ""}${city}`,
+            `city.${index}`,
+          );
+          if (!rows.length || rows[rows.length - 1]!.length === 2) rows.push([]);
+          rows[rows.length - 1]!.push(control);
+        }
+        buttons = [
+          ...rows,
+          [choice(draft.moreCities ? "Меньше городов" : "Другие города", "city-more")],
+          [choice("Продолжить", "city-done")],
+        ];
         break;
+      }
       case "property_type":
         text = "Какая недвижимость интересует?";
         buttons = Object.entries(PROPERTY_TYPES).map(([value, label]) => [choice(label, value)]);
@@ -220,7 +284,6 @@ export class SellerConversation {
         vehicle: true,
       },
       price: { label: "Желаемая цена", placeholder: "15000 USD", mode: "text" },
-      city: { label: "Город недвижимости", placeholder: "Бишкек", mode: "text" },
       cash: { label: "Доплата", placeholder: "5000 USD", mode: "text" },
       monthly: { label: "Платёж в месяц", placeholder: "30000 KGS", mode: "text" },
     };
@@ -238,6 +301,13 @@ export class SellerConversation {
   }
 
   private move(draft: Draft, step: Step): Reply[] {
+    if (step === "city") {
+      draft.selectedCities = (draft.data.property_city ?? "")
+        .split(",")
+        .map((city) => city.trim())
+        .filter(Boolean);
+      draft.moreCities = false;
+    }
     draft.history.push(draft.step);
     draft.step = step;
     return this.prompt(draft);
@@ -469,11 +539,32 @@ export class SellerConversation {
       draft.data.transmission = transmission || null;
       return this.advance(draft);
     }
-    if (!callback && draft.step === "city") {
-      if (!text || text.length > 80)
-        return this.prompt(draft, "Введите город: от 1 до 80 символов.");
-      draft.data.property_city = text;
-      return this.advance(draft);
+    if (draft.step === "city") {
+      if (action === "city-more") {
+        draft.moreCities = !draft.moreCities;
+        return this.prompt(draft);
+      }
+      if (action === "city-done") {
+        if (!draft.selectedCities.length) return this.prompt(draft, "Выберите хотя бы один город.");
+        draft.data.property_city = draft.selectedCities.join(", ");
+        return this.advance(draft);
+      }
+      const match = /^city\.(\d+)$/u.exec(action);
+      const cities = [
+        ...PROPERTY_CITIES,
+        ...draft.selectedCities.filter((city) => !PROPERTY_CITIES.includes(city)),
+      ];
+      const city = match ? cities[Number(match[1])] : undefined;
+      if (city) {
+        const selected = draft.selectedCities.includes(city)
+          ? draft.selectedCities.filter((item) => item !== city)
+          : [...draft.selectedCities, city];
+        if (selected.join(", ").length > 80)
+          return this.prompt(draft, "Выбрано слишком много городов. Снимите один из выбранных.");
+        draft.selectedCities = selected;
+        return this.prompt(draft);
+      }
+      return this.prompt(draft, "Выберите город кнопкой.");
     }
     return this.prompt(draft, "Выберите действие кнопкой под сообщением.");
   }
