@@ -2418,26 +2418,23 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     element(
       "p",
       "muted",
-      "Введите VIN — бесплатно покажем найденные сведения об автомобиле и доступную историю.",
+      "Бесплатно покажем доступные сведения из подключённых источников. Это не полная история автомобиля.",
     ),
   );
   if (car) {
+    const listingVin = normalizeVin(car.vin ?? "");
     panel.append(
       element(
         "p",
-        car.vin ? "vin" : "muted",
-        car.vin
-          ? `VIN из объявления: ${car.vin}`
-          : "В объявлении нет VIN. Введите его с автомобиля или документов.",
-      ),
-      element(
-        "p",
-        "footnote",
-        "Введённый вручную VIN не подтверждён как VIN этого объявления. Сверьте номер с автомобилем и документами.",
+        "muted",
+        listingVin
+          ? `VIN из объявления: ${listingVin}. Сверьте его с автомобилем и документами перед проверкой.`
+          : "В объявлении нет корректного VIN. Введите его с автомобиля или документов.",
       ),
     );
   }
   const disclosure = element("details", "disclosure");
+  disclosure.open = !!car;
   disclosure.append(
     element("summary", "", "Конфиденциальность проверки"),
     element("p", "footnote", VIN_DISCLOSURE),
@@ -2463,8 +2460,9 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   input.maxLength = 64;
   input.required = true;
   input.setAttribute("autocapitalize", "characters");
-  input.value =
-    car?.vin ?? normalizeVin(new URLSearchParams(window.location.search).get("vin") ?? "") ?? "";
+  input.value = car
+    ? (normalizeVin(car.vin ?? "") ?? "")
+    : (normalizeVin(new URLSearchParams(window.location.search).get("vin") ?? "") ?? "");
   input.placeholder = "Введите VIN автомобиля";
   const submit = element("button", "button", "Проверить VIN");
   submit.type = "submit";
@@ -2710,7 +2708,9 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
     "footnote vin-photo-help",
     "VIN на фото? Отправьте фото в чат и подтвердите распознанный номер перед проверкой.",
   );
-  panel.append(form, photoHelp, results, element("p", "footnote", VIN_CAUTION), disclosure);
+  panel.append(form);
+  if (!car) panel.append(photoHelp);
+  panel.append(results, element("p", "footnote", VIN_CAUTION), disclosure);
   if (!car && normalizeVin(new URLSearchParams(window.location.search).get("vin") ?? ""))
     queueMicrotask(() => {
       if (started === generation && panel.isConnected) void lookup();
@@ -2741,7 +2741,15 @@ function showCar(car: MiniAppCar): void {
     facts.append(fact);
   }
   main.append(facts);
-  main.append(vinPanel(car));
+  const vinHost = element("div", "vin-entry");
+  vinHost.append(
+    button("Проверить VIN", () => {
+      const panel = vinPanel(car);
+      vinHost.replaceChildren(panel);
+      panel.querySelector<HTMLInputElement>("#vin-input")?.focus({ preventScroll: true });
+    }),
+  );
+  main.append(vinHost);
   const details = element("section", "panel");
   details.append(element("h2", "", "Сведения из объявления"));
   const text = element("div", "details");

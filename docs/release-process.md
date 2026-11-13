@@ -57,6 +57,10 @@ scripts/deploy-coolify.sh <application-uuid> [branch]
    таблице `metadata` — пустое `source_error` и свежий `last_success_at`.
 3. Сбор: `SELECT source, count(*) FROM listings WHERE last_seen > extract(epoch from now())-900 GROUP BY source;`
 4. Mini App: `https://autodom.skup.kg/full/miniapp/` отвечает 200.
+   В карточке объявления открыть проверку VIN: номер из объявления проверяется только
+   после подтверждения, при отсутствии корректного VIN доступен ручной ввод. Результат
+   зависит от подключённых источников; для проверки нужны `AUTODOM_VIN_API_URL` и
+   `AUTODOM_VIN_API_TOKEN` на полном боте.
 5. В полном Mini App проверить анкету продажи и обмена: выбор одной марки и модели,
    года, пробега, кузова и коробки, затем цену и фото; при недоступном справочнике
    проверить ввод автомобиля текстом. Фото (до трёх JPEG/PNG/WebP по 1 МБ) загружаются

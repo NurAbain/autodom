@@ -340,6 +340,7 @@ describe("search and safe rendering", () => {
     expect(results.flatMap((reply) => reply.buttons.flat().map(([, action]) => action))).toEqual([
       expect.stringMatching(/^page:/),
       "/filters",
+      "vin-card:",
     ]);
     const next = await conversation.handle(1, 1, button(results, "Следующий"));
     expect(next.flatMap((reply) => reply.listingId ?? [])).toEqual(["lalafo"]);
@@ -575,6 +576,76 @@ describe("grammY transport boundaries", () => {
     expect(photo).toBeInstanceOf(InputFile);
     return (photo as InputFile).toRaw();
   }
+  it("checks a listing VIN only after confirmation and supports manual input", async () => {
+    const vin = "KMHDU41DBAU123456";
+    const lookup = vi.fn<VinLookup>(async (value) => ({
+      vin: value,
+      checked_at: 1_789_000_000,
+      carhistory: { status: "not_found", source_url: "", checked_at: null, data: null },
+      car365: { status: "not_found", source_url: "", checked_at: null, data: null },
+    }));
+    await saveProfile(1);
+    store.listings = [car("first", "Toyota Camry", { vin })];
+    const { bot, calls } = telegram(lookup);
+    await bot.init();
+    const from = { id: 1, is_bot: false, first_name: "Buyer" };
+    const message = {
+      message_id: 1,
+      date: 1,
+      from,
+      chat: { id: 1, type: "private" as const, first_name: "Buyer" },
+    };
+    let update = 0;
+    const send = async (text: string) =>
+      bot.handleUpdate({ update_id: ++update, message: { ...message, text } });
+    const click = async (data: string) =>
+      bot.handleUpdate({
+        update_id: ++update,
+        callback_query: { id: String(update), from, chat_instance: "private", message, data },
+      });
+    const action = (prefix: string) => {
+      const call = calls.findLast((item) =>
+        JSON.stringify(item.payload.reply_markup)?.includes(prefix),
+      );
+      const markup = call!.payload.reply_markup as {
+        inline_keyboard: { callback_data?: string }[][];
+      };
+      return markup.inline_keyboard.flat().find((item) => item.callback_data?.startsWith(prefix))!
+        .callback_data!;
+    };
+    await send("/search");
+    await click(action("vin-card:"));
+    expect(lookup).not.toHaveBeenCalled();
+    expect(calls.some((call) => String(call.payload.text).includes(vin))).toBe(true);
+    const confirm = action("vin-confirm:");
+    await bot.handleUpdate({
+      update_id: ++update,
+      callback_query: {
+        id: String(update),
+        from: { ...from, id: 2 },
+        chat_instance: "private",
+        message,
+        data: confirm,
+      },
+    });
+    expect(lookup).not.toHaveBeenCalled();
+    await click(confirm);
+    expect(lookup).toHaveBeenCalledExactlyOnceWith(vin);
+    await click(confirm);
+    expect(lookup).toHaveBeenCalledTimes(1);
+
+    store.listings = [car("second", "Toyota Camry", { vin: "SHORT" })];
+    await send("/search");
+    await click(action("vin-card:"));
+    await send("SHORT");
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(
+      calls.some((call) => String(call.payload.text).includes("VIN должен содержать 17")),
+    ).toBe(true);
+    await send(vin);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
   it("records only delivered report offers and binds voluntary feedback to the actor, VIN and message", async () => {
     const events: AnalyticsEvent[] = [];
     const analytics: AnalyticsRecorder = {
