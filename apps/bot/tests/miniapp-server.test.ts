@@ -32,6 +32,18 @@ const analyticsEvents: AnalyticsEvent[] = [];
 let rejectAnalytics = false;
 const savedProfiles = new Map<number, ReturnType<typeof makeProfile>>();
 const ownerPhotos = new Map<number, string[]>();
+const favorites = new Map<number, string[]>();
+const unreachableFavorites = {
+  favoriteState: async () => {
+    throw new Error("No profile");
+  },
+  setFavorite: async () => {
+    throw new Error("No profile");
+  },
+  favoriteListings: async () => {
+    throw new Error("No profile");
+  },
+};
 const profile = makeProfile({
   user_id: 42,
   chat_id: 42,
@@ -124,6 +136,7 @@ beforeEach(() => {
   vi.spyOn(photoPayments, "hasPhotoAccess").mockImplementation(paidPhotoAccess);
   savedProfiles.clear();
   ownerPhotos.clear();
+  favorites.clear();
 });
 
 function authorization(userId = 42): string {
@@ -244,6 +257,63 @@ beforeAll(async () => {
           .filter((item) => words.every((word) => item.title.toLowerCase().includes(word)))
           .slice(offset, offset + limit);
       },
+      async listingFirstSeen() {
+        return 1_780_000_000;
+      },
+      async priceHistory() {
+        return [
+          {
+            observed_at: 1_780_000_000,
+            original_price_minor: 2_000_000,
+            original_currency: "USD",
+            price_usd_minor: 2_000_000,
+            price_kgs_minor: null,
+          },
+          {
+            observed_at: 1_780_086_400,
+            original_price_minor: 1_900_000,
+            original_currency: "USD",
+            price_usd_minor: 1_900_000,
+            price_kgs_minor: null,
+          },
+        ];
+      },
+      async estimatePrice() {
+        return {
+          currency: "USD" as const,
+          medianMinor: 1_900_000,
+          lowMinor: 1_800_000,
+          highMinor: 2_000_000,
+          sampleSize: 6,
+          observedAt: 1_780_086_400,
+        };
+      },
+      async listingDuplicates() {
+        return [];
+      },
+      async favoriteState(userId) {
+        return {
+          cursor: 0,
+          items: (favorites.get(userId) ?? []).map((id) => ({
+            id,
+            addedEvent: 0,
+            staleNotified: false,
+          })),
+        };
+      },
+      async setFavorite(userId, id, enabled) {
+        const current = favorites.get(userId) ?? [];
+        favorites.set(
+          userId,
+          enabled ? [...new Set([...current, id])] : current.filter((item) => item !== id),
+        );
+      },
+      async favoriteListings(userId) {
+        return (favorites.get(userId) ?? []).map((id) => ({
+          id,
+          listing: id === listing.id ? listing : id === lalafoListing.id ? lalafoListing : null,
+        }));
+      },
       async getListing(id, freshOnly) {
         if (id === "storage-error") throw storageError;
         if (id === listing.id) return listing;
@@ -298,9 +368,51 @@ it("opens a specific older notification independently of the current saved filte
     headers: { Authorization: authorization(), Origin: PUBLIC_ORIGIN },
   });
   expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({ id: listing.id, vin: listing.vin });
+  expect(await response.json()).toMatchObject({
+    id: listing.id,
+    vin: listing.vin,
+    firstSeen: 1_780_000_000,
+    estimate: {
+      median: money(1_900_000, "USD"),
+      low: money(1_800_000, "USD"),
+      high: money(2_000_000, "USD"),
+      sampleSize: 6,
+    },
+    priceHistory: [
+      { observedAt: 1_780_000_000, price: money(2_000_000, "USD") },
+      { observedAt: 1_780_086_400, price: money(1_900_000, "USD") },
+    ],
+  });
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+});
+
+it("keeps favorite cars private and allows the owner to remove them", async () => {
+  const path = `${base}/miniapp/api/favorites`;
+  const headers = { Authorization: authorization(), "Content-Type": "application/json" };
+  const add = await fetch(path, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ id: listing.id, enabled: true }),
+  });
+  expect(add.status).toBe(200);
+  expect(await add.json()).toEqual({ favorite: true });
+  const list = await fetch(path, { headers });
+  expect(await list.json()).toMatchObject({
+    items: [{ id: listing.id, car: { title: listing.title } }],
+  });
+  expect((await fetch(path, { headers: { Authorization: authorization(44) } })).status).toBe(403);
+  const card = await fetch(`${base}/miniapp/api/car?id=${encodeURIComponent(listing.id)}`, {
+    headers,
+  });
+  expect(await card.json()).toMatchObject({ favorite: true });
+  const removed = await fetch(path, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ id: listing.id, enabled: false }),
+  });
+  expect(await removed.json()).toEqual({ favorite: false });
+  expect(await (await fetch(path, { headers })).json()).toEqual({ items: [] });
 });
 
 it("serves a published Lalafo ad with its native price and exact permitted photo origin", async () => {
@@ -408,7 +520,7 @@ it("serves the unchanged original report inline with matching GET and HEAD metad
     'inline; filename="vin-korea-otchet-kr.pdf"',
   );
   expect(response.headers.get("content-length")).toBe(String(original.length));
-  expect(Buffer.from(await response.arrayBuffer())).toEqual(original);
+  expect(Buffer.from(await response.arrayBuffer()).equals(original)).toBe(true);
   expect(response.headers.get("x-content-type-options")).toBe("nosniff");
   expect(response.headers.get("referrer-policy")).toBe("no-referrer");
   const metadata = await fetch(path, { method: "HEAD" });
@@ -588,6 +700,11 @@ it("creates the requested report from recent actor evidence without another VIN 
   const store = {
     getProfile: async () => null,
     getListing: async () => null,
+    listingFirstSeen: async () => null,
+    priceHistory: async () => [],
+    estimatePrice: async () => null,
+    listingDuplicates: async () => [],
+    ...unreachableFavorites,
     saveProfile: async () => profile,
     countMatches: async () => 0,
     search: async () => [],
@@ -775,6 +892,11 @@ it("reports an unconfigured VIN service without fabricating observations", async
     store: {
       getProfile: async () => null,
       getListing: async () => null,
+      listingFirstSeen: async () => null,
+      priceHistory: async () => [],
+      estimatePrice: async () => null,
+      listingDuplicates: async () => [],
+      ...unreachableFavorites,
       saveProfile: async () => profile,
       countMatches: async () => 0,
       search: async () => [],
@@ -887,6 +1009,11 @@ it("reports refused dialogue admission as retryable without confusing an empty s
     store: {
       getProfile: async () => null,
       getListing: async () => null,
+      listingFirstSeen: async () => null,
+      priceHistory: async () => [],
+      estimatePrice: async () => null,
+      listingDuplicates: async () => [],
+      ...unreachableFavorites,
       saveProfile: async () => profile,
       countMatches: async () => 0,
       search: async () => [],
@@ -1191,6 +1318,11 @@ it("accepts positive feedback only for the authenticated buyer's currently paid 
     store: {
       getProfile: async () => null,
       getListing: async () => null,
+      listingFirstSeen: async () => null,
+      priceHistory: async () => [],
+      estimatePrice: async () => null,
+      listingDuplicates: async () => [],
+      ...unreachableFavorites,
       saveProfile: async () => profile,
       countMatches: async () => 0,
       search: async () => [],
@@ -1525,6 +1657,11 @@ describe("buyer filter editor", () => {
       store: {
         getProfile: async () => null,
         getListing: async () => null,
+        listingFirstSeen: async () => null,
+        priceHistory: async () => [],
+        estimatePrice: async () => null,
+        listingDuplicates: async () => [],
+        ...unreachableFavorites,
         saveProfile: async () => profile,
         countMatches: async () => 0,
         search: async () => [],
@@ -1595,6 +1732,11 @@ describe("buyer filter editor", () => {
       store: {
         getProfile: async () => null,
         getListing: async () => null,
+        listingFirstSeen: async () => null,
+        priceHistory: async () => [],
+        estimatePrice: async () => null,
+        listingDuplicates: async () => [],
+        ...unreachableFavorites,
         saveProfile: async () => profile,
         countMatches: async () => 2,
         async search(input) {
@@ -1660,6 +1802,11 @@ describe("buyer filter editor", () => {
       store: {
         getProfile: async () => null,
         getListing: async () => null,
+        listingFirstSeen: async () => null,
+        priceHistory: async () => [],
+        estimatePrice: async () => null,
+        listingDuplicates: async () => [],
+        ...unreachableFavorites,
         saveProfile: async () => profile,
         countMatches: async () => 0,
         search: async () => [],

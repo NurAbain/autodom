@@ -7,6 +7,7 @@ import {
   BODY_TYPES,
   BUDGET_SCOPES,
   cityAlternatives,
+  estimateListingPrice,
   type Listing,
   type ListingEvent,
   listingIsAuction,
@@ -19,6 +20,8 @@ import {
   normalizeCity,
   normalizeMileageKm,
   normalizeTransmission,
+  normalizeVin,
+  type PriceEstimate,
   type Profile,
   purchaseEligible,
   queryGroups,
@@ -69,6 +72,10 @@ export interface PricePoint {
   price_kgs_minor: number | null;
   original_price_minor: number | null;
   original_currency: string;
+}
+export interface FavoriteState {
+  cursor: number;
+  items: { id: string; addedEvent: number; staleNotified: boolean }[];
 }
 const lockId = (key: string) =>
   createHash("sha256").update(`autodom:postgres:v1:${key}`).digest().readInt32BE(0);
@@ -511,6 +518,89 @@ export class Store {
       );
     return row ? decodeListing(row) : null;
   }
+  async listingFirstSeen(id: string): Promise<number | null> {
+    const [row] = await this.database
+      .select({ firstSeen: listings.first_seen })
+      .from(listings)
+      .where(eq(listings.id, id));
+    return row?.firstSeen ?? null;
+  }
+  async listingDuplicates(listing: Listing): Promise<Listing[]> {
+    const vin = normalizeVin(listing.vin);
+    const sources = [...approvedSources()];
+    if (!vin || !sources.length) return [];
+    const rows = await this.database
+      .select()
+      .from(listings)
+      .where(
+        and(
+          inArray(listings.source, sources),
+          inArray(listings.availability, ["в наличии", "опубликовано"]),
+          gte(listings.last_seen, nowSeconds() - FRESH_SECONDS),
+          sql`upper(trim(${listings.data}->>'vin')) = ${vin}`,
+          sql`${listings.id} <> ${listing.id}`,
+        ),
+      )
+      .orderBy(desc(listings.last_seen))
+      .limit(20);
+    return rows.map(decodeListing);
+  }
+  async estimatePrice(listing: Listing, currency: "USD" | "KGS"): Promise<PriceEstimate | null> {
+    const make = listing.catalog_attributes.make?.trim();
+    const model = listing.catalog_attributes.model?.trim();
+    const sources = [...approvedSources()];
+    if (!make || !model || listing.year === null || listing.market !== "KG" || !sources.length)
+      return null;
+    const now = nowSeconds();
+    const rows = await this.database
+      .select()
+      .from(listings)
+      .where(
+        and(
+          eq(listings.market, "KG"),
+          inArray(listings.source, sources),
+          gte(listings.last_seen, now - FRESH_SECONDS),
+          between(listings.vehicle_year, listing.year - 1, listing.year + 1),
+          sql`lower(trim(${listings.data}->'catalog_attributes'->>'make')) = lower(${make})`,
+          sql`lower(trim(${listings.data}->'catalog_attributes'->>'model')) = lower(${model})`,
+        ),
+      )
+      .orderBy(desc(listings.last_seen), asc(listings.id))
+      .limit(500);
+    return estimateListingPrice(listing, rows.map(decodeListing), currency, now);
+  }
+  async estimateOwnerPrice(card: OwnerVehicle): Promise<PriceEstimate | null> {
+    const sources = [...approvedSources()];
+    if (!sources.length) return null;
+    const [row] = await this.database
+      .select()
+      .from(listings)
+      .where(
+        and(
+          eq(listings.market, "KG"),
+          inArray(listings.source, sources),
+          gte(listings.last_seen, nowSeconds() - FRESH_SECONDS),
+          between(listings.vehicle_year, card.year - 1, card.year + 1),
+          sql`lower(trim((${listings.data}->'catalog_attributes'->>'make') || ' ' || (${listings.data}->'catalog_attributes'->>'model'))) = lower(${card.make_model.trim()})`,
+        ),
+      )
+      .orderBy(desc(listings.last_seen), asc(listings.id))
+      .limit(1);
+    if (!row) return null;
+    const exemplar = decodeListing(row);
+    const target = makeListing({
+      id: `owner:${card.user_id}`,
+      title: card.make_model,
+      url: "",
+      year: card.year,
+      mileage: card.mileage_km === null ? "" : `${card.mileage_km} км`,
+      body_type: card.body_type ?? "",
+      transmission: card.transmission ?? "",
+      market: "KG",
+      catalog_attributes: exemplar.catalog_attributes,
+    });
+    return this.estimatePrice(target, card.sale_currency ?? "USD");
+  }
   private async maxEvent(): Promise<number> {
     const [row] = await this.database
       .select({ value: sql<number>`COALESCE(MAX(${events.id}), 0)`.mapWith(Number) })
@@ -825,8 +915,8 @@ export class Store {
         data: events.data,
       })
       .from(events)
-      .where(and(eq(events.listing_id, listingId), eq(events.kind, "price_change")))
-      .orderBy(desc(events.observed_at))
+      .where(and(eq(events.listing_id, listingId), inArray(events.kind, ["new", "price_change"])))
+      .orderBy(desc(events.observed_at), desc(events.id))
       .limit(limit);
     return rows.reverse().map((row) => ({
       observed_at: row.observed_at,
@@ -923,6 +1013,8 @@ export class Store {
       await this.database.delete(drafts).where(eq(drafts.user_id, userId));
       await this.database.delete(profiles).where(eq(profiles.user_id, userId));
       await this.database.delete(ownerVehicles).where(eq(ownerVehicles.user_id, userId));
+      await this.database.delete(metadata).where(eq(metadata.key, `autodom:buyout:${userId}`));
+      await this.database.delete(metadata).where(eq(metadata.key, `autodom:favorites:${userId}`));
       await this.database
         .delete(metadata)
         .where(like(metadata.key, `autodom:telegram:%:user:${userId}`));
@@ -939,6 +1031,90 @@ export class Store {
         .values({ key, value })
         .onConflictDoUpdate({ target: metadata.key, set: { value } });
     });
+  }
+  async favoriteState(userId: number): Promise<FavoriteState> {
+    const raw = await this.getMeta(`autodom:favorites:${userId}`);
+    if (raw === null) return { cursor: 0, items: [] };
+    const state: unknown = JSON.parse(raw);
+    if (!state || typeof state !== "object" || !("cursor" in state) || !("items" in state))
+      throw new Error("Invalid favorite state");
+    const { cursor, items } = state;
+    if (
+      !Number.isSafeInteger(cursor) ||
+      (cursor as number) < 0 ||
+      !Array.isArray(items) ||
+      items.length > 100 ||
+      items.some(
+        (item) =>
+          !item ||
+          typeof item !== "object" ||
+          typeof item.id !== "string" ||
+          !item.id ||
+          item.id.length > 200 ||
+          /[\p{Cc}]/u.test(item.id) ||
+          !Number.isSafeInteger(item.addedEvent) ||
+          item.addedEvent < 0 ||
+          typeof item.staleNotified !== "boolean",
+      ) ||
+      new Set(items.map((item) => item.id)).size !== items.length
+    )
+      throw new Error("Invalid favorite state");
+    return { cursor: cursor as number, items };
+  }
+  async saveFavoriteState(userId: number, state: FavoriteState): Promise<void> {
+    const key = `autodom:favorites:${userId}`;
+    if (state.items.length) await this.setMeta(key, JSON.stringify(state));
+    else await this.database.delete(metadata).where(eq(metadata.key, key));
+  }
+  async setFavorite(userId: number, listingId: string, enabled: boolean): Promise<void> {
+    await this.withLock(`autodom:user:${userId}`, () =>
+      this.transaction(async () => {
+        const profile = await this.getProfile(userId);
+        if (!profile || profile.chat_id !== userId)
+          throw new Error("Private search profile required");
+        const state = await this.favoriteState(userId);
+        if (enabled && !state.items.some((item) => item.id === listingId)) {
+          const listing = await this.getListing(listingId, true);
+          if (!listing || !approvedSources().includes(listing.source))
+            throw new Error("Listing unavailable");
+          if (state.items.length >= 100) throw new Error("Favorite limit reached");
+          const event = await this.maxEvent();
+          if (!state.items.length) state.cursor = event;
+          state.items.push({ id: listingId, addedEvent: event, staleNotified: false });
+        } else if (!enabled) {
+          state.items = state.items.filter((item) => item.id !== listingId);
+        }
+        await this.saveFavoriteState(userId, state);
+      }),
+    );
+  }
+  async favoriteProfiles(): Promise<Profile[]> {
+    const rows = await this.database
+      .select({ profile: profiles })
+      .from(profiles)
+      .innerJoin(
+        metadata,
+        sql`${metadata.key} = 'autodom:favorites:' || ${profiles.user_id}::text`,
+      );
+    return rows.map((row) => decodeProfile(row.profile));
+  }
+  async favoriteListings(userId: number): Promise<{ id: string; listing: Listing | null }[]> {
+    const state = await this.favoriteState(userId);
+    if (!state.items.length) return [];
+    const rows = await this.database
+      .select()
+      .from(listings)
+      .where(
+        inArray(
+          listings.id,
+          state.items.map((item) => item.id),
+        ),
+      );
+    const allowed = approvedSources();
+    const byId = new Map(
+      rows.filter((row) => allowed.includes(row.source)).map((row) => [row.id, decodeListing(row)]),
+    );
+    return state.items.map((item) => ({ id: item.id, listing: byId.get(item.id) ?? null }));
   }
   async stats(): Promise<StoreStats> {
     const result = await this.database.execute<{

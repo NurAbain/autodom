@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { money as formatMoney } from "@autodom/core";
 import {
   OWNER_PURPOSES,
   type OwnerCurrency,
@@ -120,7 +121,7 @@ export class SellerConversation {
   constructor(
     private readonly store: Pick<
       Store,
-      "getOwnerVehicle" | "saveOwnerVehicle" | "deleteOwnerVehicle"
+      "getOwnerVehicle" | "saveOwnerVehicle" | "deleteOwnerVehicle" | "estimateOwnerPrice"
     >,
   ) {}
 
@@ -257,6 +258,7 @@ export class SellerConversation {
         }
         buttons = [
           ...buttons,
+          [choice("Оценить цену", "estimate")],
           ...[...EDIT_FIELDS, ...(card.purpose === "sale" ? [] : PROPERTY_FIELDS)].map(
             ([label, step]) => [choice(`Изменить: ${label}`, `edit.${step}`)],
           ),
@@ -423,6 +425,13 @@ export class SellerConversation {
             buttons: [],
           },
         ];
+      }
+      if ((draft.step === "saved" || draft.step === "review") && action === "estimate") {
+        const estimate = await this.store.estimateOwnerPrice(this.candidate(draft));
+        const text = estimate
+          ? `Ориентир: <b>${escapeHtml(formatMoney(estimate.medianMinor, estimate.currency))}</b>.\nПоловина похожих предложений: ${escapeHtml(formatMoney(estimate.lowMinor, estimate.currency))} – ${escapeHtml(formatMoney(estimate.highMinor, estimate.currency))}. Аналогов: ${estimate.sampleSize}. Расчёт: ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bishkek" }).format(new Date(estimate.observedAt * 1000))} (Бишкек).\n\nЭто цены объявлений, не сделок. Состояние автомобиля не проверено.`
+          : "Недостаточно сопоставимых объявлений для оценки. Убедитесь, что марка, модель и год указаны точно.";
+        return [{ text, buttons: [] }, ...this.prompt(draft)];
       }
       if (draft.step === "saved" && action === "description") {
         const card = this.candidate(draft);

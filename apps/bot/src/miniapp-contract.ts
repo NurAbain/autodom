@@ -31,9 +31,36 @@ export interface MiniAppCar {
   market: string;
   source: string;
   observedAt: number | null;
+  firstSeen: number | null;
+  priceHistory: { observedAt: number; price: string | null }[];
+  estimate: {
+    median: string;
+    low: string;
+    high: string;
+    sampleSize: number;
+    observedAt: number;
+  } | null;
+  duplicates: { id: string; title: string; source: string; price: string }[];
+  favorite: boolean;
   availability: string;
   detailsHtml: string;
   vin: string | null;
+}
+export interface MiniAppFavorite {
+  id: string;
+  car: Pick<
+    MiniAppCar,
+    | "id"
+    | "title"
+    | "price"
+    | "year"
+    | "mileage"
+    | "transmission"
+    | "bodyType"
+    | "city"
+    | "source"
+    | "observedAt"
+  > | null;
 }
 
 /** Saved buyer conditions; the same set works for every marketplace. */
