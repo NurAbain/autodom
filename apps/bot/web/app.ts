@@ -2083,6 +2083,9 @@ function showDialogue(view: "sell"): void {
           control.className = "button button-quiet";
         } else {
           control = button(label, () => runAction(command), "button button-quiet");
+          if (/^seller:[^:]+:city\.\d+$/u.test(command)) {
+            control.setAttribute("aria-pressed", String(label.startsWith("✓ ")));
+          }
         }
         control.dataset.focusLabel = label.replace(/^✓\s*/, "");
         group.append(control);
