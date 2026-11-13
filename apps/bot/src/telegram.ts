@@ -62,6 +62,7 @@ import {
   confirmedEncarListings,
   confirmedVinArchiveResult,
   confirmedVinReportKind,
+  VIN_CAUTION,
   VIN_DISCLOSURE,
   VIN_HELP,
   VIN_NOT_ENABLED,
@@ -351,6 +352,7 @@ export function createTelegramBot(
     orderId?: string;
   }
   const reportContexts = new Map<number, ReportContext>();
+  const cardVinInputs = new Map<number, { expiresAt: number; vin?: string; nonce?: string }>();
   function reportContext(
     userId: number,
     vin: string,
@@ -1223,6 +1225,7 @@ export function createTelegramBot(
     await store.withLock(`autodom:user:${userId}`, async () => {
       const directVin = normalizeVin(text);
       if (vinCommand || directVin) {
+        cardVinInputs.delete(userId);
         pendingPhotos.delete(userId);
         if (!vinOnly) await handleConversation(userId, chatId, "/vin");
         else await record(userId, { event: "goal_selected", flow: "report", step: "vin" });
@@ -1238,6 +1241,14 @@ export function createTelegramBot(
             });
           await vinHelp(userId, chatId);
         }
+        return;
+      }
+      const cardVinInput = cardVinInputs.get(userId);
+      if (cardVinInput && cardVinInput.expiresAt <= Date.now()) cardVinInputs.delete(userId);
+      else if (cardVinInput && !cardVinInput.vin && text && !text.startsWith("/")) {
+        await context.reply(
+          "VIN должен содержать 17 латинских букв и цифр, без I, O и Q. Проверьте номер и отправьте его ещё раз или нажмите /cancel.",
+        );
         return;
       }
       if (context.message.photo) {
@@ -1326,8 +1337,12 @@ export function createTelegramBot(
         );
         return;
       }
-      if (text.startsWith("/")) pendingPhotos.delete(userId);
+      if (text.startsWith("/")) {
+        pendingPhotos.delete(userId);
+        cardVinInputs.delete(userId);
+      }
       if (/^\/(?:start|cancel|delete)(?:@\w+)?(?:\s|$)/iu.test(text)) {
+        cardVinInputs.delete(userId);
         reportContexts.delete(userId);
       }
       const pending = pendingPhotos.get(userId);
@@ -1530,7 +1545,51 @@ export function createTelegramBot(
         data === "/delete" ||
         data.startsWith("delete:")
       ) {
+        cardVinInputs.delete(userId);
         reportContexts.delete(userId);
+      }
+      if (!data.startsWith("vin-card:") && !data.startsWith("vin-confirm:"))
+        cardVinInputs.delete(userId);
+      if (data.startsWith("vin-card:")) {
+        const vin = normalizeVin(data.slice("vin-card:".length));
+        if (cardVinInputs.size >= 2048) cardVinInputs.delete(cardVinInputs.keys().next().value!);
+        const nonce = vin ? randomBytes(12).toString("base64url") : undefined;
+        cardVinInputs.set(userId, {
+          expiresAt: Date.now() + 10 * 60_000,
+          ...(vin && nonce ? { vin, nonce } : {}),
+        });
+        await sendReplies(bot, chatId, [
+          {
+            text:
+              (vin
+                ? `VIN из объявления: <b>${escapeHtml(vin)}</b>\nСверьте номер с автомобилем и документами. Проверить этот VIN?`
+                : "В объявлении нет корректного VIN. Отправьте VIN из 17 латинских букв и цифр без I, O и Q.") +
+              `\n\n${escapeHtml(`Бесплатно покажем доступные сведения; это не полная история автомобиля. ${VIN_DISCLOSURE} ${VIN_CAUTION}`)}`,
+            buttons: vin
+              ? [
+                  [["Проверить бесплатно", `vin-confirm:${nonce}`]],
+                  [["Ввести другой VIN", "vin-card:"]],
+                ]
+              : [[["Отмена", "/cancel"]]],
+          },
+        ]);
+        return;
+      }
+      if (data.startsWith("vin-confirm:")) {
+        const pending = cardVinInputs.get(userId);
+        if (
+          !pending?.vin ||
+          pending.nonce !== data.slice("vin-confirm:".length) ||
+          pending.expiresAt <= Date.now()
+        ) {
+          await context.reply(
+            "Подтверждение устарело. Откройте объявление и нажмите «Проверить VIN» ещё раз.",
+          );
+          return;
+        }
+        cardVinInputs.delete(userId);
+        await checkVin(chatId, pending.vin);
+        return;
       }
       if (data === "/vin" || data.startsWith("/vin ")) {
         if (!vinOnly) await handleConversation(userId, chatId, "/vin");
@@ -1567,6 +1626,7 @@ export function createTelegramBot(
   return Object.assign(bot, {
     clearVinInput(userId: number): void {
       pendingPhotos.delete(userId);
+      cardVinInputs.delete(userId);
       reportContexts.delete(userId);
     },
   });
