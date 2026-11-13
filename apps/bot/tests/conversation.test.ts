@@ -184,13 +184,13 @@ describe("explicit consent and save safety", () => {
     const home = await conversation.handle(1, 1, "/start");
     expect(home.flatMap((reply) => reply.buttons.flat().map(([, action]) => action))).toEqual([
       "/filters",
-      "/search",
-      "/profile",
       "/vin",
       "/sell",
-      "/privacy",
-      "/delete",
+      "/more",
     ]);
+    const more = await conversation.handle(1, 1, button(home, "Ещё"));
+    expect(button(more, "Данные и согласие")).toBe("/privacy");
+    expect(button(more, "Удалить данные")).toBe("/delete");
     const labels = home.flatMap((reply) => reply.buttons.flat().map(([label]) => label));
     expect(labels.some((label) => label.includes("Рынок"))).toBe(false);
     expect(labels.some((label) => label.includes("импорт"))).toBe(false);
@@ -337,6 +337,10 @@ describe("search and safe rendering", () => {
     const results = await conversation.handle(1, 1, "/search");
     expect(rendered(results)).toContain("Автомобиль 1 из 2");
     expect(results.flatMap((reply) => reply.listingId ?? [])).toEqual(["mashina"]);
+    expect(results.flatMap((reply) => reply.buttons.flat().map(([, action]) => action))).toEqual([
+      expect.stringMatching(/^page:/),
+      "/filters",
+    ]);
     const next = await conversation.handle(1, 1, button(results, "Следующий"));
     expect(next.flatMap((reply) => reply.listingId ?? [])).toEqual(["lalafo"]);
   });
