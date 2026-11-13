@@ -59,12 +59,8 @@ type Draft = Record<string, unknown>;
 export const FILTERS_ACTION = "/filters";
 const START_BUTTONS: Buttons = [
   [["Настроить поиск", FILTERS_ACTION]],
-  [["Найти автомобили", "/search"]],
-  [["Мои условия", "/profile"]],
-  [["Проверить VIN", "/vin"]],
-  [["Продать / обменять авто на недвижимость", "/sell"]],
-  [["Данные и согласие", "/privacy"]],
-  [["Удалить данные", "/delete"]],
+  [["Проверить VIN", "/vin"], ["Продать / обменять авто", "/sell"]],
+  [["Ещё", "/more"]],
 ];
 const USE_CASE_TIPS: Record<string, string> = {
   city: "Для городских поездок проверьте реальные габариты парковки и расход в пробках.",
@@ -154,15 +150,9 @@ export function menu(profile: Profile): Buttons {
     ? ["Приостановить", `monitor:${profile.revision}:off`]
     : ["Включить мониторинг", `monitor:${profile.revision}:on`];
   return [
-    [["Найти автомобили", "/search"]],
-    [["Настроить поиск", FILTERS_ACTION]],
+    [["Найти автомобили", "/search"], ["Настроить поиск", FILTERS_ACTION]],
     [monitor],
-    [
-      ["Мои условия", "/profile"],
-      ["Советы", "/tips"],
-    ],
-    [["Данные и согласие", "/privacy"]],
-    [["Другие цели", "/start"]],
+    [["Ещё", "/more"]],
   ];
 }
 export function listingText(listing: Listing, currency: string): string {
@@ -470,7 +460,7 @@ export class Conversation {
     return listingReplies(
       listing,
       profile.currency,
-      [...(navigation.length ? [navigation] : []), ...menu(profile)],
+      [...(navigation.length ? [navigation] : []), [["Настроить поиск", FILTERS_ACTION]]],
       heading,
     );
   }
@@ -542,8 +532,15 @@ export class Conversation {
       return packReplies(
         "<b>Autodom</b>\nВаш следующий автомобиль — с понятными фактами.\n\nНастройте условия поиска, проверьте VIN или расскажите о своём для продажи и обмена.\n\nПоиск и мониторинг бесплатны. Сохранённые данные остаются на месте.",
         [],
-        START_BUTTONS,
+        profile ? [[["Найти автомобили", "/search"]], ...START_BUTTONS] : START_BUTTONS,
       );
+    }
+    if (command === "/more") {
+      return packReplies("<b>Другие возможности</b>", [], [
+        ...(profile ? [[["Мои условия", "/profile"], ["Советы", "/tips"]] as const] : []),
+        [["Данные и согласие", "/privacy"], ["Удалить данные", "/delete"]],
+        [["Назад", "/start"]],
+      ]);
     }
     if (command === "/vin") {
       this.setGoal(userId, "vin");
