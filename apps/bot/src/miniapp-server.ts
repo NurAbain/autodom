@@ -137,7 +137,10 @@ function validOwnerPhoto(value: string): boolean {
   );
 }
 
-function carView(listing: Listing, currency: string): MiniAppCar {
+function carView(
+  listing: Listing,
+  currency: string,
+): Omit<MiniAppCar, "firstSeen" | "priceHistory" | "estimate" | "duplicates" | "favorite"> {
   const price = listingPrice(listing, currency);
   let priceText = price === null ? "Цена для сравнения недоступна" : money(price, currency);
   if (
@@ -179,6 +182,13 @@ export interface MiniAppServerOptions {
     Store,
     | "getProfile"
     | "getListing"
+    | "listingFirstSeen"
+    | "priceHistory"
+    | "estimatePrice"
+    | "listingDuplicates"
+    | "favoriteState"
+    | "setFavorite"
+    | "favoriteListings"
     | "saveProfile"
     | "countMatches"
     | "countCities"
@@ -259,6 +269,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
   const apiRoutes = [
     "/miniapp/api/config",
     "/miniapp/api/car",
+    "/miniapp/api/favorites",
     "/miniapp/api/filter",
     "/miniapp/api/filter/suggest",
     "/miniapp/api/filter/makes",
@@ -500,6 +511,7 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
         if (
           mode === "vin" &&
           (url.pathname === "/miniapp/api/car" ||
+            url.pathname === "/miniapp/api/favorites" ||
             url.pathname === "/miniapp/api/dialogue" ||
             url.pathname === "/miniapp/api/owner/photos" ||
             url.pathname.startsWith("/miniapp/api/filter"))
@@ -702,6 +714,44 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
             return;
           }
           await handlePaymentRequest(request, response, url, user.id, payments);
+          return;
+        }
+        if (url.pathname === "/miniapp/api/favorites") {
+          if (url.search) throw new RequestError(400, "Недопустимые параметры избранного.");
+          const profile = await options.store.getProfile(user.id);
+          if (!profile || profile.chat_id !== user.id)
+            throw new RequestError(403, "Сначала сохраните поиск в личном чате с ботом.");
+          if (request.method === "GET") {
+            const favorites = await options.store.favoriteListings(user.id);
+            respond(response, 200, {
+              items: favorites.map(({ id, listing }) => ({
+                id,
+                car: listing ? carView(listing, profile.currency) : null,
+              })),
+            });
+            return;
+          }
+          if (request.method !== "POST") {
+            response.setHeader("Allow", "GET, POST");
+            throw new RequestError(405, "Избранное доступно через GET и POST.");
+          }
+          const body = await readFlatJson(request, 1024);
+          if (
+            Object.keys(body).length !== 2 ||
+            typeof body.id !== "string" ||
+            !body.id ||
+            body.id.length > 200 ||
+            /[\p{Cc}]/u.test(body.id) ||
+            typeof body.enabled !== "boolean"
+          )
+            throw new RequestError(400, "Недопустимые параметры избранного.");
+          if (body.enabled) {
+            const listing = await options.store.getListing(body.id, true);
+            if (!listing || !approvedSources().includes(listing.source))
+              throw new RequestError(404, "Объявление недоступно или устарело.");
+          }
+          await options.store.setFavorite(user.id, body.id, body.enabled);
+          respond(response, 200, { favorite: body.enabled });
           return;
         }
         if (url.pathname === "/miniapp/api/owner/photos") {
@@ -980,7 +1030,46 @@ export async function startMiniAppServer(options: MiniAppServerOptions): Promise
           outcome: "success",
           dedupeKey: `miniapp:${randomUUID()}:listing_opened`,
         });
-        respond(response, 200, carView(listing, profile.currency));
+        const [firstSeen, history, estimate, duplicates, favorites] = await Promise.all([
+          options.store.listingFirstSeen(listing.id),
+          options.store.priceHistory(listing.id, 100),
+          options.store.estimatePrice(listing, profile.currency === "USD" ? "USD" : "KGS"),
+          options.store.listingDuplicates(listing),
+          options.store.favoriteState(user.id),
+        ]);
+        respond(response, 200, {
+          ...carView(listing, profile.currency),
+          firstSeen,
+          favorite: favorites.items.some((item) => item.id === listing.id),
+          duplicates: duplicates.map((item) => {
+            const view = carView(item, profile.currency);
+            return { id: view.id, title: view.title, source: view.source, price: view.price };
+          }),
+          estimate: estimate
+            ? {
+                median: money(estimate.medianMinor, estimate.currency),
+                low: money(estimate.lowMinor, estimate.currency),
+                high: money(estimate.highMinor, estimate.currency),
+                sampleSize: estimate.sampleSize,
+                observedAt: estimate.observedAt,
+              }
+            : null,
+          priceHistory: history.map((point) => {
+            const original = point.original_price_minor;
+            const currency = point.original_currency;
+            const converted =
+              profile.currency === "USD" ? point.price_usd_minor : point.price_kgs_minor;
+            return {
+              observedAt: point.observed_at,
+              price:
+                original !== null && original > 0 && ["USD", "KGS", "KRW", "AED"].includes(currency)
+                  ? money(original, currency)
+                  : converted !== null && converted > 0
+                    ? money(converted, profile.currency)
+                    : null,
+            };
+          }),
+        } satisfies MiniAppCar);
       })().catch((error: unknown) => {
         if (response.destroyed || response.headersSent) return;
         if (error instanceof VinRequestError)

@@ -25,6 +25,7 @@ import type {
   MiniAppCar,
   MiniAppChoice,
   MiniAppCityChoice,
+  MiniAppFavorite,
   MiniAppFilterState,
   MiniAppFinikMethods,
   MiniAppSuggestions,
@@ -66,6 +67,7 @@ type View =
   | "vin"
   | "checkout"
   | "filters"
+  | "favorites"
   | "sell"
   | "report-example"
   | "carfax-example"
@@ -564,6 +566,7 @@ function showHome(): void {
       "footnote home-note",
       "Выберите только то, что нужно сейчас. Для проверки VIN не нужна анкета покупателя.",
     ),
+    button("Избранные автомобили", () => navigate("favorites"), "back-link"),
     button("Мои заказы и оплата услуг", () => navigate("orders"), "back-link"),
   );
 }
@@ -2718,6 +2721,167 @@ function vinPanel(car?: MiniAppCar): HTMLElement {
   return panel;
 }
 
+async function showFavorites(): Promise<void> {
+  const main = shell();
+  const started = generation;
+  main.append(
+    element("h1", "", "Избранные автомобили"),
+    element("p", "muted", "Сообщим об изменении цены и если объявление давно не наблюдалось."),
+  );
+  const status = element("p", "footnote");
+  status.setAttribute("role", "status");
+  const list = element("div", "favorites");
+  const comparison = element("div", "comparison");
+  main.append(status, list, comparison);
+  try {
+    const response = await request<{ items: MiniAppFavorite[] }>("/miniapp/api/favorites");
+    if (started !== generation) return;
+    let items = response.items;
+    const selected = new Set<string>();
+    const observedDate = new Intl.DateTimeFormat("ru-RU", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: "Asia/Bishkek",
+    });
+    const details = new Map<string, MiniAppCar>();
+    const render = () => {
+      list.replaceChildren();
+      comparison.replaceChildren();
+      if (!items.length) {
+        list.append(element("p", "muted", "Пока нет сохранённых автомобилей."));
+        return;
+      }
+      for (const item of items) {
+        const panel = element("section", "panel");
+        if (item.car) {
+          const car = item.car;
+          panel.append(
+            element("h2", "", car.title),
+            element("p", "", `${car.price} · ${car.source}`),
+            button("Открыть", () => navigate("car", item.id), "button button-quiet"),
+          );
+          const stale = car.observedAt === null || car.observedAt < Date.now() / 1000 - 48 * 3600;
+          if (stale)
+            panel.append(
+              element(
+                "p",
+                "footnote",
+                "Давно не наблюдали; наличие неизвестно, сравнение недоступно.",
+              ),
+            );
+          const label = element("label", "");
+          const checkbox = element("input", "");
+          checkbox.type = "checkbox";
+          checkbox.checked = selected.has(item.id);
+          checkbox.disabled = stale || (!checkbox.checked && selected.size >= 3);
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) {
+              status.textContent = "";
+              selected.add(item.id);
+              if (!details.has(item.id))
+                void request<MiniAppCar>(`/miniapp/api/car?id=${encodeURIComponent(item.id)}`)
+                  .then((detail) => {
+                    if (started !== generation) return;
+                    details.set(item.id, detail);
+                    render();
+                  })
+                  .catch((error: unknown) => {
+                    if (started !== generation) return;
+                    selected.delete(item.id);
+                    status.textContent = errorText(error);
+                    render();
+                  });
+            } else selected.delete(item.id);
+            render();
+          });
+          label.append(checkbox, document.createTextNode(" Сравнить"));
+          panel.append(label);
+        } else panel.append(element("p", "muted", "Объявление или источник недоступны."));
+        const remove = button(
+          "Убрать",
+          () => {
+            remove.disabled = true;
+            void request("/miniapp/api/favorites", { id: item.id, enabled: false })
+              .then(() => {
+                if (started !== generation) return;
+                items = items.filter((entry) => entry.id !== item.id);
+                selected.delete(item.id);
+                status.textContent = "Убрано из избранного; уведомления отключены.";
+                render();
+              })
+              .catch((error: unknown) => {
+                if (started === generation) {
+                  status.textContent = errorText(error);
+                  remove.disabled = false;
+                }
+              });
+          },
+          "back-link",
+        );
+        panel.append(remove);
+        list.append(panel);
+      }
+      if (selected.size < 2) {
+        comparison.append(
+          element("p", "footnote", "Для сравнения отметьте от двух до трёх автомобилей."),
+        );
+        return;
+      }
+      const cars = items
+        .filter((item) => selected.has(item.id))
+        .map((item) => details.get(item.id));
+      if (cars.some((car) => !car)) {
+        comparison.append(element("p", "footnote", "Загружаем данные для сравнения…"));
+        return;
+      }
+      const compared = cars as MiniAppCar[];
+      const table = element("table", "");
+      const head = element("tr", "");
+      head.append(element("th", "", "Параметр"));
+      for (const car of compared) head.append(element("th", "", car.title));
+      table.append(head);
+      for (const [label, value] of [
+        ["Цена", (car: MiniAppCar) => car.price],
+        ["Год", (car: MiniAppCar) => car.year?.toString() ?? "Не указан"],
+        ["Пробег", (car: MiniAppCar) => car.mileage || "Не указан"],
+        ["Коробка", (car: MiniAppCar) => car.transmission || "Не указана"],
+        ["Кузов", (car: MiniAppCar) => car.bodyType || "Не указан"],
+        ["Город", (car: MiniAppCar) => car.city || "Не указан"],
+        ["VIN", (car: MiniAppCar) => car.vin || "Не указан"],
+        [
+          "История цены: последние наблюдения",
+          (car: MiniAppCar) =>
+            car.priceHistory
+              .slice(-3)
+              .map(
+                (point) =>
+                  `${observedDate.format(new Date(point.observedAt * 1000))} — ${point.price ?? "цена не указана"}`,
+              )
+              .join("; ") || "Нет наблюдений",
+        ],
+      ] as const) {
+        const row = element("tr", "");
+        row.append(element("th", "", label));
+        for (const car of compared) row.append(element("td", "", value(car)));
+        table.append(row);
+      }
+      comparison.append(
+        element("h2", "", "Сравнение"),
+        element("p", "footnote", "Сдвиньте таблицу в сторону, чтобы увидеть все автомобили."),
+        table,
+        element(
+          "p",
+          "footnote",
+          "История показывает даты наших наблюдений; полная доступная история — в карточке.",
+        ),
+      );
+    };
+    render();
+  } catch (error) {
+    if (started === generation) status.textContent = errorText(error);
+  }
+}
+
 function showCar(car: MiniAppCar): void {
   const main = shell();
   const heading = element("section", "car-heading");
@@ -2725,6 +2889,43 @@ function showCar(car: MiniAppCar): void {
     element("p", "eyebrow", car.market),
     element("h1", "", car.title),
     element("p", "price", car.price),
+  );
+  const started = generation;
+  const favoriteStatus = element("p", "footnote");
+  favoriteStatus.setAttribute("role", "status");
+  const favoriteButton = button(
+    car.favorite ? "Убрать из избранного" : "Сохранить и следить",
+    () => {
+      favoriteButton.disabled = true;
+      void request<{ favorite: boolean }>("/miniapp/api/favorites", {
+        id: car.id,
+        enabled: !car.favorite,
+      })
+        .then(({ favorite }) => {
+          if (started !== generation) return;
+          car.favorite = favorite;
+          favoriteButton.textContent = favorite ? "Убрать из избранного" : "Сохранить и следить";
+          favoriteStatus.textContent = favorite
+            ? "Сохранили. Сообщим об изменении цены или если давно не видели объявление."
+            : "Убрано из избранного; уведомления об этом объявлении отключены.";
+        })
+        .catch((error: unknown) => {
+          if (started === generation) favoriteStatus.textContent = errorText(error);
+        })
+        .finally(() => {
+          if (started === generation) favoriteButton.disabled = false;
+        });
+    },
+    "button button-quiet",
+  );
+  heading.append(
+    favoriteButton,
+    element(
+      "p",
+      "footnote",
+      "Сохранение включает уведомления о цене и долгом отсутствии наблюдений, независимо от паузы поиска. Удалите автомобиль из избранного, чтобы отключить их.",
+    ),
+    favoriteStatus,
   );
   main.append(heading, gallery(car.title, car.photoUrls));
   const facts = element("dl", "facts");
@@ -2741,6 +2942,93 @@ function showCar(car: MiniAppCar): void {
     facts.append(fact);
   }
   main.append(facts);
+  const notes: string[] = [];
+  if (!normalizeVin(car.vin ?? "")) notes.push("В объявлении нет корректного VIN.");
+  if (!car.mileage) notes.push("Пробег не указан.");
+  if (car.year === null) notes.push("Год выпуска не указан.");
+  const observedPrices = car.priceHistory
+    .map((point) => point.price)
+    .filter((price) => price !== null);
+  if (new Set(observedPrices).size > 1) notes.push("Цена менялась в период наших наблюдений.");
+  if (notes.length) {
+    const notice = element("section", "panel");
+    notice.append(element("h2", "", "Обратите внимание"));
+    const list = element("ul", "");
+    for (const note of notes) list.append(element("li", "", note));
+    notice.append(list, element("p", "footnote", "Это не вывод о состоянии автомобиля."));
+    main.append(notice);
+  }
+  const observedDate = new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Asia/Bishkek",
+  });
+  const estimate = element("section", "panel");
+  estimate.append(element("h2", "", "Ориентир цены"));
+  if (car.estimate) {
+    estimate.append(
+      element("p", "price", car.estimate.median),
+      element(
+        "p",
+        "muted",
+        `Половина сопоставимых объявлений: ${car.estimate.low} – ${car.estimate.high}. Аналогов: ${car.estimate.sampleSize}.`,
+      ),
+      element(
+        "p",
+        "footnote",
+        `По свежим ценам предложений в нашем каталоге на ${observedDate.format(new Date(car.estimate.observedAt * 1000))} (Бишкек), не по сделкам. Состояние автомобиля не проверено.`,
+      ),
+    );
+  } else {
+    estimate.append(element("p", "muted", "Недостаточно сопоставимых объявлений для оценки."));
+  }
+  main.append(estimate);
+  const history = element("details", "panel disclosure");
+  history.append(
+    element("summary", "", "История цены"),
+    element(
+      "p",
+      "footnote",
+      "Даты наших наблюдений, не обязательно даты изменения цены на площадке. Показаны последние 100 записей.",
+    ),
+  );
+  if (car.priceHistory.length) {
+    const list = element("ol", "price-history");
+    for (const point of car.priceHistory) {
+      list.append(
+        element(
+          "li",
+          "",
+          `${observedDate.format(new Date(point.observedAt * 1000))} — ${point.price ?? "цена не указана"}`,
+        ),
+      );
+    }
+    history.append(list);
+  } else {
+    history.append(element("p", "muted", "Наблюдений цены пока нет."));
+  }
+  main.append(history);
+  if (car.duplicates.length) {
+    const duplicates = element("details", "panel disclosure");
+    duplicates.append(
+      element("summary", "", `Другие объявления с таким VIN (${car.duplicates.length})`),
+      element(
+        "p",
+        "footnote",
+        "VIN совпадает по данным объявлений, но это не подтверждает их принадлежность одному автомобилю.",
+      ),
+    );
+    for (const duplicate of car.duplicates) {
+      duplicates.append(
+        button(
+          `${duplicate.title} · ${duplicate.source} · ${duplicate.price}`,
+          () => navigate("car", duplicate.id),
+          "button button-quiet",
+        ),
+      );
+    }
+    main.append(duplicates);
+  }
   const vinHost = element("div", "vin-entry");
   vinHost.append(
     button("Проверить VIN", () => {
@@ -2764,11 +3052,19 @@ function showCar(car: MiniAppCar): void {
           timeStyle: "short",
           timeZone: "Asia/Bishkek",
         }).format(new Date(car.observedAt * 1000))} (Бишкек, UTC+6).`;
+  const daysSeen =
+    car.firstSeen === null
+      ? 0
+      : Math.max(0, Math.floor((Date.now() / 1000 - car.firstSeen) / 86400));
+  const firstSeen =
+    car.firstSeen === null
+      ? ""
+      : ` В каталоге наблюдаем ${daysSeen ? `${daysSeen} ${plural(daysSeen, "день", "дня", "дней")}` : "менее суток"}: с ${observedDate.format(new Date(car.firstSeen * 1000))} (Бишкек, UTC+6); это не дата публикации.`;
   main.append(
     element(
       "p",
       "footnote",
-      `${observed} Данные не проверены независимо. Цену и наличие подтвердите у продавца.`,
+      `${observed}${firstSeen} Данные не проверены независимо. Цену и наличие подтвердите у продавца.`,
     ),
   );
 }
@@ -3362,6 +3658,7 @@ async function load(): Promise<void> {
     view === "checkout" ||
     view === "carfax-example" ||
     view === "filters" ||
+    view === "favorites" ||
     view === "sell" ||
     view === "report-example" ||
     view === "orders" ||
@@ -3418,6 +3715,10 @@ async function load(): Promise<void> {
   }
   if (currentView === "filters") {
     await showFilters();
+    return;
+  }
+  if (currentView === "favorites") {
+    await showFavorites();
     return;
   }
   if (currentView === "sell") {
