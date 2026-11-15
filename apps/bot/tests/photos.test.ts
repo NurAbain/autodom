@@ -2,6 +2,7 @@ import { makeListing } from "@autodom/core";
 import { Bot } from "grammy";
 import { describe, expect, it } from "vitest";
 import type { Reply } from "../src/conversation.js";
+import { SELL_ACTION } from "../src/conversation.js";
 import { listingPhotoUrls } from "../src/media.js";
 import { sendReplies } from "../src/telegram.js";
 
@@ -161,6 +162,20 @@ describe("Telegram listing delivery", () => {
         [{ callback_data: "page:123:1" }],
         [{ web_app: { url: "https://cars.example/miniapp/?car=car%3Aone" } }],
       ],
+    });
+  });
+
+  it("opens the owner card editor in the Mini App instead of a dead chat callback", async () => {
+    const { bot, delivered } = transport();
+    await sendReplies(
+      bot,
+      1,
+      [{ text: "Своё авто", buttons: [[["Продать / обменять авто", SELL_ACTION]]] }],
+      { miniAppUrl: "https://cars.example/miniapp/" },
+    );
+    expect(delivered.map((item) => item.method)).toEqual(["sendMessage"]);
+    expect(delivered[0]?.payload.reply_markup).toMatchObject({
+      inline_keyboard: [[{ web_app: { url: "https://cars.example/miniapp/?view=sell" } }]],
     });
   });
 

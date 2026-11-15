@@ -41,6 +41,7 @@ import {
   listingReplies,
   packReplies,
   type Reply,
+  SELL_ACTION,
 } from "./conversation.js";
 import { escapeHtml } from "./html.js";
 import { KOREAN_REPORT_EXAMPLE_PDF } from "./korean-report-example.js";
@@ -75,13 +76,15 @@ function replyKeyboard(
   detailUrl?: string,
   detailLabel = "Подробнее об автомобиле и VIN",
   filtersUrl?: string,
+  sellUrl?: string,
 ): InlineKeyboard {
   const keyboard = new InlineKeyboard();
   for (const [index, row] of buttons.entries()) {
     if (index) keyboard.row();
     for (const [label, action] of row) {
-      // The conditions live in the Mini App; the chat button opens the editor.
+      // Conditions and the owner card live in the Mini App; the chat opens them.
       if (action === FILTERS_ACTION && filtersUrl) keyboard.webApp(label, filtersUrl);
+      else if (action === SELL_ACTION && sellUrl) keyboard.webApp(label, sellUrl);
       else keyboard.text(label, action);
     }
   }
@@ -133,6 +136,7 @@ export async function sendReplies(
     const filtersUrl = options.miniAppUrl
       ? new URL("?view=filters", options.miniAppUrl).href
       : undefined;
+    const sellUrl = options.miniAppUrl ? new URL("?view=sell", options.miniAppUrl).href : undefined;
     const keyboard =
       options.fallbackReplyMarkup ??
       replyKeyboard(
@@ -144,6 +148,7 @@ export async function sendReplies(
             : "Открыть в приложении"
           : undefined,
         filtersUrl,
+        sellUrl,
       );
     const hasKeyboard =
       options.fallbackReplyMarkup !== undefined ||
@@ -1663,7 +1668,7 @@ export async function configureTelegramBot(
           ]
         : [
             { command: "start", description: "Выбрать цель: VIN, продажа/обмен или покупка" },
-            { command: "sell", description: "Продать авто или обменять на недвижимость" },
+            { command: "sell", description: "Карточка своего авто — в приложении" },
             { command: "search", description: "Найти варианты по моему бюджету" },
             { command: "profile", description: "Мой бюджет и пожелания" },
             { command: "edit", description: "Изменить поиск" },

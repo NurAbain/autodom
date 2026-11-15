@@ -12,7 +12,9 @@ import {
   listingText,
   packReplies,
   type Reply,
+  SELL_ACTION,
 } from "../src/conversation.js";
+import { SellerConversation } from "../src/seller-conversation.js";
 import {
   configureTelegramBot,
   createTelegramBot,
@@ -217,6 +219,22 @@ describe("explicit consent and save safety", () => {
     const replay = await conversation.handle(1, 1, token);
     expect(rendered(replay)).toContain("Согласие не принято");
     expect(await store.getProfile(1)).toBeNull();
+  });
+
+  it("keeps publishing in the Mini App and never starts the card flow in the chat", async () => {
+    const seller = new SellerConversation({
+      getOwnerVehicle: async () => null,
+      saveOwnerVehicle: async (card) => card,
+      deleteOwnerVehicle: async () => {},
+      estimateOwnerPrice: async () => null,
+    });
+    const shared = new Conversation(store, { seller });
+    const chat = await shared.handle(1, 1, SELL_ACTION);
+    expect(chat[0]?.miniAppView).toBe("sell");
+    expect(chat[0]?.buttons.flat().map(([label]) => label)).not.toContain("Согласен — продолжить");
+    expect(await store.getDraft(1)).toBeNull();
+    const app = await shared.handle(1, 1, SELL_ACTION, "miniapp");
+    expect(app[0]?.buttons.flat().map(([label]) => label)).toContain("Согласен — продолжить");
   });
 
   it("keeps the buyer goal independent from the VIN and seller goals", async () => {
