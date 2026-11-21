@@ -334,6 +334,55 @@ function button(text: string, action: () => void, className = "button"): HTMLBut
   return node;
 }
 
+function iconSpan(symbol: string): HTMLSpanElement {
+  const node = element("span", "button-icon", symbol);
+  node.setAttribute("aria-hidden", "true");
+  return node;
+}
+
+function actionIcon(label: string): string {
+  if (label === "Сохранить карточку") return "✅";
+  if (label === "Оценить цену") return "📊";
+  if (label === "Текст для объявления") return "📝";
+  if (label.startsWith("Удалить карточку") || label === "Да, удалить карточку") return "🗑️";
+  if (label === "Нет, оставить") return "↩️";
+  if (label === "Отмена" || label === "Закрыть") return "✖️";
+  if (label.startsWith("Назад")) return "↩️";
+  if (label.startsWith("Пока не знаю")) return "⏭️";
+  if (label === "Продолжить") return "→";
+  if (label === "Сохранить фотографии") return "📷";
+  if (label === "Согласен — продолжить") return "✅";
+  if (label === "Продать автомобиль") return "🚗";
+  if (label === "Обменять авто на недвижимость") return "🏠";
+  if (label === "Авто как первоначальный взнос") return "💰";
+  if (label.startsWith("Изменить: ")) {
+    const field = label.slice("Изменить: ".length);
+    if (field === "Цель") return "🎯";
+    if (field.includes("Автомобиль")) return "🚗";
+    if (field.includes("цен")) return "💰";
+    if (field.includes("Город")) return "🏙️";
+    if (field.includes("Тип")) return "🏠";
+    if (field.includes("Доплата")) return "💵";
+    if (field.includes("Платёж")) return "📅";
+    return "✏️";
+  }
+  return "";
+}
+
+function buttonWithIcon(
+  label: string,
+  action: () => void,
+  className = "button button-quiet",
+): HTMLButtonElement {
+  const node = button("", action, className);
+  const symbol = actionIcon(label);
+  if (symbol) node.append(iconSpan(symbol));
+  const visible = label.startsWith("Изменить: ") ? label.slice("Изменить: ".length) : label;
+  node.append(element("span", "button-label", visible));
+  node.dataset.focusLabel = label.replace(/^✓\s*/u, "");
+  return node;
+}
+
 /** A choice button: the name stays on one line, the count of ads sits on the right. */
 function choiceButton(label: string, matches: number, action: () => void): HTMLButtonElement {
   const node = element("button", "button filter-choice");
@@ -1753,7 +1802,37 @@ function showDialogue(view: "sell"): void {
   input.required = true;
   const submit = element("button", "button", "Отправить");
   submit.type = "submit";
-  form.append(label, input, submit);
+  let moneyCurrency: "USD" | "KGS" | null = null;
+  const currencyRow = element("div", "currency-toggle");
+  currencyRow.hidden = true;
+  currencyRow.setAttribute("role", "group");
+  currencyRow.setAttribute("aria-label", "Валюта");
+  const currencyButtons = new Map<"USD" | "KGS", HTMLButtonElement>();
+  const setMoneyCurrency = (currency: "USD" | "KGS"): void => {
+    moneyCurrency = currency;
+    for (const [value, control] of currencyButtons) {
+      control.setAttribute("aria-pressed", String(value === currency));
+    }
+  };
+  for (const [value, symbol, hint] of [
+    ["USD", "$", "USD"],
+    ["KGS", "сом", "KGS"],
+  ] as const) {
+    const control = button(
+      "",
+      () => setMoneyCurrency(value),
+      "button button-quiet currency-choice",
+    );
+    control.append(
+      element("span", "currency-symbol", symbol),
+      element("span", "currency-hint", hint),
+    );
+    control.setAttribute("aria-pressed", "false");
+    control.setAttribute("aria-label", value === "USD" ? "Доллары США" : "Кыргызские сомы");
+    currencyButtons.set(value, control);
+    currencyRow.append(control);
+  }
+  form.append(label, input, currencyRow, submit);
   form.hidden = true;
   const vehicleForm = element("form", "dialogue-form");
   const makeSelect = element("select", "text-input");
@@ -2074,9 +2153,10 @@ function showDialogue(view: "sell"): void {
     }
     if (reply.ownerPhotos) section.append(photoEditor(reply.ownerPhotos));
     const actions = element("div", "dialogue-actions");
-    for (const row of reply.buttons) {
+    const renderRow = (row: readonly (readonly [string, string])[]): void => {
       const group = element("div", "button-row");
       for (const [label, command] of row) {
+        if (label.startsWith("Изменить: ")) continue;
         const url = safeUrl(command);
         let control: HTMLButtonElement | HTMLAnchorElement;
         if (command === "vin-report-example") {
@@ -2085,15 +2165,48 @@ function showDialogue(view: "sell"): void {
           control = sourceLink(url, label);
           control.className = "button button-quiet";
         } else {
-          control = button(label, () => runAction(command), "button button-quiet");
+          const primary = label === "Сохранить карточку";
+          const danger = label.startsWith("Удалить") || label === "Да, удалить карточку";
+          const className = primary
+            ? "button dialogue-primary button-with-icon"
+            : danger
+              ? "button button-quiet dialogue-danger button-with-icon"
+              : "button button-quiet button-with-icon";
+          control = buttonWithIcon(label, () => runAction(command), className);
           if (/^seller:[^:]+:city\.\d+$/u.test(command)) {
             control.setAttribute("aria-pressed", String(label.startsWith("✓ ")));
           }
         }
-        control.dataset.focusLabel = label.replace(/^✓\s*/, "");
+        control.dataset.focusLabel = label.replace(/^✓\s*/u, "");
         group.append(control);
       }
       if (group.childElementCount) actions.append(group);
+    };
+    let editGroupRendered = false;
+    for (const row of reply.buttons) {
+      if (row.length === 1 && row[0]![0].startsWith("Изменить: ")) {
+        if (!editGroupRendered) {
+          const editGroup = element("div", "dialogue-edit");
+          editGroup.append(element("p", "dialogue-section-title", "Изменить данные"));
+          const grid = element("div", "dialogue-edit-grid");
+          for (const editRow of reply.buttons) {
+            if (!(editRow.length === 1 && editRow[0]![0].startsWith("Изменить: "))) continue;
+            const [label, command] = editRow[0]!;
+            grid.append(
+              buttonWithIcon(
+                label,
+                () => runAction(command),
+                "button button-quiet dialogue-edit-button",
+              ),
+            );
+          }
+          editGroup.append(grid);
+          actions.append(editGroup);
+          editGroupRendered = true;
+        }
+        continue;
+      }
+      renderRow(row);
     }
     section.append(actions);
     return section;
@@ -2108,8 +2221,9 @@ function showDialogue(view: "sell"): void {
       vehicleForm.remove();
       return;
     }
+    const money = reply.input?.money;
     const context = reply.input ? JSON.stringify(reply.input) : "";
-    if (!context || context !== inputContext) input.value = "";
+    if (!context || context !== inputContext) input.value = money?.value ?? "";
     inputContext = context;
     vehicleForm.hidden = !reply.input?.vehicle;
     if (reply.input?.vehicle) {
@@ -2120,12 +2234,26 @@ function showDialogue(view: "sell"): void {
     }
     vehicleForm.remove();
     form.hidden = !reply.input;
-    label.textContent = reply.input?.label ?? "Ваш ответ";
+    form.classList.toggle("money-form", Boolean(money));
+    currencyRow.hidden = !money;
+    if (money) setMoneyCurrency(money.currency);
+    else moneyCurrency = null;
+    const fieldLabel = reply.input?.label ?? "Ваш ответ";
+    const fieldIcon = money
+      ? fieldLabel.includes("Доплата")
+        ? "💵"
+        : fieldLabel.includes("Платёж")
+          ? "📅"
+          : "💰"
+      : undefined;
+    label.replaceChildren();
+    if (fieldIcon) label.append(iconSpan(fieldIcon));
+    label.append(document.createTextNode(fieldLabel));
     input.placeholder = reply.input?.placeholder ?? "Напишите ответ…";
     input.type = "text";
-    input.inputMode = reply.input?.mode ?? "text";
-    input.enterKeyHint = "send";
-    input.spellcheck = input.inputMode === "text";
+    input.inputMode = money ? "decimal" : (reply.input?.mode ?? "text");
+    input.enterKeyHint = money ? "done" : "send";
+    input.spellcheck = !money && input.inputMode === "text";
     submit.textContent = reply.input ? "Применить" : "Отправить";
     section.insertBefore(form, section.querySelector(".dialogue-actions"));
   }
@@ -2219,6 +2347,16 @@ function showDialogue(view: "sell"): void {
   }
   form.addEventListener("submit", (event) => {
     event.preventDefault();
+    if (moneyCurrency) {
+      const amount = input.value.trim().replaceAll(/\s/gu, "").replace(",", ".");
+      if (!/^\d+(?:\.\d{1,2})?$/u.test(amount)) {
+        status.textContent = "Введите сумму числом, например 20 000.";
+        input.focus();
+        return;
+      }
+      void send(`${amount} ${moneyCurrency}`);
+      return;
+    }
     runAction(input.value.trim());
   });
   void send("/sell");

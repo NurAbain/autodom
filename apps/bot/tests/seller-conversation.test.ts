@@ -33,6 +33,7 @@ describe("seller vehicle flow", () => {
       expect(replies[0]!.input?.vehicle).toBe(true);
       replies = (await flow.handle(1, 1, "Toyota Camry, 2018, 120000, sedan, automatic"))!;
       expect(replies[0]!.input?.label).toBe("Желаемая цена");
+      expect(replies[0]!.input?.money).toEqual({ currency: "USD", value: "" });
       replies = (await flow.handle(1, 1, "15000 USD"))!;
       expect(replies[0]!.ownerPhotos).toBe("select");
       replies = await choose("continue");
@@ -45,7 +46,9 @@ describe("seller vehicle flow", () => {
         expect(replies[0]!.buttons.flat().map(([label]) => label)).toContain("✓ Ош");
         replies = await choose("city-done");
         replies = await choose("apartment");
+        expect(replies[0]!.input?.money).toEqual({ currency: "USD", value: "" });
         replies = await choose("skip");
+        expect(replies[0]!.input?.money).toEqual({ currency: "KGS", value: "" });
         replies = await choose("skip");
       }
       replies = await choose("save");
@@ -57,6 +60,10 @@ describe("seller vehicle flow", () => {
         transmission: "automatic",
       });
       expect(replies[0]!.ownerPhotos).toBe("saved");
+      replies = await choose("edit.price");
+      expect(replies[0]!.input?.money).toEqual({ currency: "USD", value: "15000" });
+      replies = await choose("back");
+      expect(replies[0]!.text).toContain("Проверьте перед сохранением");
       if (purpose === "property") {
         expect(saved!.property_city).toBe("Бишкек, Ош");
         replies = await choose("edit.city");

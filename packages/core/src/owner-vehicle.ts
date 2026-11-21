@@ -101,9 +101,9 @@ export function validateOwnerVehicle(card: OwnerVehicle): OwnerVehicle {
 }
 
 export function ownerMoney(amount: number | null, currency: OwnerCurrency | null): string {
-  return amount === null || currency === null
-    ? "не указано"
-    : `${(amount / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${currency}`;
+  if (amount === null || currency === null) return "не указано";
+  const suffix = currency === "KGS" ? "сом" : "USD";
+  return `${(amount / 100).toLocaleString("ru-RU", { maximumFractionDigits: 2 })} ${suffix}`;
 }
 
 /** Plain text assembled only from the owner's statements, not a valuation or verified inspection. */

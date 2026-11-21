@@ -1790,6 +1790,21 @@ describe("grammY transport boundaries", () => {
       calls.some((call) => ["deleteWebhook", "setWebhook", "setMyCommands"].includes(call.method)),
     ).toBe(false);
   });
+  it("registers only the main commands in both bot modes", async () => {
+    const full = telegram();
+    await configureTelegramBot(full.bot, new AbortController().signal, { mode: "full" });
+    const fullCommands = full.calls.find((call) => call.method === "setMyCommands");
+    expect(
+      (fullCommands!.payload.commands as { command: string }[]).map((item) => item.command),
+    ).toEqual(["start", "search", "filters", "vin", "sell", "orders", "help"]);
+
+    const vin = telegram();
+    await configureTelegramBot(vin.bot, new AbortController().signal, { mode: "vin" });
+    const vinCommands = vin.calls.find((call) => call.method === "setMyCommands");
+    expect(
+      (vinCommands!.payload.commands as { command: string }[]).map((item) => item.command),
+    ).toEqual(["start", "vin", "orders", "paysupport", "help"]);
+  });
   it("ignores group messages and rejects foreign callbacks without disclosing a profile", async () => {
     const { bot, calls } = telegram();
     await bot.init();
