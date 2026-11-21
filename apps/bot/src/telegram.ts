@@ -1670,7 +1670,9 @@ export async function configureTelegramBot(
             { command: "sell", description: "Продать или обменять авто" },
             {
               command: "orders",
-              description: options.reportBotUrl ? "Заказы и PDF — @autokgbot" : "Мои заказы и оплата",
+              description: options.reportBotUrl
+                ? "Заказы и PDF — @autokgbot"
+                : "Мои заказы и оплата",
             },
             { command: "help", description: "Помощь" },
           ],
