@@ -31,8 +31,17 @@ webhook-запрос от GitHub до него не доходит. Поэтом
   каждые две минуты опрашивает `git ls-remote` по ветке `main`;
 - при изменении ветки коммит закрепляется за приложением (`git_commit_sha`) и запускается
   деплой в Coolify;
+- деплои выполняются по одному: watcher запускает приложение, ждёт терминального статуса
+  и только затем переходит к следующему. Параллельный запуск запрещён файловым lock
+  `/var/lock/autodom-deploy-watch.lock`, иначе пять сборок одновременно перегружают
+  сеть и npm registry;
+- упавший деплой повторяется через `DEPLOY_RETRY_COOLDOWN` (по умолчанию 3600 секунд);
+  состояние хранится в `/var/lib/autodom/deploy-watch.state`, чтобы после падения или
+  перезапуска не закреплять коммит навсегда;
 - конфигурация: `/etc/autodom/deploy.env` (токен Coolify, root-only) и
-  `/etc/autodom/deploy-apps` (список `uuid ветка`).
+  `/etc/autodom/deploy-apps` (список `uuid ветка`). Дополнительно можно задать
+  `DEPLOY_POLL_INTERVAL`, `DEPLOY_WAIT_TIMEOUT`, `DEPLOY_RETRY_COOLDOWN`,
+  `DEPLOY_LOCK_FILE`, `DEPLOY_STATE_FILE`.
 
 Ручной деплой одной ветки (когда нужно не дожидаться двух минут):
 
