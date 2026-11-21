@@ -108,11 +108,32 @@ function money(
 }
 
 function summary(card: OwnerVehicle): string {
+  const description = ownerSaleDescription(card)
+    .split("\n")
+    .map((line) =>
+      line.startsWith("Желаемая цена:") ? `💰 ${escapeHtml(line)}` : escapeHtml(line),
+    )
+    .join("\n");
+  const exchange = ownerExchangeSummary(card)
+    .split("\n")
+    .map((line) => {
+      const icon = line.startsWith("Цель:")
+        ? "🎯 "
+        : line.startsWith("Город:")
+          ? "🏙️ "
+          : line.startsWith("Доплата")
+            ? "💵 "
+            : line.startsWith("Бюджет")
+              ? "📅 "
+              : "";
+      return icon + escapeHtml(line);
+    })
+    .join("\n");
   return (
-    `<b>Ваш автомобиль</b>\n${escapeHtml(ownerSaleDescription(card))}\n` +
-    (card.mileage_km === null ? "Пробег: не указан.\n" : "") +
-    (card.sale_price_minor === null ? "Желаемая цена: пока не определена.\n" : "") +
-    `\n${escapeHtml(ownerExchangeSummary(card))}\n\nДанные со слов владельца; автомобиль не проверен, рыночная оценка не рассчитана.`
+    `<b>🚗 Ваш автомобиль</b>\n${description}\n` +
+    (card.mileage_km === null ? "🛣️ Пробег: не указан.\n" : "") +
+    (card.sale_price_minor === null ? "💰 Желаемая цена: пока не определена.\n" : "") +
+    `\n${exchange}\n\n⚠️ Данные со слов владельца; автомобиль не проверен, рыночная оценка не рассчитана.`
   );
 }
 
@@ -191,7 +212,7 @@ export class SellerConversation {
         break;
       case "price":
         text =
-          "За сколько хотели бы продать авто? Укажите сумму и валюту: <b>15000 USD</b> или <b>1300000 KGS</b>. Это ваше пожелание, не оценка автомобиля.\nЕсли цены пока нет, нажмите «Пока не знаю».";
+          "За сколько хотели бы продать авто? Укажите сумму и выберите валюту — <b>USD</b> или <b>сом</b>. Это ваше пожелание, не оценка автомобиля.\nЕсли цены пока нет, нажмите «Пока не знаю».";
         buttons = [[choice("Пока не знаю", "skip")]];
         break;
       case "photos":
@@ -233,12 +254,12 @@ export class SellerConversation {
         break;
       case "cash":
         text =
-          "Сколько готовы доплатить сейчас? Сумма с валютой, например <b>5000 USD</b>. Если без доплаты: <b>0 KGS</b>. Неизвестная сумма не равна нулю.";
+          "Сколько готовы доплатить сейчас? Укажите сумму и выберите валюту — <b>USD</b> или <b>сом</b>. Если без доплаты: <b>0</b>. Неизвестная сумма не равна нулю.";
         buttons = [[choice("Пока не знаю / пропустить", "skip")]];
         break;
       case "monthly":
         text =
-          "Какой будущий платёж в месяц вам подходит? Сумма с валютой, например <b>30000 KGS</b>. Если без будущих платежей: <b>0 KGS</b>. Это пожелание, не расчёт кредита или рассрочки.";
+          "Какой будущий платёж в месяц вам подходит? Укажите сумму и выберите валюту — <b>USD</b> или <b>сом</b>. Если без будущих платежей: <b>0</b>. Это пожелание, не расчёт кредита или рассрочки.";
         buttons = [[choice("Пока не знаю / пропустить", "skip")]];
         break;
       case "review":
@@ -246,8 +267,8 @@ export class SellerConversation {
         const card = this.candidate(draft);
         text =
           (draft.step === "review"
-            ? "<b>Проверьте перед сохранением</b>\n\n"
-            : "<b>Сохранённая карточка</b>\n\n") + summary(card);
+            ? "<b>📋 Проверьте перед сохранением</b>\n\n"
+            : "<b>✅ Сохранённая карточка</b>\n\n") + summary(card);
         if (draft.step === "review") {
           text +=
             "\n\nСохранить карточку и пожелания на условиях вашего согласия? Старые данные заменятся только после сохранения.";
@@ -278,6 +299,20 @@ export class SellerConversation {
     if (draft.history.length || draft.returnReview)
       buttons = [...buttons, [choice("Назад — без изменения", "back")]];
     buttons = [...buttons, [choice(draft.step === "saved" ? "Закрыть" : "Отмена", "cancel")]];
+    const moneyInput = (
+      label: string,
+      placeholder: string,
+      amount: number | null,
+      currency: OwnerCurrency,
+    ): NonNullable<Reply["input"]> => ({
+      label,
+      placeholder,
+      mode: "decimal",
+      money: {
+        currency,
+        value: amount === null ? "" : String(amount / 100),
+      },
+    });
     const inputs: Partial<Record<Step, NonNullable<Reply["input"]>>> = {
       vehicle: {
         label: "Автомобиль",
@@ -285,9 +320,24 @@ export class SellerConversation {
         mode: "text",
         vehicle: true,
       },
-      price: { label: "Желаемая цена", placeholder: "15000 USD", mode: "text" },
-      cash: { label: "Доплата", placeholder: "5000 USD", mode: "text" },
-      monthly: { label: "Платёж в месяц", placeholder: "30000 KGS", mode: "text" },
+      price: moneyInput(
+        "Желаемая цена",
+        "20 000",
+        draft.data.sale_price_minor ?? null,
+        draft.data.sale_currency ?? "USD",
+      ),
+      cash: moneyInput(
+        "Доплата сейчас",
+        "0",
+        draft.data.cash_minor ?? null,
+        draft.data.cash_currency ?? "USD",
+      ),
+      monthly: moneyInput(
+        "Платёж в месяц",
+        "30 000",
+        draft.data.monthly_minor ?? null,
+        draft.data.monthly_currency ?? "KGS",
+      ),
     };
     const input = inputs[draft.step];
     const ownerPhotos =
@@ -501,7 +551,7 @@ export class SellerConversation {
       if (parsed === undefined || (parsed === null && action !== "skip"))
         return this.prompt(
           draft,
-          "Введите одну сумму и валюту USD или KGS, либо нажмите «Пока не знаю».",
+          "Введите сумму и выберите валюту USD или сом, либо нажмите «Пока не знаю».",
         );
       if (draft.step === "price") {
         draft.data.sale_price_minor = parsed?.amount ?? null;

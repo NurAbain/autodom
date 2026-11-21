@@ -36,6 +36,11 @@ export interface Reply {
     placeholder: string;
     mode: "text" | "numeric" | "decimal";
     vehicle?: boolean;
+    /** Money fields render a numeric field plus a USD/KGS selector. */
+    money?: {
+      currency: "USD" | "KGS";
+      value?: string;
+    };
   };
   ownerPhotos?: "select" | "saved";
 }
@@ -655,7 +660,7 @@ export class Conversation {
     }
     if (command === "/help")
       return packReplies(
-        "/start — цели: покупка, VIN, продажа и обмен\n/vin — бесплатные корейские данные; можно отправить фото VIN\n/sell — карточка своего авто и обмен: только в приложении\n/mycar — сохранённое авто в приложении\n/orders — мои заказы, оплата и поддержка услуг\n/filters — настроить условия поиска в приложении\n/search — подходящие автомобили с фото\n/profile — сохранённые условия и их ограничения\n/buyout — режим скупки\n/favorites — избранное и сравнение\n/resume — включить бесплатный мониторинг поиска\n/pause — остановить уведомления поиска, не избранного\n/quiet HH:MM-HH:MM — тихие часы (Бишкек); /quiet off — отключить\n/privacy — данные и согласие\n/tips — советы\n/status — каталог\n/cancel — отменить текущее действие; сохранённые данные остаются\n/delete — удалить данные с подтверждением\n\nПокупка: условия настраиваются в приложении — автомобиль, бюджет, город и характеристики. Уведомления — только по вашему выбору.",
+        "/start — главное меню\n/search — подходящие автомобили\n/filters — настроить поиск\n/vin — проверить VIN или фото номера\n/sell — продать или обменять авто\n/orders — заказы и оплата\n/help — эта справка\n\nДополнительные действия — в разделе «Ещё» и в приложении.",
         [],
         profile ? menu(profile) : START_BUTTONS,
       );
